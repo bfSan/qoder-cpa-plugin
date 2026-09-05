@@ -414,11 +414,13 @@ const (
 // 对齐反编译的 TraeWork CN 2.3.81345）。
 const ugAppVersion = "2.3.81345"
 
-// ugCheckinReqSources 签到类请求（status/claim）的 req_source 探测序列。
-// v0.12.41 双版官方包反编译交叉实证（out/main.js eb()）：
-//   - TraeCode CN 2.3.79946（09-01 build，deb）：status/claim body 均为 {}。
-//   - TraeWork CN 2.3.81345（09-04 build，exe "TRAE SOLO CN"）：
-//     body = {req_source: Dr(P) ? 2 : 1}，
+// ugCheckinReqSourcesFor 签到类请求（status/claim）的 req_source 探测序列。
+// v0.12.43 起按账号谱系（auth variant → OAuth ClientID）选序，并补入官方
+// 空 body。证据链（两版官方包反编译交叉实证，out/main.js）：
+//   - TraeCode CN 2.3.79946（09-01 build，deb，ClientID ono9krqynydwx5）：
+//     status/claim body 均为 {}（不携带 req_source 字段）。
+//   - TraeWork CN 2.3.81345（09-04 build，exe "TRAE SOLO CN"，ClientID
+//     en1oxy7wnw8j9n）：body = {req_source: Dr(P) ? 2 : 1}，
 //     Dr(P) = Su(P)==SOLO_Lite || packageType==SOLO_CN_ENTERPRISE，
 //     Su(P): packageType∈{SOLO_CN,SOLO_I18N,SOLO_CN_ENTERPRISE}→SOLO_Lite，否则 TRAE。
 //     product.json 实证该包 packageType="SOLO_CN" → Dr=true → 官方 TraeWork/SOLO
@@ -430,14 +432,51 @@ const ugAppVersion = "2.3.81345"
 // TRAE 谱系 token（ClientID=ono9krqynydwx5，constants.go）发 req_source=2 →
 // 请求体与 token 谱系自相矛盾；09-04 上游收紧活动校验后 claim 被通用活动
 // 错误 9074 拒绝（status 只读不受校验，所以 v0.12.40 面板状态可读、claim 被拒）。
-// 策略：req_source=1 优先——与我方 token 谱系一致，且是用户实测可正常签到的
-// Trae CN IDE 契约；9074 回退 req_source=2 一次（覆盖 SOLO 谱系 token 或官方
-// 调整路由）；Bearer 方案保持末位回退（v0.12.38 语义）。
-func ugCheckinReqSources() []string {
+// v0.12.41 修正：req_source=1 优先（TRAE 谱系实测可用契约）+ 9074 回退 2。
+// v0.12.43 补齐：官方 TraeCode CN 的原始契约是空 body {}——此前从未探测，
+// 上游 09-04 收紧后 1/2 均拒的 CN 账号多一条官方同款出路；SOLO 谱系则把
+// 官方同款 2 提到首位，避免跨谱系探测先打空炮。
+//   cn（TRAE 谱系，默认）：1（实测可用）→ {}（官方 TraeCode 原始契约）→ 2（跨谱系末位兑底）
+//   solo（SOLO 谱系）  ：2（官方 TraeWork 同款）→ 1（TraeWork+TRAE 包分支）→ {}（跨谱系末位兑底）
+func ugCheckinReqSourcesFor(variant string) []string {
+        if strings.ToLower(strings.TrimSpace(variant)) == "solo" {
+                return []string{
+                        `{"req_source":2}`,
+                        `{"req_source":1}`,
+                        `{}`,
+                }
+        }
         return []string{
                 `{"req_source":1}`,
+                `{}`,
                 `{"req_source":2}`,
         }
+}
+
+// ugBodyLabel 探测序列的短标签（诊断字符串用）。
+func ugBodyLabel(body string) string {
+        switch body {
+        case `{"req_source":1}`:
+                return "req_source=1"
+        case `{"req_source":2}`:
+                return "req_source=2"
+        case `{}`:
+                return "empty"
+        }
+        return body
+}
+
+// ugProbeDetail v0.12.43: 全组合被拒时追加到错误里的诊断后缀 —— 面板/日志
+// 直接可见试过哪些组合、以什么身份发的请求，用于区分"契约/设备缺失"与
+// "真限流"（此前两者混为一句 9074 文案，掩盖了实现侧线索）。
+func ugProbeDetail(a *auth.Auth, bodies []string) string {
+        labels := make([]string, 0, len(bodies))
+        for _, b := range bodies {
+                labels = append(labels, ugBodyLabel(b))
+        }
+        return fmt.Sprintf("[已按序探测 body=%s × 鉴权=%s 全部被拒; variant=%s device_id_set=%v]",
+                strings.Join(labels, ","), strings.Join(ugCheckinSchemes(), ","),
+                strings.TrimSpace(a.Variant), strings.TrimSpace(a.DeviceID) != "")
 }
 
 // ugCheckinSchemes 返回签到请求的鉴权方案优先级。
@@ -491,8 +530,9 @@ func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (
 }
 
 func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
+        bodies := ugCheckinReqSourcesFor(a.Variant)
         var lastBiz *Error
-        for _, body := range ugCheckinReqSources() {
+        for _, body := range bodies {
                 for _, scheme := range ugCheckinSchemes() {
                         code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinStatus, body, scheme)
                         if err != nil {
@@ -507,12 +547,16 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
                                 resp.ReqSourceUsed = body
                                 return &resp, nil
                         }
-                        log.Printf("checkin status: %s scheme %s -> biz_code=%d msg=%q", body, scheme, code, msg)
+                        log.Printf("checkin status: %s scheme %s -> biz_code=%d msg=%q", ugBodyLabel(body), scheme, code, msg)
                         lastBiz = bizError(code, "获取签到状态失败", msg)
                         if code == 9074 {
                                 break // 活动校验拒绝：换 req_source 再试（v0.12.41），同源换鉴权方案无意义
                         }
                 }
+        }
+        // v0.12.43: 全组合被拒 → 错误里带上探测过的组合与身份，区分契约/设备问题与真限流。
+        if lastBiz != nil {
+                lastBiz.Msg += " " + ugProbeDetail(a, bodies)
         }
         return nil, lastBiz
 }
@@ -543,8 +587,9 @@ type CheckinClaimResult struct {
 }
 
 func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
+        bodies := ugCheckinReqSourcesFor(a.Variant)
         var lastBiz *Error
-        for _, body := range ugCheckinReqSources() {
+        for _, body := range bodies {
                 for _, scheme := range ugCheckinSchemes() {
                         code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, body, scheme)
                         if err != nil {
@@ -560,12 +605,16 @@ func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
                                 resp.ReqSourceUsed = body
                                 return &resp, nil
                         }
-                        log.Printf("checkin claim: %s scheme %s -> biz_code=%d msg=%q", body, scheme, code, msg)
+                        log.Printf("checkin claim: %s scheme %s -> biz_code=%d msg=%q", ugBodyLabel(body), scheme, code, msg)
                         lastBiz = bizError(code, "签到领取失败", msg)
                         if code == 9074 {
                                 break // 活动校验拒绝：换 req_source 再试（v0.12.41），同源换鉴权方案无意义
                         }
                 }
+        }
+        // v0.12.43: 全组合被拒 → 错误里带上探测过的组合与身份，区分契约/设备问题与真限流。
+        if lastBiz != nil {
+                lastBiz.Msg += " " + ugProbeDetail(a, bodies)
         }
         return nil, lastBiz
 }

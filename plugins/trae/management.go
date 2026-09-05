@@ -590,7 +590,13 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 // 透出诊断，别让"签到成功但不到账"隐形。
                 entry["device_id_set"] = strings.TrimSpace(a.DeviceID) != ""
                 if strings.TrimSpace(a.DeviceID) == "" {
-                        log.Printf("checkin %s: WARNING auth has no deviceId — claim may be silently dropped (x-device-id missing)", sa.Account.UID)
+                        // v0.12.43: 从"告警后硬签"改为硬性拦截 —— 官方 claim 要求
+                        // x-device-id（FINDINGS §四/§五：缺失时服务端可能 code=0 但
+                        // 静默不入账），硬签只会产生"成功但不到账"的假结果。给出
+                        // 可行动的修复路径；账号仍在面板展示，重新登录即可补齐。
+                        entry["error"] = "缺少 deviceId：官方 claim 要求 x-device-id（真实绑定 did），凭证缺设备身份，硬签可能成功但不入账 —— 请用插件 OAuth 重新登录该账号补齐后再签"
+                        results = append(results, entry)
+                        continue
                 }
                 // v0.12.38: 签到前保鲜。宿主对 trae 无主动刷新调度（无 RefreshLead/
                 // refresh_interval 元数据，CLIProxyAPI auto_refresh_loop 只调度内置

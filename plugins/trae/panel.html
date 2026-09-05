@@ -745,12 +745,11 @@ function renderSummary(accounts){
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
   if(res.error){
-    // v0.12.41: 9074 根因修正——req_source 是客户端产品谱系（1=TRAE IDE、
-    // 2=SOLO/TraeWork），必须与 token 的 OAuth appId 谱系一致；v0.12.40 对
-    // TRAE 谱系 token 发 2 被拒。已改为 req_source 1→2 双探测；若两个源仍
-    // 均 9074，则为官方活动侧限制，插件每日 0 点起自动密集重试。
+    // v0.12.41/43: 9074 = 官方活动校验拒绝。req_source 按账号谱系选择
+    // （cn: 1→官方空 body→2；solo: 2→1→空 body），全组合被拒才进退避；
+    // 错误尾部的 [已按序探测…variant/device_id_set] 可区分设备缺失与真限流。
     if(/9074|参与用户太多/.test(res.error)){
-      toast(name+"：签到被官方拒绝","warn",res.error+" —— 与余额无关；v0.12.41 已按官方客户端契约 req_source 1→2 双探测，若仍被拒为官方活动侧限制，系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
+      toast(name+"：签到被官方拒绝","warn",res.error+" —— 与余额无关；v0.12.43 已按账号谱系探测全部官方契约组合（含官方空 body），全被拒多为官方活动侧限制；系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
     }
     toast(name+"：签到失败","err",res.error);return;
   }
