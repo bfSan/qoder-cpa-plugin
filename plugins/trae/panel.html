@@ -328,7 +328,7 @@ function progressHTML(cr, acct){
     // 模型调用真正扣减的池子；签到奖励（v0.12.40 定案：credits=每日奖励数额，
     // 非钱包）放 meta 单独展示，标注"不叠加"防误读成余额翻倍/显示 bug。
     if(isSoloAcct&&cr.credits_pool_known){
-      const wm=(wallet!=null)?` · 签到奖励 ${wallet} 积分（成功签到可领，不与积分池叠加）`:"";
+      const wm=(wallet!=null)?` · 签到奖励 ${wallet} 积分（签到成功后入池，不计入当前剩余）`:"";
       if(cr.credits_pool_unlimited){
         return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>不限</span></div><div class="pb-track"><div class="pb-bar" style="width:100%;background:var(--ok)"></div></div><div class="pb-meta">积分池不限量${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
       }
@@ -338,7 +338,7 @@ function progressHTML(cr, acct){
     }
     if(isSoloAcct&&wallet!=null){
       let color=wallet>0?'var(--ok)':'var(--err)';
-      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">签到奖励 ${wallet} 积分（成功签到可领，模型调用扣积分池） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">签到奖励 ${wallet} 积分（签到成功后入池，模型调用扣积分池） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
     }
     // 快通道 0/月是噪音：只在有量时展示（对齐上游 >0 分支）。
     const extras=(fpm!=null&&fpm>0?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
@@ -419,7 +419,7 @@ function card(a){
        // checkin_credits/status。v0.12.40 语义修正（反编译官方 TraeWork 定案）：
        // credits = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），
        // 非钱包/可花余额；模型调用扣的是上方积分池，不扣这个。
-       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到奖励</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
+       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到奖励</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":" · 签到成功后入池"}</span></div>`:""));
   return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -685,14 +685,20 @@ async function load(force, btn){
 function creditOf(a){
   const cr=a&&a.credits;
   const ci=(a&&a.checkin)||{};
-  const wallet=(ci.credits!=null)?Number(ci.credits)||0:null;
-  if(!cr && wallet==null) return {remain:0, known:false};
+  // v0.12.42: checkin.credits 是"每日签到奖励数额"（官方卡片 Daily check-in，
+  // 如 150），不是可花余额 —— 奖励在签到成功后才并入积分池。因此奖励数额
+  // 永不计入"总剩余"（真实可花 = 套餐剩余 + 积分池），只作为"待领奖励"
+  // （今日未签时可领的数额）单独返回，修复汇总 349+150=499 的虚高。
+  const reward=(ci.credits!=null)?Number(ci.credits)||0:null;
+  const bonus=(reward!=null&&!ci.checked_in)?reward:0;
+  if(!cr && reward==null) return {remain:0, bonus:0, known:false};
   // v0.12.28: usage-model aware — unknown remain（remain_known=false）不计入汇总
-  // 而不是当作 0（否则纯签到账号会被误判“耗尽”）。
+  // 而不是当作 0（避免无证据时误判"耗尽"）。
   const knownRemain=!!cr && cr.total_remain!=null && cr.remain_known!==false;
   let pack=knownRemain?(Number(cr.total_remain)||0):0;
   const packKnown=knownRemain&&Number(cr.total_remain)>=0;
-  let known=(packKnown&&cr.usage_model!="unknown")||wallet!=null;
+  // v0.12.42: known 不再因奖励数额存在而成立（奖励 ≠ 可花余额）。
+  let known=packKnown&&cr.usage_model!="unknown";
   // v0.12.34: SOLO 积分池（官方口径）——模型 unknown 时的真实剩余计入汇总。
   let unlimited=false;
   if(cr&&cr.credits_pool_known){
@@ -700,17 +706,19 @@ function creditOf(a){
     if(cr.credits_pool_unlimited) unlimited=true;
     else pack+=(Number(cr.credits_pool_remain)||0);
   }
-  return {remain:pack+(wallet||0), known:known, unlimited:unlimited};
+  return {remain:pack, bonus:bonus, known:known, unlimited:unlimited};
 }
 function renderSummary(accounts){
   const box=document.getElementById("summaryBox");
   if(!box) return;
   const all=accounts||[];
   if(!all.length){ box.style.display="none"; box.innerHTML=""; return; }
-  let remain=0, knownN=0, disabledN=0, exhaustedN=0, coolingN=0, checkedN=0, unl=false;
+  let remain=0, bonusTotal=0, knownN=0, disabledN=0, exhaustedN=0, coolingN=0, checkedN=0, unl=false;
   all.forEach(a=>{
     const c=creditOf(a);
     if(c.known){ if(c.unlimited){unl=true;} else {remain+=c.remain;} knownN++; }
+    // v0.12.42: 待领奖励 —— 今日未签账号的奖励数额汇总（签到成功后入池）。
+    if(c.bonus) bonusTotal+=c.bonus;
     const pool=poolByUID[a.uid]||{};
     if(a.disabled||pool.disabled) disabledN++;
     if(c.known&&!c.unlimited&&c.remain===0) exhaustedN++;
@@ -724,7 +732,8 @@ function renderSummary(accounts){
       <div class="summary-meta">${all.length} 个账号 · 有积分 ${knownN} · 已签到 ${checkedN} · 冷却 ${coolingN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}</div>
     </div>
     <div class="summary-grid">
-      <div class="summary-item"><div class="k">总剩余积分</div><div class="v ok">${unl?"不限":remain}</div></div>
+      <div class="summary-item"><div class="k">总剩余积分</div><div class="v ok" title="套餐剩余 + 积分池（真实可花），签到奖励数额不计入">${unl?"不限":remain}</div></div>
+      <div class="summary-item"><div class="k">待领奖励</div><div class="v ${bonusTotal?"warn":""}" title="今日未签账号的签到奖励数额（非可花余额），签到成功后入池">${bonusTotal}</div></div>
       <div class="summary-item"><div class="k">账号数</div><div class="v">${all.length}</div></div>
       <div class="summary-item"><div class="k">今日已签</div><div class="v ok">${checkedN}</div></div>
       <div class="summary-item"><div class="k">冷却中</div><div class="v ${coolingN?"warn":""}">${coolingN}</div></div>
@@ -753,7 +762,7 @@ function checkinResultToast(res){
   if(res.claim_code!=null||res.claim_message){
     const parts=[];
     if(res.claim_credits!=null&&res.awarded!=null&&res.claim_credits!==res.awarded) parts.push("响应入账 "+res.claim_credits+" 积分");
-    if(res.awarded!=null) parts.push("本次签到 +"+res.awarded+" 积分");
+    if(res.awarded!=null) parts.push("本次签到 +"+res.awarded+" 积分（已入池）");
     if(res.credits!=null) parts.push("签到奖励 "+res.credits+" 积分");
     // v0.12.32: code=0 但余额未增长 —— 服务端静默拒签（缺 did/风控/官方客户端已代签）。
     if(res.awarded===0){
