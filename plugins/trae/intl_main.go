@@ -694,29 +694,44 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
         a.UID = resolveLoginUID(uid, lc.cbUID, "intl")
         a.Nickname = resolveLoginNickname(nickname, lc.cbNickname)
         a.EnterpriseID = entID
+        // v0.12.44: credential parity extras (platformId/authClientId/exchange
+        // echo/region) — same helper as the CN login; profile raw not available
+        // from the intl client, region fields land only when the exchange echo
+        // carries them (不猜测).
+        authFields := map[string]any{
+                "accessToken":      a.AccessToken,
+                "refreshToken":     a.RefreshToken,
+                "expiresAt":        a.ExpiresAt,
+                "domain":           a.Domain,
+                "apiHost":          a.APIHost,
+                "variant":          "intl",
+                "region":           a.Region,
+                "scope":            a.Scope,
+                "tenant":           a.Tenant,
+                "appLanguage":      a.AppLanguage,
+                "appVersion":       a.AppVersion,
+                "devicePublicKey":  pubKeyPEM,
+                "devicePrivateKey": privKeyPEM,
+        }
+        accountFields := map[string]any{
+                "uid":          a.UID,
+                "enterpriseId": a.EnterpriseID,
+                "nickname":     a.Nickname,
+        }
+        authExtras, accountExtras := credentialParityFields("intl", lc.loginHost, tokenRaw, nil)
+        for k, v := range authExtras {
+                if _, exists := authFields[k]; !exists { // intl 固有字段优先
+                        authFields[k] = v
+                }
+        }
+        for k, v := range accountExtras {
+                accountFields[k] = v
+        }
         storageJSON, _ := json.MarshalIndent(map[string]any{
                 "type":     intlproviderName,
                 "provider": intlproviderName,
-                "auth": map[string]any{
-                        "accessToken":      a.AccessToken,
-                        "refreshToken":     a.RefreshToken,
-                        "expiresAt":        a.ExpiresAt,
-                        "domain":           a.Domain,
-                        "apiHost":          a.APIHost,
-                        "variant":          "intl",
-                        "region":           a.Region,
-                        "scope":            a.Scope,
-                        "tenant":           a.Tenant,
-                        "appLanguage":      a.AppLanguage,
-                        "appVersion":       a.AppVersion,
-                        "devicePublicKey":  pubKeyPEM,
-                        "devicePrivateKey": privKeyPEM,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
+                "auth":     authFields,
+                "account":  accountFields,
                 "disabled": false,
         }, "", "  ")
         recordLoginOutcome(state, true, "")

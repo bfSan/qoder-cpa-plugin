@@ -1194,14 +1194,27 @@ func IsRateLimit9074(code int32) bool {
 // GetUserInfo 查询账号信息（登录用）。多源 fallback：依次尝试账号
 // apiHost → OAuthHost → 备用源（对齐 cockpit-tools build_api_urls）。
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {
+        var raw json.RawMessage
+        uid, nickname, enterpriseID, raw, err = c.GetUserInfoFull(a)
+        _ = raw
+        return uid, nickname, enterpriseID, err
+}
+
+// GetUserInfoFull v0.12.44: GetUserInfo plus the raw response body. The
+// Result carries the rich profile cockpit-tools keeps as trae_profile_raw
+// (AvatarUrl / Region / AIRegion / TenantID / NonPlainTextMobile /
+// RegisterTime / UtmInfo — live-verified against a cockpit-tools export
+// 2026-09-06), which the login path now persists for credential parity
+// instead of discarding all but three fields.
+func (c *Client) GetUserInfoFull(a *auth.Auth) (uid, nickname, enterpriseID string, raw json.RawMessage, err error) {
         body := map[string]any{"ReqSource": "IDE", "IDEVersion": IdeVersion}
-        raw, _ := json.Marshal(body)
+        rawBody, _ := json.Marshal(body)
         var data json.RawMessage
         var lastErr error
         for _, host := range exchangeHosts(a.APIHost, c.OAuthHost) {
-                req, rerr := http.NewRequest(http.MethodPost, host+EpUserInfo, bytes.NewReader(raw))
+                req, rerr := http.NewRequest(http.MethodPost, host+EpUserInfo, bytes.NewReader(rawBody))
                 if rerr != nil {
-                        return "", "", "", rerr
+                        return "", "", "", nil, rerr
                 }
                 OAuthHeaders(req)
                 req.Header.Set("X-Cloudide-Token", a.JWT()) // 读锁快照
@@ -1211,7 +1224,7 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
                 }
         }
         if lastErr != nil {
-                return "", "", "", lastErr
+                return "", "", "", nil, lastErr
         }
         var resp struct {
                 Result struct {
@@ -1221,9 +1234,112 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
                 } `json:"Result"`
         }
         if err := json.Unmarshal(data, &resp); err != nil {
-                return "", "", "", fmt.Errorf("userinfo parse: %w", err)
+                return "", "", "", nil, fmt.Errorf("userinfo parse: %w", err)
         }
-        return resp.Result.UserID, resp.Result.ScreenName, resp.Result.EnterpriseID, nil
+        return resp.Result.UserID, resp.Result.ScreenName, resp.Result.EnterpriseID, data, nil
+}
+
+// CheckLoginResult is the flattened view of the CheckLogin response
+// (v0.12.44). Raw keeps the full envelope for diagnostics; the response shape
+// below is live-verified against the official client's stored trae_server_raw
+// (cockpit-tools import) — Result{IsLogin, BoundDeviceID, DeviceBindStatus,
+// Host, ExpiredAt, Region, AIRegion, AIHost, UserID, MigrateToSG}.
+type CheckLoginResult struct {
+        IsLogin          bool
+        BoundDeviceID    string
+        DeviceBindStatus string
+        Host             string
+        Region           string
+        AIRegion         string
+        UserID           string
+        ExpiredAt        int64 // ms epoch, 0 = absent
+        Raw              json.RawMessage
+}
+
+// CheckLogin probes the account's login state and SERVER-BOUND device
+// (POST /cloudide/api/v3/trae/CheckLogin, cockpit-tools
+// trae_account_core_refresh.rs:1035-1045 — same cloudide family and auth
+// scheme as GetUserInfo). The bound-device echo is the ground truth for the
+// device-binding health of a credential: a checkin that presents a deviceId
+// other than BoundDeviceID is a plausible risk-control trigger (9074), so
+// the management layer logs a warning on mismatch.
+func (c *Client) CheckLogin(a *auth.Auth) (*CheckLoginResult, error) {
+        body := map[string]any{"IDEVersion": IdeVersion}
+        rawBody, _ := json.Marshal(body)
+        var data json.RawMessage
+        var lastErr error
+        for _, host := range exchangeHosts(a.APIHost, c.OAuthHost) {
+                req, rerr := http.NewRequest(http.MethodPost, host+EpCheckLogin, bytes.NewReader(rawBody))
+                if rerr != nil {
+                        return nil, rerr
+                }
+                OAuthHeaders(req)
+                req.Header.Set("X-Cloudide-Token", a.JWT()) // 读锁快照
+                data, lastErr = c.doJSON(req)
+                if lastErr == nil {
+                        break
+                }
+        }
+        if lastErr != nil {
+                return nil, lastErr
+        }
+        var resp struct {
+                Result struct {
+                        IsLogin          bool   `json:"IsLogin"`
+                        BoundDeviceID    string `json:"BoundDeviceID"`
+                        DeviceBindStatus string `json:"DeviceBindStatus"`
+                        Host             string `json:"Host"`
+                        Region           string `json:"Region"`
+                        AIRegion         string `json:"AIRegion"`
+                        UserID           string `json:"UserID"`
+                        ExpiredAt        any    `json:"ExpiredAt"`
+                } `json:"Result"`
+                // Top-level echoes (live export: Result.AIRegion is empty while the
+                // response root carries AIRegion/loginRegion/storeRegion — cockpit
+                // merges the routing context the same way).
+                TopAIRegion string `json:"AIRegion"`
+                TopRegion   string `json:"storeRegion"`
+        }
+        if err := json.Unmarshal(data, &resp); err != nil {
+                return nil, fmt.Errorf("checklogin parse: %w", err)
+        }
+        if resp.Result.AIRegion == "" {
+                resp.Result.AIRegion = resp.TopAIRegion
+        }
+        if resp.Result.Region == "" {
+                resp.Result.Region = resp.TopRegion
+        }
+        out := &CheckLoginResult{
+                IsLogin:          resp.Result.IsLogin,
+                BoundDeviceID:    resp.Result.BoundDeviceID,
+                DeviceBindStatus: resp.Result.DeviceBindStatus,
+                Host:             resp.Result.Host,
+                Region:           resp.Result.Region,
+                AIRegion:         resp.Result.AIRegion,
+                UserID:           resp.Result.UserID,
+                Raw:              data,
+        }
+        if n, ok := numericAnyToI64(resp.Result.ExpiredAt); ok && n > 0 {
+                out.ExpiredAt = n
+        }
+        return out, nil
+}
+
+// numericAnyToI64 coerces a decoded JSON number (float64 via encoding/json,
+// json.Number, or int64) to int64. Package-local counterpart of main's
+// toInt64 (v0.12.44 CheckLogin ExpiredAt parsing).
+func numericAnyToI64(v any) (int64, bool) {
+        switch n := v.(type) {
+        case float64:
+                return int64(n), true
+        case int64:
+                return n, true
+        case json.Number:
+                if i, err := n.Int64(); err == nil {
+                        return i, true
+                }
+        }
+        return 0, false
 }
 
 func truncate(s string, n int) string {

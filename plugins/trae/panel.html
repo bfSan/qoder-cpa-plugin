@@ -401,6 +401,15 @@ function card(a){
     // v0.12.32: 官方 claim 要求 x-device-id（真实绑定 did）；凭证缺 deviceId 时
     // 服务端可能 code=0 但静默不入账 —— 徽标告警。
     ((a.device_id_set===false&&!isIntl)?`<span class="badge cooling" title="凭证文件缺少 deviceId，签到可能无法到账；建议用插件 OAuth 重新登录或重新导入带 deviceId 的凭证">缺设备ID</span>`:"")+
+    // v0.12.44: CheckLogin 探测的服务端绑定设备健康。device_match=false /
+    // bindStatus≠BOUND / is_login=false → 签到风控高危（9074 画像），亮标建议重登。
+    ((()=>{ if(isIntl)return "";
+      const bindBad=(a.device_match===false)||(a.device_bind_status&&a.device_bind_status!=="BOUND")||(a.is_login===false);
+      if(!bindBad)return "";
+      const tip=(a.is_login===false)?"CheckLogin 报告登录态已失效；建议退出重新登录"
+        :((a.device_bind_status&&a.device_bind_status!=="BOUND")?("服务端设备绑定状态异常（"+a.device_bind_status+"）；建议退出重新登录")
+        :("服务端绑定设备（"+(a.bound_device_id||"?")+"）与本凭证 deviceId 不一致 —— 签到 9074 风控高危；建议退出重新登录换绑设备"));
+      return `<span class="badge cooling" title="${escAttr(tip)}">绑定异常</span>`; })())+
     `<span class="${planBadgeClass(plan)}">${esc(plan||"-")}</span>`;
   const btnClass=checkedIn?"done":"sec";
   const btnText=checkedIn?"已签到":"签到";
@@ -419,7 +428,11 @@ function card(a){
        // checkin_credits/status。v0.12.40 语义修正（反编译官方 TraeWork 定案）：
        // credits = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），
        // 非钱包/可花余额；模型调用扣的是上方积分池，不扣这个。
-       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到奖励</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":" · 签到成功后入池"}</span></div>`:""));
+       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到奖励</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":" · 签到成功后入池"}</span></div>`:"")
+       // v0.12.44: CheckLogin 服务端绑定设备（探测成功才渲染）。
+       +((a.bound_device_id!=null||a.device_match!=null)?(()=>{ const cls=(a.device_match===false||a.is_login===false)?"err":"";
+          const st=(a.device_match===true)?"匹配":((a.device_match===false)?"与本凭证不一致":"未比对");
+          return `<div class="row"><span class="k">设备绑定</span><span class="v ${cls}">${esc((a.device_bind_status||"UNKNOWN")+" · "+(a.bound_device_id||"-")+" · "+st)}</span></div>`; })():""));
   return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -457,6 +470,11 @@ function applyCreditsResult(a, res){
   if(res.checkin_credits!=null){
     a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
   }
+  // v0.12.44: CheckLogin 绑定探测字段合并（缺省 = 未探测，不覆盖已有值）。
+  if(res.is_login!=null) a.is_login=res.is_login;
+  if(res.bound_device_id!=null) a.bound_device_id=res.bound_device_id;
+  if(res.device_bind_status!=null) a.device_bind_status=res.device_bind_status;
+  if(res.device_match!=null) a.device_match=res.device_match;
 }
 function lazyLoadCredits(accounts){
   // For cards whose credits are missing/stale, fetch /credits per-account.

@@ -19,6 +19,11 @@ const (
         EpModels        = "/api/ide/v1/get_detail_param"
         EpExchange      = "/cloudide/api/v3/trae/oauth/ExchangeToken"
         EpUserInfo      = "/cloudide/api/v3/trae/GetUserInfo"
+        // v0.12.44: 登录态/设备绑定探测（cockpit-tools trae_account_core_refresh.rs
+        // TRAE_CHECK_LOGIN_PATH）——响应 Result 携带 IsLogin / BoundDeviceID /
+        // DeviceBindStatus / Host / Region / AIRegion，是凭证自证与 9074 设备
+        // 绑定诊断的数据源（官方客户端本地存储的 trae_server_raw 同形状）。
+        EpCheckLogin    = "/cloudide/api/v3/trae/CheckLogin"
         EpCheckinStatus = "/trae/api/v2/ug/checkin_credits/status"
         EpCheckinClaim  = "/trae/api/v2/ug/checkin_credits/claim"
         EpEntUsage      = "/trae/api/v2/pay/ide_user_ent_usage"

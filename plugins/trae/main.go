@@ -139,7 +139,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.43"
+var version = "0.12.44"
 
 var (
         hostAPI *C.cliproxy_host_api
@@ -174,6 +174,18 @@ type accountCacheEntry struct {
         usage       upstream.UsageSummary
         usageFilled bool
         plan        string // 选中包的 plan 标签（与 usage 快照同批填充）
+        // v0.12.44: CheckLogin 探测快照（登录态 + 服务端绑定设备，9074 风控诊断）。
+        bind *bindStatus
+}
+
+// bindStatus 汇总 CheckLogin 响应里与设备绑定健康相关的字段。
+// Known=false 表示探测失败（网络/上游拒绝），面板不渲染该组徽标。
+type bindStatus struct {
+        IsLogin          bool
+        BoundDeviceID    string
+        DeviceBindStatus string
+        DeviceMatch      bool // BoundDeviceID == 本账号 deviceId
+        Known            bool
 }
 
 type checkinStatus struct {
@@ -1193,6 +1205,10 @@ func handlePollLogin(request []byte) ([]byte, error) {
                 // persisted into the credential for the upstream device binding.
                 lcDevicePublicKey  string
                 lcDevicePrivateKey string
+                // v0.12.44: raw ExchangeToken response — persisted as auth.exchangeResponse
+                // (credential parity with cockpit-tools trae_auth_raw.exchangeResponse:
+                // region echoes, server-bound device, refresh-token expiry all live here).
+                exchangeRaw []byte
         )
 
         switch {
@@ -1252,6 +1268,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                 }
                 lcDevicePrivateKey = privKeyPEM
                 lcDevicePublicKey = pubKeyPEM
+                exchangeRaw = tokenRaw
                 // Parse token response (multiple field names supported per cockpit-tools).
                 accessToken, refreshToken, expiresAt = parseExchangeTokenResponse(tokenRaw)
                 if accessToken == "" && refreshToken == "" {
@@ -1281,7 +1298,9 @@ func handlePollLogin(request []byte) ([]byte, error) {
         // auth file carried variant:"" and a solo login was re-claimed as cn
         // (wrong ClientID / endpoints / models on every later dispatch).
         a.Variant = lc.variant
-        uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
+        // v0.12.44: GetUserInfoFull keeps the raw profile response (cockpit-tools
+        // trae_profile_raw parity: avatar/region/tenant/mobile live in Result).
+        uid, nickname, entID, userInfoRaw, err := upstreamClient.GetUserInfoFull(a)
         if err != nil {
                 log.Printf("GetUserInfo failed: %v — proceeding with callback/unknown identity", err)
         }
@@ -1296,26 +1315,38 @@ func handlePollLogin(request []byte) ([]byte, error) {
 
         // Persist the auth file (nested form: {type, provider, auth:{...}, account:{...}}).
         // CRITICAL: include type+provider so CPA can route this auth to the correct plugin.
+        // v0.12.44: auth/account carry the cockpit-tools-parity extras (platformId,
+        // authClientId, exchangeResponse, profileRaw, region echoes, bound device,
+        // refresh expiry) via credentialParityFields — see credentialParityFields.
+        authFields := map[string]any{
+                "accessToken":      a.AccessToken,
+                "refreshToken":     a.RefreshToken,
+                "expiresAt":        a.ExpiresAt,
+                "domain":           a.Domain,
+                "apiHost":          a.APIHost,
+                "machineId":        a.MachineID,
+                "deviceId":         a.DeviceID,
+                "variant":          a.Variant,
+                "devicePublicKey":  lcDevicePublicKey,
+                "devicePrivateKey": lcDevicePrivateKey,
+        }
+        accountFields := map[string]any{
+                "uid":          a.UID,
+                "enterpriseId": a.EnterpriseID,
+                "nickname":     a.Nickname,
+        }
+        authExtras, accountExtras := credentialParityFields(lc.variant, lc.loginHost, exchangeRaw, userInfoRaw)
+        for k, v := range authExtras {
+                authFields[k] = v
+        }
+        for k, v := range accountExtras {
+                accountFields[k] = v
+        }
         storageJSON, _ := json.MarshalIndent(map[string]any{
                 "type":     providerName,
                 "provider": providerName,
-                "auth": map[string]any{
-                        "accessToken":      a.AccessToken,
-                        "refreshToken":     a.RefreshToken,
-                        "expiresAt":        a.ExpiresAt,
-                        "domain":           a.Domain,
-                        "apiHost":          a.APIHost,
-                        "machineId":        a.MachineID,
-                        "deviceId":         a.DeviceID,
-                        "variant":          a.Variant,
-                        "devicePublicKey":  lcDevicePublicKey,
-                        "devicePrivateKey": lcDevicePrivateKey,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
+                "auth":     authFields,
+                "account":  accountFields,
                 "disabled": false,
         }, "", "  ")
 
@@ -1597,6 +1628,148 @@ func toInt64(v any) (int64, bool) {
         return 0, false
 }
 
+// credentialParityFields v0.12.44 — cockpit-tools 凭证信息量对齐（用户报告
+// "我们生成的凭证不如 cockpit-tools 的信息全"）。cockpit 的 trae_auth_raw 里
+// 有一整层我们此前不落盘的字段（exchangeResponse 原始回包、region 回显、
+// 服务端绑定设备、refresh token 过期时刻、platformId 四谱系标识、富 profile）。
+//
+// 数据源与优先级：ExchangeToken 原始回包（exchangeRaw，顶层 AIRegion/authClientId/
+// host/loginHost/loginRegion/storeRegion + Result{BoundDeviceID, DeviceBindStatus,
+// RefreshExpireAt, ClientID}，形状与 cockpit 导出的 trae_auth_raw.exchangeResponse
+// 一致）> GetUserInfo 原始回包（profileRaw.Result：Region/AIRegion/AvatarUrl/
+// TenantID/NonPlainTextMobile/RegisterTime）> variant 推导默认值。
+//
+// 默认值只取 cockpit 硬编码常量（trae_account_core_platform_storage.rs:196-199）：
+// CN 谱系 authDomain=www.trae.cn、loginRegion=cn、storeRegion=CN、aiRegion=CN；
+// intl/solo-intl 谱系 authDomain=www.trae.ai，region 类字段不做猜测（仅回显有值才落盘）。
+// 纯函数、可测试；永不返回错误（回包解析失败 = 只落 variant 可推导的字段）。
+func credentialParityFields(variant, loginHost string, exchangeRaw, profileRaw []byte) (authExtras, accountExtras map[string]any) {
+        authExtras = map[string]any{}
+        accountExtras = map[string]any{}
+
+        // 1) 平台谱系（始终落盘，凭证自证的四谱系标识）。
+        authExtras["platformId"] = upstream.PlatformIDFor(variant)
+        authExtras["platformName"] = upstream.PlatformNameFor(variant)
+
+        // 2) region/host 默认值（仅 CN 谱系有 cockpit 常量背书；intl 的
+        // authDomain 不默认 —— 本插件 intl realm 历史上走 marscode.com，
+        // 与 cockpit TRAE_AUTH_DOMAIN=www.trae.ai 的现行值不一致，不猜测）。
+        if !upstream.IsIntlVariant(variant) {
+                authExtras["authDomain"] = "www.trae.cn"
+                authExtras["loginRegion"] = "cn"
+                authExtras["storeRegion"] = "CN"
+                authExtras["aiRegion"] = "CN"
+        }
+        if loginHost != "" {
+                authExtras["loginHost"] = loginHost
+        }
+
+        // 3) ExchangeToken 回包回显（有值才覆盖默认值）。
+        type echoResult struct {
+                BoundDeviceID    string `json:"BoundDeviceID"`
+                DeviceBindStatus string `json:"DeviceBindStatus"`
+                RefreshExpireAt  any    `json:"RefreshExpireAt"`
+                ClientID         string `json:"ClientID"`
+        }
+        var echo struct {
+                AIRegion    string     `json:"AIRegion"`
+                AuthClientI any        `json:"authClientId"`
+                Host        string     `json:"host"`
+                LoginHost   string     `json:"loginHost"`
+                LoginRegion string     `json:"loginRegion"`
+                StoreRegion string     `json:"storeRegion"`
+                Result      echoResult `json:"Result"`
+        }
+        if len(exchangeRaw) > 0 && json.Unmarshal(exchangeRaw, &echo) == nil {
+                // 原始回包整体落盘（cockpit 同名字段 exchangeResponse，字节级保留）。
+                authExtras["exchangeResponse"] = json.RawMessage(exchangeRaw)
+                setIf := func(key, val string) {
+                        if s := strings.TrimSpace(val); s != "" {
+                                authExtras[key] = s
+                        }
+                }
+                setIf("aiRegion", echo.AIRegion)
+                setIf("host", echo.Host)
+                setIf("loginHost", echo.LoginHost)
+                setIf("loginRegion", echo.LoginRegion)
+                setIf("storeRegion", echo.StoreRegion)
+                if s, ok := echo.AuthClientI.(string); ok {
+                        setIf("authClientId", s)
+                } else if echo.Result.ClientID != "" {
+                        setIf("authClientId", echo.Result.ClientID)
+                }
+                if authExtras["authClientId"] == nil {
+                        authExtras["authClientId"] = upstream.ClientIDFor(variant)
+                }
+                setIf("boundDeviceId", echo.Result.BoundDeviceID)
+                setIf("deviceBindStatus", echo.Result.DeviceBindStatus)
+                if n, ok := toInt64(echo.Result.RefreshExpireAt); ok && n > 0 {
+                        authExtras["refreshExpiredAt"] = n / 1000 // ms → s
+                }
+        } else {
+                authExtras["authClientId"] = upstream.ClientIDFor(variant)
+        }
+
+        // 4) 富 profile（GetUserInfo Result → account 侧字段，cockpit trae_profile_raw）。
+        var prof struct {
+                Result struct {
+                        Region             string `json:"Region"`
+                        AIRegion           string `json:"AIRegion"`
+                        AvatarUrl          string `json:"AvatarUrl"`
+                        TenantID           string `json:"TenantID"`
+                        NonPlainTextMobile string `json:"NonPlainTextMobile"`
+                        RegisterTime       string `json:"RegisterTime"`
+                } `json:"Result"`
+        }
+        profileOK := len(profileRaw) > 0 && json.Unmarshal(profileRaw, &prof) == nil
+        if profileOK {
+                setIfA := func(key, val string) {
+                        if s := strings.TrimSpace(val); s != "" {
+                                accountExtras[key] = s
+                        }
+                }
+                setIfA("avatar", prof.Result.AvatarUrl)
+                setIfA("region", prof.Result.Region)
+                setIfA("aiRegion", prof.Result.AIRegion)
+                setIfA("tenantId", prof.Result.TenantID)
+                setIfA("mobile", prof.Result.NonPlainTextMobile)
+                setIfA("registerTime", prof.Result.RegisterTime)
+        }
+
+        // 5) userRegion（cockpit 形状 {"_aiRegion":..,"region":..}）：profile > 回包 > CN 默认。
+        region := ""
+        aiRegion := ""
+        if profileOK {
+                region = strings.TrimSpace(prof.Result.Region)
+                aiRegion = strings.TrimSpace(prof.Result.AIRegion)
+        }
+        if region == "" {
+                region = stringOr(authExtras["storeRegion"])
+        }
+        if aiRegion == "" {
+                aiRegion = stringOr(authExtras["aiRegion"])
+        }
+        if region != "" || aiRegion != "" {
+                ur := map[string]string{}
+                if region != "" {
+                        ur["region"] = region
+                }
+                if aiRegion != "" {
+                        ur["_aiRegion"] = aiRegion
+                }
+                authExtras["userRegion"] = ur
+        }
+        return authExtras, accountExtras
+}
+
+// stringOr renders a value already stored in the extras map as a string ("" if absent).
+func stringOr(v any) string {
+        if s, ok := v.(string); ok {
+                return s
+        }
+        return ""
+}
+
 func handleRefreshAuth(request []byte) ([]byte, error) {
         captureAuthDir(request) // v0.12.17: restore-path AuthDir warm
 
@@ -1611,26 +1784,10 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
         if err := upstreamClient.RefreshToken(a); err != nil {
                 return nil, fmt.Errorf("refresh: ExchangeToken: %w", err)
         }
-        storageJSON, _ := json.MarshalIndent(map[string]any{
-                "type":     providerName,
-                "provider": providerName,
-                "auth": map[string]any{
-                        "accessToken":  a.AccessToken,
-                        "refreshToken": a.RefreshToken,
-                        "expiresAt":    a.ExpiresAt,
-                        "domain":       a.Domain,
-                        "apiHost":      a.APIHost,
-                        "machineId":    a.MachineID,
-                        "deviceId":     a.DeviceID,
-                        "variant":      a.Variant,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
-                "disabled": false,
-        }, "", "  ")
+        // v0.12.44: merge into the existing credential (preserves the device key
+        // pair and the parity extras) instead of rebuilding from the normalized
+        // in-memory struct, which silently stripped every custom field.
+        storageJSON := mergeAuthStorage(req.StorageJSON, a)
         return okEnvelope(pluginapi.AuthRefreshResponse{
                 Auth: pluginapi.AuthData{
                         // v0.12.8: empty ID — the host keeps the existing record's ID.

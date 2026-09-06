@@ -221,6 +221,12 @@ type traeAccount struct {
         // v0.12.32: 凭证文件是否携带 deviceId。官方 claim 要求 x-device-id 携带
         // 真实绑定 did，缺失时服务端可能静默不入账 —— 面板徽标告警用。
         DeviceIDSet bool `json:"device_id_set"`
+        // v0.12.44: 凭证谱系 + CheckLogin 探测的服务端绑定设备状态。
+        Platform         string `json:"platform,omitempty"`          // platformId（trae_solo_cn 等）
+        BoundDeviceID    string `json:"bound_device_id,omitempty"`   // 服务端绑定的 deviceId
+        DeviceBindStatus string `json:"device_bind_status,omitempty"` // BOUND / 其他
+        DeviceMatch      *bool  `json:"device_match,omitempty"`      // nil = 未探测
+        IsLogin          *bool  `json:"is_login,omitempty"`          // nil = 未探测
 }
 
 type traeCredits struct {
@@ -300,6 +306,18 @@ func buildDashboard() map[string]any {
                 acct.Nickname = sa.Account.Nickname
                 acct.Variant = sa.Variant
                 acct.DeviceIDSet = strings.TrimSpace(sa.Auth.DeviceID) != ""
+                // v0.12.44: 凭证自证谱系 + 缓存的 CheckLogin 绑定快照。
+                acct.Platform = upstream.PlatformIDFor(sa.Variant)
+                if v, ok := accountCache.Load(f.AuthIndex); ok {
+                        if e, ok2 := v.(*accountCacheEntry); ok2 && e.bind != nil && e.bind.Known {
+                                acct.BoundDeviceID = e.bind.BoundDeviceID
+                                acct.DeviceBindStatus = e.bind.DeviceBindStatus
+                                dm := e.bind.DeviceMatch
+                                il := e.bind.IsLogin
+                                acct.DeviceMatch = &dm
+                                acct.IsLogin = &il
+                        }
+                }
 
                 // Cached credits / checkin (filled by scheduler + manual endpoints).
                 // v0.12.25: credits < 0 = pack quota never fetched — leave the
@@ -817,6 +835,29 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                                 }
                         }
                 }
+                // v0.12.44: CheckLogin —— 登录态 + 服务端绑定设备探测（best-effort，
+                // cockpit-tools 刷新链路同款，trae_account_core_refresh.rs:1035-1045）。
+                // BoundDeviceID 与本账号 deviceId 不一致 / DeviceBindStatus != BOUND /
+                // IsLogin=false → 签到风控高危（9074 高危画像），日志告警 + 面板亮标。
+                bind := &bindStatus{}
+                if cl, clErr := upstreamClient.CheckLogin(a); clErr == nil && cl != nil {
+                        bind.Known = true
+                        bind.IsLogin = cl.IsLogin
+                        bind.BoundDeviceID = cl.BoundDeviceID
+                        bind.DeviceBindStatus = cl.DeviceBindStatus
+                        bind.DeviceMatch = cl.BoundDeviceID != "" && cl.BoundDeviceID == a.DeviceID
+                        entry["is_login"] = cl.IsLogin
+                        if cl.BoundDeviceID != "" {
+                                entry["bound_device_id"] = cl.BoundDeviceID
+                                entry["device_bind_status"] = cl.DeviceBindStatus
+                                entry["device_match"] = bind.DeviceMatch
+                        }
+                        if !cl.IsLogin || (cl.DeviceBindStatus != "" && cl.DeviceBindStatus != "BOUND") || (cl.BoundDeviceID != "" && cl.BoundDeviceID != a.DeviceID) {
+                                log.Printf("checkin device-bind warning uid=%s: isLogin=%v bindStatus=%q bound=%q local=%q — 绑定不一致为 9074 风控高危，建议面板退出重新登录以重绑设备", sa.Account.UID, cl.IsLogin, cl.DeviceBindStatus, cl.BoundDeviceID, a.DeviceID)
+                        }
+                } else if clErr != nil {
+                        entry["checklogin_error"] = clErr.Error()
+                }
                 entry["usage_model"] = sum.UsageModel
                 entry["remain_known"] = sum.RemainKnown
                 if sum.RemainKnown {
@@ -893,6 +934,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                         usage:       sum,
                         usageFilled: true,
                         plan:        plan,
+                        bind:        bind,
                 })
                 if accountPool != nil {
                         // v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
@@ -1001,6 +1043,60 @@ func storageJSONForAuth(a *auth.Auth) []byte {
         return storageJSON
 }
 
+// mergeAuthStorage v0.12.44 — refresh 写回从"按内存结构重建"改为"合并进现有
+// 凭证 JSON"。此前 handleRefreshAuth / persistRefreshedAuth 每次刷新都用
+// auth.Auth（归一化固定字段）重建 storageJSON，把登录时落盘的
+// devicePublicKey/devicePrivateKey（v0.12.24 设备绑定密钥对！）以及 v0.12.44
+// 的 exchangeResponse/profileRaw/region 回显等 parity 字段整体抹掉。
+// 合并策略：token 类字段用刷新后的新值覆盖，其余键（设备密钥对、平台谱系、
+// 绑定设备、profile 富字段……）原样保留；existing 不可解析或缺 auth 块时
+// 回退旧的重建行为（兼容 legacy 扁平形）。
+func mergeAuthStorage(existing []byte, a *auth.Auth) []byte {
+        base := map[string]any{}
+        if err := json.Unmarshal(existing, &base); err != nil {
+                return storageJSONForAuth(a)
+        }
+        authMap, ok := base["auth"].(map[string]any)
+        if !ok {
+                return storageJSONForAuth(a)
+        }
+        authMap["accessToken"] = a.AccessToken
+        authMap["refreshToken"] = a.RefreshToken
+        authMap["expiresAt"] = a.ExpiresAt
+        authMap["domain"] = a.Domain
+        authMap["apiHost"] = a.APIHost
+        if a.MachineID != "" {
+                authMap["machineId"] = a.MachineID
+        }
+        if a.DeviceID != "" {
+                authMap["deviceId"] = a.DeviceID
+        }
+        if a.Variant != "" {
+                authMap["variant"] = a.Variant
+        }
+        accountMap, okAcc := base["account"].(map[string]any)
+        if !okAcc {
+                accountMap = map[string]any{}
+                base["account"] = accountMap
+        }
+        if a.UID != "" {
+                accountMap["uid"] = a.UID
+        }
+        if a.Nickname != "" {
+                accountMap["nickname"] = a.Nickname
+        }
+        if a.EnterpriseID != "" {
+                accountMap["enterpriseId"] = a.EnterpriseID
+        }
+        base["type"] = providerName
+        base["provider"] = providerName
+        out, err := json.MarshalIndent(base, "", "  ")
+        if err != nil {
+                return storageJSONForAuth(a)
+        }
+        return out
+}
+
 // persistRefreshedAuth writes updated token fields back to host auth store
 // after a successful RefreshTokenIfNeeded in the executor path.
 func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
@@ -1014,7 +1110,8 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
                 // file the watcher ignores, losing the refreshed token on restart.
                 fileName += ".json"
         }
-        if err := hostAuthSave(fileName, storageJSONForAuth(a)); err != nil {
+        // v0.12.44: merge (preserve device keys + parity extras), don't rebuild.
+        if err := hostAuthSave(fileName, mergeAuthStorage(req.StorageJSON, a)); err != nil {
                 log.Printf("persist refreshed auth %s: %v", a.UID, err)
         }
 }
