@@ -505,7 +505,8 @@ func TestCheckinReqSourceProbeOn9074(t *testing.T) {
         if !errors.As(err, &ue) || !IsRateLimit9074(ue.BizCode) {
                 t.Errorf("9074 should surface as biz rate limit, got %v", err)
         }
-        for _, want := range []string{"device_id_set=false", "variant=cn", "req_source=1,empty,req_source=2"} {
+        // v0.12.45: 尾缀只列实际尝试的组合（body×scheme），不再宣称未探测的方案。
+        for _, want := range []string{"device_id_set=false", "variant=cn", "已尝试 3 组合", "req_source=1×Cloud-IDE-JWT,empty×Cloud-IDE-JWT,req_source=2×Cloud-IDE-JWT"} {
                 if !strings.Contains(err.Error(), want) {
                         t.Errorf("diagnostic %q missing from error: %s", want, err.Error())
                 }

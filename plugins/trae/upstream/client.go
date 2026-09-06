@@ -405,14 +405,14 @@ type CheckinStatusResult struct {
 // 策略：Cloud-IDE-JWT 优先（官方客户端实证方案）；非 9074 失败回退 Bearer
 // 一次（兼容 cockpit-tools 所代表的 token 类别）。每次尝试的 biz code 与
 // 上游 message 全量落日志，SchemeUsed 记入结果供面板诊断。
+// v0.12.40 曾在此另设设备头（x-device-brand/type/os-version + x-app-version
+// 2.3.81345，out/main.js fb() 反编译值）—— v0.12.45 起全部下沉到
+// ugBaseHeaders 的抓包指纹头集（App-Version 改用抓包值 0.1.61，身份改为
+// VSCode 插件进程），此处仅保留鉴权方案选择。
 const (
         UgSchemeCloudIDEJWT = "Cloud-IDE-JWT"
         UgSchemeBearer      = "Bearer"
 )
-
-// ugAppVersion 官方桌面端版本号（v0.12.40 官方签到请求头 x-app-version 携带，
-// 对齐反编译的 TraeWork CN 2.3.81345）。
-const ugAppVersion = "2.3.81345"
 
 // ugCheckinReqSourcesFor 签到类请求（status/claim）的 req_source 探测序列。
 // v0.12.43 起按账号谱系（auth variant → OAuth ClientID）选序，并补入官方
@@ -469,13 +469,16 @@ func ugBodyLabel(body string) string {
 // ugProbeDetail v0.12.43: 全组合被拒时追加到错误里的诊断后缀 —— 面板/日志
 // 直接可见试过哪些组合、以什么身份发的请求，用于区分"契约/设备缺失"与
 // "真限流"（此前两者混为一句 9074 文案，掩盖了实现侧线索）。
-func ugProbeDetail(a *auth.Auth, bodies []string) string {
-        labels := make([]string, 0, len(bodies))
-        for _, b := range bodies {
-                labels = append(labels, ugBodyLabel(b))
+// v0.12.45 修正：只列实际尝试过的组合（body×scheme 标签由调用方循环收集）。
+// 旧实现传 bodies 全集 + 固定 schemes 拼接，9074-break 跳过剩余 scheme 后
+// 仍宣称"Cloud-IDE-JWT,Bearer 全部被拒"，夸大探测范围误导判读。
+func ugProbeDetail(a *auth.Auth, attempted []string) string {
+        if len(attempted) == 0 {
+                return fmt.Sprintf("[无已尝试组合; variant=%s device_id_set=%v]",
+                        strings.TrimSpace(a.Variant), strings.TrimSpace(a.DeviceID) != "")
         }
-        return fmt.Sprintf("[已按序探测 body=%s × 鉴权=%s 全部被拒; variant=%s device_id_set=%v]",
-                strings.Join(labels, ","), strings.Join(ugCheckinSchemes(), ","),
+        return fmt.Sprintf("[已尝试 %d 组合 %s 全部被拒; variant=%s device_id_set=%v]",
+                len(attempted), strings.Join(attempted, ","),
                 strings.TrimSpace(a.Variant), strings.TrimSpace(a.DeviceID) != "")
 }
 
@@ -484,7 +487,7 @@ func ugCheckinSchemes() []string {
         return []string{UgSchemeCloudIDEJWT, UgSchemeBearer}
 }
 
-// ugCheckinRequest 构造签到请求（公共头 + 指定方案的 Authorization）。
+// ugCheckinRequest 构造签到请求（抓包指纹公共头 + 指定方案的 Authorization）。
 func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Request, error) {
         var rdr io.Reader
         if body != "" {
@@ -495,11 +498,6 @@ func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Req
                 return nil, err
         }
         ugBaseHeaders(req, a)
-        // v0.12.40: 官方签到额外携带的设备头（out/main.js fb()）。
-        req.Header.Set("x-device-brand", DeviceBrand)
-        req.Header.Set("x-device-type", "windows")
-        req.Header.Set("x-os-version", OSVersion)
-        req.Header.Set("x-app-version", ugAppVersion)
         if scheme == UgSchemeBearer {
                 req.Header.Set("Authorization", "Bearer "+a.JWT()) // 读锁快照
         } else {
@@ -531,6 +529,7 @@ func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (
 
 func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
         bodies := ugCheckinReqSourcesFor(a.Variant)
+        attempted := make([]string, 0, len(bodies)*2) // v0.12.45: 实际尝试的 body×scheme
         var lastBiz *Error
         for _, body := range bodies {
                 for _, scheme := range ugCheckinSchemes() {
@@ -538,6 +537,7 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
                         if err != nil {
                                 return nil, err
                         }
+                        attempted = append(attempted, ugBodyLabel(body)+"×"+scheme)
                         if code == 0 {
                                 var resp CheckinStatusResult
                                 if err := json.Unmarshal(data, &resp); err != nil {
@@ -556,7 +556,7 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
         }
         // v0.12.43: 全组合被拒 → 错误里带上探测过的组合与身份，区分契约/设备问题与真限流。
         if lastBiz != nil {
-                lastBiz.Msg += " " + ugProbeDetail(a, bodies)
+                lastBiz.Msg += " " + ugProbeDetail(a, attempted)
         }
         return nil, lastBiz
 }
@@ -588,6 +588,7 @@ type CheckinClaimResult struct {
 
 func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
         bodies := ugCheckinReqSourcesFor(a.Variant)
+        attempted := make([]string, 0, len(bodies)*2) // v0.12.45: 实际尝试的 body×scheme
         var lastBiz *Error
         for _, body := range bodies {
                 for _, scheme := range ugCheckinSchemes() {
@@ -595,6 +596,7 @@ func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
                         if err != nil {
                                 return nil, err
                         }
+                        attempted = append(attempted, ugBodyLabel(body)+"×"+scheme)
                         if code == 0 {
                                 var resp CheckinClaimResult
                                 if err := json.Unmarshal(data, &resp); err != nil {
@@ -614,7 +616,7 @@ func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
         }
         // v0.12.43: 全组合被拒 → 错误里带上探测过的组合与身份，区分契约/设备问题与真限流。
         if lastBiz != nil {
-                lastBiz.Msg += " " + ugProbeDetail(a, bodies)
+                lastBiz.Msg += " " + ugProbeDetail(a, attempted)
         }
         return nil, lastBiz
 }

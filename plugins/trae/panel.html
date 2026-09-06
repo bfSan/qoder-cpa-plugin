@@ -763,11 +763,11 @@ function renderSummary(accounts){
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
   if(res.error){
-    // v0.12.41/43: 9074 = 官方活动校验拒绝。req_source 按账号谱系选择
-    // （cn: 1→官方空 body→2；solo: 2→1→空 body），全组合被拒才进退避；
-    // 错误尾部的 [已按序探测…variant/device_id_set] 可区分设备缺失与真限流。
+    // v0.12.45: 9074 = 官方活动校验拒绝。请求身份已对齐官方抓包（VSCode
+    // 插件进程 UA + 完整指纹头），契约/设备侧因素已排除；仍被拒多为账号级
+    // 活动限制。错误尾部 [已尝试 N 组合…] 只列实际探测过的组合。
     if(/9074|参与用户太多/.test(res.error)){
-      toast(name+"：签到被官方拒绝","warn",res.error+" —— 与余额无关；v0.12.43 已按账号谱系探测全部官方契约组合（含官方空 body），全被拒多为官方活动侧限制；系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
+      toast(name+"：签到被官方拒绝","warn",res.error+" —— 与余额无关；v0.12.45 请求身份已对齐官方客户端抓包（VSCode 插件进程+完整指纹头），仍被拒多为账号级活动限制；系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
     }
     toast(name+"：签到失败","err",res.error);return;
   }
