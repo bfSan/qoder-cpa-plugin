@@ -13,22 +13,23 @@ import (
 
 // wbAccount is one row of the dashboard.
 type wbAccount struct {
-	AuthIndex    string          `json:"auth_index"`
-	AuthID       string          `json:"auth_id,omitempty"`
-	Name         string          `json:"name"`
-	Label        string          `json:"label"`
-	Nickname     string          `json:"nickname"`
-	UID          string          `json:"uid"`
-	Region       string          `json:"region"` // "cn" | "global" | "intl"
-	Plan         string          `json:"plan"`
-	Status       string          `json:"status"`
-	Disabled     bool            `json:"disabled"`
-	Exhausted    bool            `json:"exhausted"`
-	Selected     bool            `json:"selected"` // panel active routing card
-	Credits      *creditsSummary `json:"credits,omitempty"`
-	Checkin      *checkinSummary `json:"checkin,omitempty"`
-	TrialClaimed bool            `json:"trial_claimed,omitempty"` // Global: expert trial already claimed
-	Error        string          `json:"error,omitempty"`
+	AuthIndex    string            `json:"auth_index"`
+	AuthID       string            `json:"auth_id,omitempty"`
+	Name         string            `json:"name"`
+	Label        string            `json:"label"`
+	Nickname     string            `json:"nickname"`
+	UID          string            `json:"uid"`
+	Region       string            `json:"region"` // "cn" | "global" | "intl"
+	Plan         string            `json:"plan"`
+	Status       string            `json:"status"`
+	Disabled     bool              `json:"disabled"`
+	Exhausted    bool              `json:"exhausted"`
+	Selected     bool              `json:"selected"` // panel active routing card
+	Credits      *creditsSummary   `json:"credits,omitempty"`
+	Checkin      *checkinSummary   `json:"checkin,omitempty"`
+	TrialClaimed bool              `json:"trial_claimed,omitempty"` // Global: expert trial already claimed
+	Models       *realmModelsState `json:"models,omitempty"`        // v0.9.9: where this realm's model list came from
+	Error        string            `json:"error,omitempty"`
 }
 
 // credits/checkin/plan fields are left empty — the panel renders skeletons
@@ -96,6 +97,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 			acct.Nickname = sa.Account.Nickname
 			acct.UID = sa.Account.UID
 			acct.Region = panelRegion(sa)
+			acct.Models = realmModelStateFor(acct.Region)
 			if fetchCredits {
 				plan, ci, cr, errs := cachedAccountDetails(f.ID, sa, force)
 				acct.Plan = plan

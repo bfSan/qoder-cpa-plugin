@@ -333,7 +333,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.8"
+var version = "0.9.9"
 
 func wbRegistration() registration {
 	return registration{
@@ -380,13 +380,22 @@ func wbRegistration() registration {
 // upstream call per account.
 const dynamicModelsCacheTTL = 5 * time.Minute
 
-// realmModelsEntry is one realm's cached discovery result. v0.12.18: the
-// cache is keyed by realm (cn|global|intl) — a single shared entry let one
-// realm's answer (or CN-flavored static fallback) satisfy model.for_auth for
-// accounts on another realm, advertising models their gateway never served.
+// realmModelsEntry is one realm's cached discovery result plus the v0.9.9
+// diagnostics trail: WHERE the advertised list came from (discovery / pin /
+// static fallback), when it was fetched, and why discovery failed last time.
+// v0.12.18: the cache is keyed by realm (cn|global|intl) — a single shared
+// entry let one realm's answer (or CN-flavored static fallback) satisfy
+// model.for_auth for accounts on another realm, advertising models their
+// gateway never served. Error-only entries (models nil) are cache misses for
+// fetch purposes but keep the last failure visible to the panel.
 type realmModelsEntry struct {
-	models  []pluginapi.ModelInfo
-	fetched time.Time
+	models    []pluginapi.ModelInfo
+	fetched   time.Time
+	source    string // "discovery" | "pin ..." | "static ..."
+	srcCount  int    // display count for pin/static states (models stays nil)
+	lastErr   string
+	lastErrAt time.Time
+	lastLogAt time.Time // throttles the discovery-failure log line
 }
 
 var dynamicModelsCache = struct {

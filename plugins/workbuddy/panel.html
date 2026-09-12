@@ -330,6 +330,21 @@ function bindCardActions(root){
     });
   });
 }
+// Model-source line (v0.9.9): tells the user WHERE this realm's model list
+// came from — dynamic discovery, config pin, or the static fallback — and, on
+// fallback, the recorded discovery failure reason (hover for full text).
+function modelsHTML(m){
+  if(!m) return "";
+  const age=m.age_seconds>=1?(m.age_seconds<90?Math.floor(m.age_seconds)+"秒前":m.age_seconds<5400?Math.floor(m.age_seconds/60)+"分钟前":Math.floor(m.age_seconds/3600)+"小时前"):"";
+  const src=m.source||"";
+  let txt;
+  if(src==="discovery") txt=`动态发现 ${m.count||0} 个模型${age}`;
+  else if(src.startsWith("pin")) txt=`配置钉住 ${m.count||0} 个模型（models_cn/models_global/models_intl）`;
+  else if(src.startsWith("static")) txt=`静态兜底 ${m.count||0} 个模型${m.last_error?` · 发现失败: ${m.last_error}`:""}`;
+  else txt="等待首次模型查询";
+  const errTip=m.last_error?` title="${esc(String(m.last_error))}"`:"";
+  return `<div class="row"><span class="k">模型</span><span class="v${m.last_error?" err":""}"${errTip}>${esc(txt)}</span></div>`;
+}
 function card(a){
   const plan=(a.plan||"unknown").toLowerCase();
   const ci=a.checkin||{}, cr=a.credits;
@@ -364,6 +379,7 @@ function card(a){
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
+  ${modelsHTML(a.models)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
   </div>`;

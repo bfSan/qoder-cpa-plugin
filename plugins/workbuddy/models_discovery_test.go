@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -124,5 +126,92 @@ func TestRawJSONI64(t *testing.T) {
 		if got := rawJSONI64(json.RawMessage(c.raw)); got != c.want {
 			t.Errorf("rawJSONI64(%s)=%d want %d", c.raw, got, c.want)
 		}
+	}
+}
+
+// TestFetchDynamicModelsRecordsSourceState is the v0.9.9 regression lock for
+// the diagnostics trail: a discovery failure must leave a visible reason
+// (previously the SILENT fallback that left realms stuck on a thin static
+// catalog with no trace of why), and a later successful discovery must
+// replace it. Flat storage shape {"accessToken","region"} keeps the realm cn.
+func TestFetchDynamicModelsRecordsSourceState(t *testing.T) {
+	resetDynamicModelsCache()
+	defer resetDynamicModelsCache()
+	orig := discoverModelsFn
+	defer func() { discoverModelsFn = orig }()
+	storage := []byte(`{"accessToken":"tok","region":"cn"}`)
+
+	discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+		return nil, errors.New("models API status 403")
+	}
+	got := fetchDynamicModelsFromStorage(storage)
+	if len(got) != len(wbModels()) {
+		t.Fatalf("fallback must serve the CN static catalog: got %d want %d", len(got), len(wbModels()))
+	}
+	st := realmModelStateFor("cn")
+	if st == nil {
+		t.Fatal("discovery failure must record realm state")
+	}
+	if st.Source != "static (discovery failed)" || st.Count != len(wbModels()) {
+		t.Errorf("state source/count = %q/%d", st.Source, st.Count)
+	}
+	if !strings.Contains(st.LastError, "403") {
+		t.Errorf("state last_error must carry the reason, got %q", st.LastError)
+	}
+	if st.LastErrorA == "" {
+		t.Error("state last_error_at must be set")
+	}
+
+	discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+		return realmTestModels("deepseek-v4.1-flash", "glm-5.2"), nil
+	}
+	got = fetchDynamicModelsFromStorage(storage)
+	if len(got) != 2 || got[0].ID != "deepseek-v4.1-flash" {
+		t.Fatalf("successful discovery must be served: %+v", discoveryIDs(got))
+	}
+	st = realmModelStateFor("cn")
+	if st == nil || st.Source != "discovery" || st.Count != 2 {
+		t.Fatalf("discovery state = %+v, want source=discovery count=2", st)
+	}
+	if st.LastError != "" {
+		t.Errorf("successful discovery must clear last_error, got %q", st.LastError)
+	}
+	if st.FetchedAt == "" || st.AgeSeconds < 0 {
+		t.Errorf("fetched_at/age must be recorded: %+v", st)
+	}
+}
+
+// TestFetchDynamicModelsPinRecordsState: a models_cn pin replaces discovery
+// for the realm entirely — the recorded state must say so (this is how a
+// stale pin gets caught when "the new model never shows up").
+func TestFetchDynamicModelsPinRecordsState(t *testing.T) {
+	resetDynamicModelsCache()
+	defer resetDynamicModelsCache()
+	orig := discoverModelsFn
+	defer func() { discoverModelsFn = orig }()
+	pinnedModelsMu.Lock()
+	origPins := map[string][]string{"cn": append([]string(nil), pinnedModels["cn"]...)}
+	pinnedModels["cn"] = []string{"deepseek-v4.1-flash"}
+	pinnedModelsMu.Unlock()
+	defer func() {
+		pinnedModelsMu.Lock()
+		pinnedModels["cn"] = origPins["cn"]
+		pinnedModelsMu.Unlock()
+	}()
+	called := false
+	discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+		called = true
+		return realmTestModels("x"), nil
+	}
+	got := fetchDynamicModelsFromStorage([]byte(`{"accessToken":"tok","region":"cn"}`))
+	if called {
+		t.Fatal("pin must skip discovery entirely")
+	}
+	if len(got) != 1 || got[0].ID != "deepseek-v4.1-flash" {
+		t.Fatalf("pin must be served verbatim: %+v", discoveryIDs(got))
+	}
+	st := realmModelStateFor("cn")
+	if st == nil || !strings.HasPrefix(st.Source, "pin") || st.Count != 1 {
+		t.Fatalf("pin state = %+v, want source=pin count=1", st)
 	}
 }

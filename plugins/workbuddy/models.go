@@ -164,6 +164,12 @@ var discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, e
 //  3. the realm's static catalog (v0.12.19: per-realm, no longer the shared
 //     CN-flavored list that made Intl credentials advertise
 //     deepseek-v4-flash and fail with upstream 11102).
+//
+// v0.9.9: every branch records its decision into the realm's diagnostics
+// entry (source + count + failure reason) so the panel and logs answer
+// "why does this realm show these models" without guesswork. Discovery
+// failures — the previously SILENT path that made realms look stuck on a
+// 1-model static catalog — now log a throttled reason line.
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	accessToken := ""
 	if len(storageJSON) > 0 {
@@ -173,19 +179,108 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	}
 	realm := realmForStorage(storageJSON, accessToken)
 	if pinned := pinnedModelsForRealm(realm); len(pinned) > 0 {
+		noteRealmSource(realm, "pin", len(pinned))
 		return pinned
 	}
 	if accessToken == "" {
-		return staticModelsForRealm(realm)
+		st := staticModelsForRealm(realm)
+		noteRealmSource(realm, "static (no token in storage)", len(st))
+		return st
 	}
 	if models, ok := cachedDynamicModels(realm); ok {
 		return models
 	}
-	if dyn, err := discoverModelsFn(accessToken, realm); err == nil && len(dyn) > 0 {
-		storeDynamicModels(realm, dyn)
-		return dyn
+	dyn, err := discoverModelsFn(accessToken, realm)
+	if err != nil {
+		noteRealmError(realm, err.Error())
+		return staticModelsForRealm(realm)
 	}
-	return staticModelsForRealm(realm)
+	if len(dyn) == 0 {
+		noteRealmError(realm, "discovery payload had no user-facing models")
+		return staticModelsForRealm(realm)
+	}
+	storeDynamicModels(realm, dyn)
+	log.Printf("models: realm=%s discovery ok: %d model(s)", realm, len(dyn))
+	return dyn
+}
+
+// realmModelsState is the dashboard-facing snapshot of one realm's model
+// source — the answer to "why does this realm list these models".
+type realmModelsState struct {
+	Source     string `json:"source"`
+	Count      int    `json:"count"`
+	FetchedAt  string `json:"fetched_at,omitempty"`
+	AgeSeconds int64  `json:"age_seconds,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	LastErrorA string `json:"last_error_at,omitempty"`
+}
+
+// noteRealmSource records that realm's advertised list came from a non-
+// discovery source (config pin or static fallback).
+func noteRealmSource(realm, source string, count int) {
+	dynamicModelsCache.Lock()
+	defer dynamicModelsCache.Unlock()
+	entry := dynamicModelsCache.realms[realm]
+	entry.source = source
+	entry.srcCount = count
+	dynamicModelsCache.realms[realm] = entry
+}
+
+// noteRealmError records a discovery failure for the realm and logs it with a
+// per-realm throttle: immediately on a NEW message, otherwise at most once a
+// minute (model.for_auth can fire per models query, and silent failure is
+// exactly what made thin/stale model lists undiagnosable).
+func noteRealmError(realm, msg string) {
+	now := time.Now()
+	dynamicModelsCache.Lock()
+	entry := dynamicModelsCache.realms[realm]
+	fallback := staticModelsForRealm(realm)
+	entry.models = nil
+	entry.source = "static (discovery failed)"
+	entry.srcCount = len(fallback)
+	entry.lastErr = msg
+	entry.lastErrAt = now
+	shouldLog := entry.lastLogAt.IsZero() || now.Sub(entry.lastLogAt) >= time.Minute
+	if shouldLog {
+		entry.lastLogAt = now
+	}
+	dynamicModelsCache.realms[realm] = entry
+	dynamicModelsCache.Unlock()
+	if shouldLog {
+		log.Printf("models: realm=%s discovery failed (%s) — serving static catalog (%d model(s)) until next successful discovery", realm, msg, len(fallback))
+	}
+}
+
+// realmModelStateFor snapshots the realm's diagnostics for the dashboard.
+// Returns nil when the realm has never been resolved (host has not queried
+// models for it yet).
+func realmModelStateFor(realm string) *realmModelsState {
+	dynamicModelsCache.RLock()
+	entry, ok := dynamicModelsCache.realms[realm]
+	if !ok {
+		dynamicModelsCache.RUnlock()
+		return nil
+	}
+	st := &realmModelsState{
+		Source:    entry.source,
+		Count:     len(entry.models),
+		LastError: entry.lastErr,
+	}
+	if st.Count == 0 {
+		st.Count = entry.srcCount
+	}
+	if !entry.fetched.IsZero() {
+		st.FetchedAt = entry.fetched.Format("2006-01-02 15:04:05")
+		st.AgeSeconds = int64(time.Since(entry.fetched).Seconds())
+	}
+	if !entry.lastErrAt.IsZero() {
+		st.LastErrorA = entry.lastErrAt.Format("2006-01-02 15:04:05")
+	}
+	dynamicModelsCache.RUnlock()
+	if st.Source == "" && st.LastError == "" {
+		return nil
+	}
+	return st
 }
 
 // cachedDynamicModels returns the cached discovery result for ONE realm.
@@ -204,7 +299,7 @@ func cachedDynamicModels(realm string) ([]pluginapi.ModelInfo, bool) {
 
 func storeDynamicModels(realm string, models []pluginapi.ModelInfo) {
 	dynamicModelsCache.Lock()
-	dynamicModelsCache.realms[realm] = realmModelsEntry{models: models, fetched: time.Now()}
+	dynamicModelsCache.realms[realm] = realmModelsEntry{models: models, fetched: time.Now(), source: "discovery"}
 	dynamicModelsCache.Unlock()
 }
 

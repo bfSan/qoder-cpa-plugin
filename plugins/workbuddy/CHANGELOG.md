@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.9.9
+
+### Model-source diagnostics: the model list now explains itself (repo v0.12.48)
+
+Follow-up to 0.9.8 (v0.12.47). Two user questions — "why didn't dynamic
+discovery pick up the new model" and "why does the codebuddy intl realm only
+show hy4" — had the same blind spot: the discovery-to-static-fallback
+decision was completely invisible, so a realm stuck on its (thin) static
+catalog was indistinguishable from discovery legitimately serving a short
+list.
+
+- **Per-realm diagnostics trail** (`models.go` / `main.go`): the realm cache
+  entry now records WHERE the advertised list came from (`discovery` / `pin`
+  / `static`), when it was fetched, and the last discovery failure reason.
+- **Throttled failure logging**: a discovery failure logs
+  `models: realm=<r> discovery failed (<reason>) — serving static catalog
+  (N model(s))…` immediately and at most once per minute thereafter
+  (`model.for_auth` can fire per models query; the old code swallowed the
+  error entirely).
+- **Panel "模型" row** (`panel.go` / `panel.html`): each account card shows
+  the realm's model source — `动态发现 N 个模型 · X分钟前`,
+  `配置钉住 N 个模型`, or `静态兜底 N 个模型 · 发现失败: <reason>`
+  (hover for the full reason). A stale `models_cn/models_intl/models_global`
+  pin — which silently overrides discovery for the realm — is now visible
+  too.
+- No change to model resolution itself: the
+  pin → discovery (5-minute cache) → static-catalog chain is identical to
+  0.9.6–0.9.8.
+- Tests: discovery-failure state recording + reason surfacing; discovery
+  success clearing the failure; pin short-circuit (discovery must not be
+  called) + pin state recording.
+
+## 0.9.8
+
+### Promote new upstream models beyond the cli agent list + DeepSeek V4.1 Flash (repo v0.12.47)
+
+- **Discovery promotion** (`models.go`): the cli agent's model IDs stay the
+  ordered base, but any ENABLED `data.models` entry missing from that list is
+  now PROMOTED (and logged) instead of silently dropped. Tencent adds new
+  models to `data.models` while the cli agent list lags — the exact shape of
+  the deepseek-v4.1-flash rollout on 2026-09-10 — and the old cli-only filter
+  made the plugin trail the official client on every launch.
+- **cli agent missing/renamed no longer hard-errors** discovery: enabled
+  `data.models` alone still produce the list (before: error → stale static
+  fallback).
+- **`rawJSONI64`**: `contextWindow` / `maxTokens` now tolerate number,
+  numeric-string and null shapes.
+- **CN static fallback** gains `deepseek-v4.1-flash` (1M context; official
+  DeepSeek launch-partner announcement, same evidence bar as hy4-preview).
+  Intl/Global catalogs unchanged (no direct upstream evidence yet).
+- Tests (`models_discovery_test.go`): cli base order, disabled skip,
+  promotion, cli-missing resilience, rawJSONI64 matrix.
+
 ## 0.9.7
 
 ### Discovery-first model output made explicit (repo v0.12.20)
