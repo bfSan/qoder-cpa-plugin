@@ -87,7 +87,7 @@ const (
 	// the codebuddy.ai realm issues its own JWTs — separate from both
 	// copilot.tencent.com and workbuddy.ai.
 	upstreamBaseIntl    = "https://www.codebuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	clientUA            = "CLI/2.108.1 CodeBuddy/2.108.1"
 	originReferer       = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 	originRefererIntl   = "https://www.codebuddy.ai"
@@ -333,7 +333,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.9"
+var version = "0.9.10"
 
 func wbRegistration() registration {
 	return registration{

@@ -460,7 +460,24 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 	}
 	body := resp.Body
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models API status %d", resp.StatusCode)
+		// v0.12.49: carry the URL and a body snippet in the error — the
+		// panel/log then shows whether the gateway answered with a login
+		// redirect (302 HTML), an auth wall (401), or a server fault (5xx)
+		// instead of a bare status code.
+		snippet := strings.TrimSpace(string(body))
+		snippet = strings.Map(func(r rune) rune {
+			if r == 0x09 || r == 0x0A || r == 0x0D || (r >= 0x20 && r != 0x7F) {
+				return r
+			}
+			return -1
+		}, snippet)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		if snippet == "" {
+			snippet = "(empty body)"
+		}
+		return nil, fmt.Errorf("models API status %d from %s: %s", resp.StatusCode, modelsURL, snippet)
 	}
 	var apiResp struct {
 		Code int `json:"code"`

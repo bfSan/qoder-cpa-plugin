@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.10
+
+### Fix bridged HTTP status decode — dynamic discovery always saw "status 0" (repo v0.12.49)
+
+Root cause of the user-visible `发现失败: models API status 0` on BOTH realms
+with a healthy upstream: the host http bridge marshals the tag-less
+`pluginapi.HTTPResponse` struct, so the status rides as PascalCase
+`"StatusCode"`. The plugin decoded only `"status_code"` — Go's
+case-insensitive field match rescued `Headers`/`Body` but NOT `StatusCode`
+(underscore vs no underscore), so every bridged response decoded with status
+0 and `callModelsAPI` treated even a genuine upstream 200 as a failure and
+fell back to the static catalog. Chat (stream path) and billing (lenient
+`>= 400` checks + body parsing) were unaffected, which is exactly why only
+model discovery appeared broken. Confirmed against the official wire: the
+console models endpoint exists on all three domains and answers Bearer auth
+(401 on a bogus token, 302 login redirect without one), while the v2 gateway
+has NO models route — the console endpoint remains the only dynamic source,
+as also evidenced by upstream tools (OmniRoute ships a static model table;
+cockpit-tools only does auth/billing).
+
+- **Dual-shape decode** (`host_bridge.go`): `hostHTTPDo` now decodes both
+  `"status_code"` (documented) and `"StatusCode"` (tag-less marshal via
+  `decodeHostHTTPDoResult`). A genuine status 0 — HTTP has no such status —
+  falls back to one direct request so callers see the real status or the real
+  transport error instead of a bogus 0.
+- **Richer discovery errors** (`models.go`): non-200 now reports
+  `models API status %d from <url>: <body snippet>` (control chars stripped,
+  200-byte cap) — a login redirect, auth wall, or server fault is visible
+  from the panel hover instead of a bare code.
+- **UA refresh** (`main.go`): `CLI/2.63.2 CodeBuddy/2.63.2` →
+  `CLI/2.108.1 CodeBuddy/2.108.1`, matching the current official CLI
+  (parity with OmniRoute's constant; the gateway rejects missing/stale
+  client identification with 403/code 10085).
+- Tests: dual-shape decode (PascalCase / lowercase / absent / malformed),
+  direct-path status surfacing over httptest.
+
 ## 0.9.9
 
 ### Model-source diagnostics: the model list now explains itself (repo v0.12.48)

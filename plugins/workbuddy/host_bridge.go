@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"runtime"
 	"time"
@@ -150,19 +151,52 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 	if err != nil {
 		return hostHTTPDoDirect(req, bodyBytes)
 	}
-	var resp struct {
-		StatusCode int                 `json:"status_code"`
-		Headers    map[string][]string `json:"headers,omitempty"`
-		Body       []byte              `json:"body,omitempty"`
+	// Wire compat (v0.12.49): hosts marshal pluginapi.HTTPResponse WITHOUT
+	// json tags, so the status arrives as PascalCase "StatusCode". Our old
+	// decode only looked for "status_code" — Go's case-insensitive field
+	// match rescued Headers/Body but NOT StatusCode (underscore ≠ no
+	// underscore), so every bridged response decoded with status 0 and the
+	// models discovery treated every upstream 200 as "models API status 0".
+	// Decode both shapes; keep "status_code" for hosts that document it.
+	status, headers, respBody, errDecode := decodeHostHTTPDoResult(result)
+	if errDecode != nil {
+		return nil, errDecode
 	}
-	if err := json.Unmarshal(result, &resp); err != nil {
-		return nil, fmt.Errorf("decode host.http.do response: %w", err)
+	if status == 0 {
+		// HTTP has no status 0: the host returned a non-error envelope
+		// with an unusable status (unknown wire shape or opaque transport
+		// failure). Retry once via direct so the caller sees the real
+		// status — or the real transport error — instead of a bogus 0.
+		log.Printf("workbuddy: host.http.do returned status 0 for %s %s — retrying direct", req.Method, req.URL.Host)
+		return hostHTTPDoDirect(req, bodyBytes)
 	}
 	return &hostHTTPResponse{
-		StatusCode: resp.StatusCode,
-		Headers:    http.Header(resp.Headers),
-		Body:       resp.Body,
+		StatusCode: status,
+		Headers:    headers,
+		Body:       respBody,
 	}, nil
+}
+
+// decodeHostHTTPDoResult decodes the inner Result of a host.http.do envelope.
+// Accepts both wire shapes seen in the wild: the documented lowercase
+// {"status_code":...} and the PascalCase {"StatusCode":...} that hosts emit
+// when they marshal the tag-less pluginapi.HTTPResponse struct directly.
+// Headers/Body match either spelling via Go's case-insensitive field match.
+func decodeHostHTTPDoResult(result json.RawMessage) (int, http.Header, []byte, error) {
+	var resp struct {
+		StatusCode    int                 `json:"status_code"`
+		StatusCodeAlt int                 `json:"StatusCode"`
+		Headers       map[string][]string `json:"headers,omitempty"`
+		Body          []byte              `json:"body,omitempty"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return 0, nil, nil, fmt.Errorf("decode host.http.do response: %w", err)
+	}
+	status := resp.StatusCode
+	if status == 0 {
+		status = resp.StatusCodeAlt
+	}
+	return status, http.Header(resp.Headers), resp.Body, nil
 }
 
 // hostHTTPDoDirect executes the request via the plugin's own http.Client.
