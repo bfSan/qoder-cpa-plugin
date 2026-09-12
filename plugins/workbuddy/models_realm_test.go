@@ -136,7 +136,7 @@ func TestDynamicModelsCachePerRealm(t *testing.T) {
 // is a hard upstream 11102, a false negative heals via discovery or pins.
 func TestStaticModelsPerRealm(t *testing.T) {
 	cnOnly := []string{
-		"deepseek-v4-flash", "deepseek-v4-pro",
+		"deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash",
 		"glm-5.2", "glm-5.1", "glm-5v-turbo",
 		"kimi-k2.7", "minimax-m3",
 		"hy3", "hy3-preview", "hy3-preview-agent",
@@ -159,6 +159,12 @@ func TestStaticModelsPerRealm(t *testing.T) {
 	}
 	if !realmCatalogHas(staticModelsForRealm("cn"), "deepseek-v4-flash") {
 		t.Errorf("cn static catalog must keep the CN DeepSeek models")
+	}
+	// v0.9.8: DeepSeek V4.1 Flash launched 2026-09-10 with WorkBuddy/CodeBuddy
+	// as official launch partners (deepseek.com news260910) — the CN static
+	// fallback must carry it during the rollout window.
+	if !realmCatalogHas(staticModelsForRealm("cn"), "deepseek-v4.1-flash") {
+		t.Errorf("cn static catalog must include deepseek-v4.1-flash (official 2026-09-10 launch)")
 	}
 }
 

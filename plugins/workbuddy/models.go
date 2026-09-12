@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -36,6 +37,13 @@ func wbModels() []pluginapi.ModelInfo {
 		{ID: "hy4-preview", Name: "Hy4 Preview", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		// DeepSeek V4.1 Flash: released 2026-09-10, official launch partner
+		// WorkBuddy/CodeBuddy (deepseek.com news260910; free for 2 weeks).
+		// 552B-backbone MoE, 1M context. Upstream ID follows the lowercase
+		// convention of deepseek-v4-flash/-pro. Dynamic discovery is the
+		// primary source; this static entry covers the discovery-failure
+		// fallback so the rollout window stays visible.
+		{ID: "deepseek-v4.1-flash", Name: "DeepSeek V4.1 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
 }
 
@@ -362,24 +370,7 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 	var apiResp struct {
 		Code int `json:"code"`
 		Data struct {
-			Models []struct {
-				ID                 string          `json:"id"`
-				Name               string          `json:"name"`
-				Description        string          `json:"description"`
-				Credits            string          `json:"credits"`
-				Configurable       bool            `json:"configurable"`
-				Configured         bool            `json:"configured"`
-				IsDefault          bool            `json:"isDefault"`
-				SupportsImages     bool            `json:"supportsImages"`
-				SupportsReasoning  bool            `json:"supportsReasoning"`
-				OnlyReasoning      bool            `json:"onlyReasoning"`
-				Reasoning          json.RawMessage `json:"reasoning"`
-				DisabledMultimodal bool            `json:"disabledMultimodal"`
-				Disabled           bool            `json:"disabled"`
-				DisabledReason     string          `json:"disabledReason"`
-				ContextWindow      json.RawMessage `json:"contextWindow"`
-				MaxTokens          json.RawMessage `json:"maxTokens"`
-			} `json:"models"`
+			Models []discoveredModel `json:"models"`
 			Agents []struct {
 				Name   string   `json:"name"`
 				Models []string `json:"models"`
@@ -399,63 +390,121 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 			break
 		}
 	}
-	if len(cliModelIDs) == 0 {
-		return nil, fmt.Errorf("no cli agent models found")
-	}
-	dynMap := make(map[string]struct {
-		ID                 string          `json:"id"`
-		Name               string          `json:"name"`
-		Description        string          `json:"description"`
-		Credits            string          `json:"credits"`
-		Configurable       bool            `json:"configurable"`
-		Configured         bool            `json:"configured"`
-		IsDefault          bool            `json:"isDefault"`
-		SupportsImages     bool            `json:"supportsImages"`
-		SupportsReasoning  bool            `json:"supportsReasoning"`
-		OnlyReasoning      bool            `json:"onlyReasoning"`
-		Reasoning          json.RawMessage `json:"reasoning"`
-		DisabledMultimodal bool            `json:"disabledMultimodal"`
-		Disabled           bool            `json:"disabled"`
-		DisabledReason     string          `json:"disabledReason"`
-		ContextWindow      json.RawMessage `json:"contextWindow"`
-		MaxTokens          json.RawMessage `json:"maxTokens"`
-	}, len(apiResp.Data.Models))
-	for _, m := range apiResp.Data.Models {
-		dynMap[m.ID] = m
-	}
-	var out []pluginapi.ModelInfo
-	for _, id := range cliModelIDs {
-		m, ok := dynMap[id]
-		if !ok {
-			continue
-		}
-		if m.Disabled {
-			continue
-		}
-		ctxLen := int64(0)
-		if len(m.ContextWindow) > 0 {
-			var v float64
-			if err := json.Unmarshal(m.ContextWindow, &v); err == nil {
-				ctxLen = int64(v)
-			}
-		}
-		maxTok := int64(0)
-		if len(m.MaxTokens) > 0 {
-			var v float64
-			if err := json.Unmarshal(m.MaxTokens, &v); err == nil {
-				maxTok = int64(v)
-			}
-		}
-		out = append(out, pluginapi.ModelInfo{
-			ID:                         m.ID,
-			Name:                       m.Name,
-			ContextLength:              ctxLen,
-			MaxCompletionTokens:        maxTok,
-			OwnedBy:                    providerName,
-			SupportedGenerationMethods: []string{"chat"},
-		})
+	out := modelsFromDiscovery(apiResp.Data.Models, cliModelIDs)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no user-facing models in discovery payload (cli agent list empty and data.models empty/disabled)")
 	}
 	return out, nil
+}
+
+// discoveredModel is one entry of the discovery payload's data.models array.
+type discoveredModel struct {
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	Description        string          `json:"description"`
+	Credits            string          `json:"credits"`
+	Configurable       bool            `json:"configurable"`
+	Configured         bool            `json:"configured"`
+	IsDefault          bool            `json:"isDefault"`
+	SupportsImages     bool            `json:"supportsImages"`
+	SupportsReasoning  bool            `json:"supportsReasoning"`
+	OnlyReasoning      bool            `json:"onlyReasoning"`
+	Reasoning          json.RawMessage `json:"reasoning"`
+	DisabledMultimodal bool            `json:"disabledMultimodal"`
+	Disabled           bool            `json:"disabled"`
+	DisabledReason     string          `json:"disabledReason"`
+	ContextWindow      json.RawMessage `json:"contextWindow"`
+	MaxTokens          json.RawMessage `json:"maxTokens"`
+}
+
+// rawJSONI64 decodes a JSON number field that may be number, numeric string
+// or null; any other shape decodes to 0.
+func rawJSONI64(raw json.RawMessage) int64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0
+	}
+	var v float64
+	if err := json.Unmarshal(raw, &v); err == nil {
+		return int64(v)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		var f float64
+		if _, err := fmt.Sscanf(s, "%g", &f); err == nil {
+			return int64(f)
+		}
+	}
+	return 0
+}
+
+// modelsFromDiscovery builds the advertised list from one discovery payload.
+// v0.9.8: the cli agent's model IDs form the base (order preserved), then any
+// ENABLED data.models entry missing from that list is PROMOTED. Tencent's
+// data.models is the account's own registration table — the official client
+// picker shows exactly these — so a freshly rolled-out model (e.g.
+// deepseek-v4.1-flash on 2026-09-10) must surface even while the cli agent
+// list still lags; the old cli-only filter made the plugin trail the official
+// client on every model launch. Promotions are logged so a potential upstream
+// 11102 ("service info not found") chat failure is traceable to this decision.
+// A renamed/missing cli agent no longer nukes discovery either: enabled
+// data.models alone still produce the list (before: hard error → stale static
+// fallback).
+func modelsFromDiscovery(dataModels []discoveredModel, cliModelIDs []string) []pluginapi.ModelInfo {
+	byID := make(map[string]discoveredModel, len(dataModels))
+	for _, m := range dataModels {
+		if m.ID != "" {
+			byID[m.ID] = m
+		}
+	}
+	toInfo := func(m discoveredModel) pluginapi.ModelInfo {
+		info := pluginapi.ModelInfo{
+			ID:                         m.ID,
+			Name:                       m.Name,
+			ContextLength:              rawJSONI64(m.ContextWindow),
+			MaxCompletionTokens:        rawJSONI64(m.MaxTokens),
+			OwnedBy:                    providerName,
+			SupportedGenerationMethods: []string{"chat"},
+		}
+		if info.Name == "" {
+			info.Name = info.ID
+		}
+		return info
+	}
+	seen := make(map[string]bool, len(cliModelIDs)+len(dataModels))
+	out := make([]pluginapi.ModelInfo, 0, len(cliModelIDs)+len(dataModels))
+	for _, id := range cliModelIDs {
+		m, ok := byID[id]
+		if !ok || m.Disabled {
+			continue
+		}
+		key := strings.ToLower(id)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, toInfo(m))
+	}
+	var promoted []string
+	for _, m := range dataModels {
+		if m.ID == "" || m.Disabled {
+			continue
+		}
+		key := strings.ToLower(m.ID)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, toInfo(m))
+		promoted = append(promoted, m.ID)
+	}
+	if len(promoted) > 0 {
+		log.Printf("models: promoted %d upstream model(s) not in cli agent list: %s",
+			len(promoted), strings.Join(promoted, ", "))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func cacheModelAliases(host pluginapi.HostConfigSummary) {
