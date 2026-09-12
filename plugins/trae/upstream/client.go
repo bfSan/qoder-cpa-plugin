@@ -301,11 +301,19 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 type ModelInfo struct {
         ID            string
         Name          string
-        ContextWindow int64 // = maxInputTokens
-        MaxTokens     int64 // = maxOutputTokens
+        ContextWindow int64 // = context_window_tokens.dev（目录未给则 0）
+        MaxTokens     int64 // 目录不透出输出上限，恒 0（model_detail_list 为加密参数）
 }
 
-// FetchModels 拉 SOLO 模型表（get_detail_param，32 配置）。
+// FetchModels 拉 SOLO/CN 模型表（get_detail_param），只返回用户可见的正式条目。
+// 目录同时携带三类非可选配置，必须过滤（v0.12.46，2026-09-12 对 38 条实测目录校准）：
+//   - is_invisible_to_user=true：内部 subagent/实验通道（browser_use_subagent、
+//     file_search_agent、sagitta/aquila、seed-code-pro-0430 等内部别名）；
+//   - display_name 为空：租户自定义模型占位模板（custom_model_* / summary 等）；
+//   - config_switch=false：已下线开关。
+// 其余含 is_beta / is_custom_model=true 且有正式显示名的条目照常透出（官方
+// 模型选择器同样展示它们）。可布尔字段用指针判缺失：上游省略时按
+// 可见/启用处理，避免字段缺省把整个目录过滤空。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
         body := map[string]any{
                 "function":            FunctionFor(a.Variant),
@@ -328,13 +336,15 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
         }
         var resp struct {
                 ConfigInfoList []struct {
-                        ConfigName    string `json:"config_name"`
+                        ConfigName          string `json:"config_name"`
+                        ConfigSwitch        *bool  `json:"config_switch"`
+                        IsInvisibleToUser   *bool  `json:"is_invisible_to_user"`
+                        ContextWindowTokens struct {
+                                Dev int64 `json:"dev"`
+                        } `json:"context_window_tokens"`
                         DisplayConfig struct {
                                 DisplayName string `json:"display_name"`
                         } `json:"display_config"`
-                        ModelDetailList []struct {
-                                ModelName string `json:"model_name"`
-                        } `json:"model_detail_list"`
                 } `json:"config_info_list"`
         }
         if err := json.Unmarshal(data, &resp); err != nil {
@@ -345,13 +355,23 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
                 if cfg.ConfigName == "" {
                         continue
                 }
+                if cfg.ConfigSwitch != nil && !*cfg.ConfigSwitch {
+                        continue // 已下线开关
+                }
+                if cfg.IsInvisibleToUser != nil && *cfg.IsInvisibleToUser {
+                        continue // 内部配置，非用户可选模型
+                }
+                if cfg.DisplayConfig.DisplayName == "" {
+                        continue // 租户自定义占位模板
+                }
                 out = append(out, ModelInfo{
-                        ID:   cfg.ConfigName,
-                        Name: cfg.DisplayConfig.DisplayName,
+                        ID:            cfg.ConfigName,
+                        Name:          cfg.DisplayConfig.DisplayName,
+                        ContextWindow: cfg.ContextWindowTokens.Dev,
                 })
         }
         if len(out) == 0 {
-                return nil, fmt.Errorf("models api returned empty list")
+                return nil, fmt.Errorf("models api returned no user-facing models")
         }
         return out, nil
 }

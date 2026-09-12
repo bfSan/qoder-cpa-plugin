@@ -139,7 +139,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.45"
+var version = "0.12.46"
 
 var (
         hostAPI *C.cliproxy_host_api
@@ -511,7 +511,8 @@ func suffixModels(in []pluginapi.ModelInfo, suffix string) []pluginapi.ModelInfo
         }
         out := make([]pluginapi.ModelInfo, 0, len(in))
         for _, m := range in {
-                out = append(out, pluginapi.ModelInfo{ID: m.ID + suffix, Name: m.Name, OwnedBy: m.OwnedBy})
+                out = append(out, pluginapi.ModelInfo{ID: m.ID + suffix, Name: m.Name, OwnedBy: m.OwnedBy,
+                        ContextLength: m.ContextLength, MaxCompletionTokens: m.MaxCompletionTokens})
         }
         return out
 }
@@ -531,8 +532,8 @@ func handleModelStatic(_ []byte) ([]byte, error) {
                         out = append(out, m)
                 }
         }
-        add(staticModels())
-        add(suffixModels(staticModels(), modelSuffixSolo))
+        add(staticCNModels())
+        add(suffixModels(staticSoloModels(), modelSuffixSolo))
         add(intlstaticModels())
         return okEnvelope(pluginapi.ModelResponse{
                 Provider: providerName,
@@ -558,10 +559,10 @@ func handleModelForAuth(request []byte) ([]byte, error) {
         a, err := parseStoredAuth(req.StorageJSON)
         if err != nil {
                 log.Printf("model.for_auth: parse storage failed (%v) — static fallback", err)
-                // Fall back to the cn static list if we can't parse the auth.
+                // Variant unknown — advertise the cn ∪ solo static union.
                 return okEnvelope(pluginapi.ModelResponse{
                         Provider: providerName,
-                        Models:   staticModels(),
+                        Models:   staticUnionModels(),
                 })
         }
         return okEnvelope(pluginapi.ModelResponse{
@@ -583,7 +584,7 @@ func modelsForVariant(a *auth.Auth) []pluginapi.ModelInfo {
         dynamic, err := upstreamClient.FetchModels(a)
         if err != nil {
                 log.Printf("model.for_auth %s (%s): %v — falling back to static", a.UID, a.Variant, err)
-                return suffixModels(staticModels(), suffix)
+                return suffixModels(staticForVariant(a.Variant), suffix)
         }
         out := make([]pluginapi.ModelInfo, 0, len(dynamic))
         seen := make(map[string]bool, len(dynamic))
@@ -605,27 +606,86 @@ func modelsForVariant(a *auth.Auth) []pluginapi.ModelInfo {
                 })
         }
         if len(out) == 0 {
-                return suffixModels(staticModels(), suffix)
+                return suffixModels(staticForVariant(a.Variant), suffix)
         }
         return out
 }
 
-// staticModels returns the known SOLO CN model list (subset).
-func staticModels() []pluginapi.ModelInfo {
-        known := []string{
-                "glm-5.2", "glm-5.3", "DeepSeek-V4-Pro", "DeepSeek-V4-Flash",
-                "kimi-k3", "Doubao-Seed-2.1-Pro", "Doubao-Seed-2.1-Turbo",
-                "claude-sonnet-4-5", "claude-opus-4-1", "gpt-5",
-        }
+// staticModel is one fallback-catalog entry: id + display name + context window.
+type staticModel struct {
+        id   string
+        name string
+        ctx  int64
+}
+
+func staticToModelInfos(known []staticModel) []pluginapi.ModelInfo {
         out := make([]pluginapi.ModelInfo, 0, len(known))
-        for _, id := range known {
+        for _, m := range known {
                 out = append(out, pluginapi.ModelInfo{
-                        ID:      id,
-                        Name:    id,
-                        OwnedBy: providerName,
+                        ID:            m.id,
+                        Name:          m.name,
+                        ContextLength: m.ctx,
+                        OwnedBy:       providerName,
                 })
         }
         return out
+}
+
+// staticForVariant picks the fallback catalog for a credential variant
+// (solo accounts use the solo_work_lite catalog, everything else in this
+// plugin the inline_chat catalog).
+func staticForVariant(variant string) []pluginapi.ModelInfo {
+        if variant == variantSolo {
+                return staticSoloModels()
+        }
+        return staticCNModels()
+}
+
+// staticUnionModels is the parse-failure fallback when the variant is unknown:
+// the cn plain list plus the solo list (unsuffixed).
+func staticUnionModels() []pluginapi.ModelInfo {
+        out := make([]pluginapi.ModelInfo, 0, len(staticCNModels())+len(staticSoloModels()))
+        out = append(out, staticCNModels()...)
+        out = append(out, staticSoloModels()...)
+        return out
+}
+
+// staticCNModels / staticSoloModels are the FALLBACK catalogs used only when
+// the dynamic get_detail_param fetch fails (auth expired mid-cycle, network
+// error) or returns nothing user-facing. They are a calibrated snapshot of the
+// user-visible entries of each function's catalog (2026-09-12, live probe of
+// get_detail_param with a real credential — entries filtered by
+// is_invisible_to_user / empty display_name / config_switch=false; tenant
+// custom models are deliberately NOT snapshotted since they are tenant
+// specific). Everything dynamic comes from FetchModels, so upstream model
+// additions/rollouts appear WITHOUT a plugin update (the host re-runs
+// model.for_auth on every auth register/refresh).
+func staticCNModels() []pluginapi.ModelInfo {
+        return staticToModelInfos([]staticModel{
+                {"seed_m8", "Doubao-1.5-pro", 28000},
+                {"kimi-k2", "Kimi-K2-0905", 28000},
+                {"Doubao-Seed-Code", "Seed-Code", 28000},
+        })
+}
+
+func staticSoloModels() []pluginapi.ModelInfo {
+        return staticToModelInfos([]staticModel{
+                {"Doubao-Seed-Evolving", "Seed-Evolving", 256000},
+                {"Doubao-Seed-2.1-Pro", "Seed-2.1-Pro", 256000},
+                {"Doubao-Seed-2.1-Turbo", "Seed-2.1-Turbo", 256000},
+                {"glm-5.2", "GLM-5.2", 200000},
+                {"glm-5", "GLM-5", 200000},
+                {"DeepSeek-V4-Flash-Official", "DeepSeek-V4-Flash 正式版", 200000},
+                {"DeepSeek-V4-Flash", "DeepSeek-V4-Flash", 200000},
+                {"DeepSeek-V4-Pro-Official", "DeepSeek-V4-Pro 正式版", 200000},
+                {"DeepSeek-V4-Pro", "DeepSeek-V4-Pro", 200000},
+                {"kimi-k3", "Kimi-K3", 200000},
+                {"kimi-k2.7-code", "Kimi-K2.7-Code", 200000},
+                {"kimi-k2.6", "Kimi-K2.6", 200000},
+                {"minimax-m3", "MiniMax-M3", 200000},
+                {"qwen3.8-max", "Qwen3.8-Max", 200000},
+                {"qwen-3.7-plus", "Qwen3.7-Plus", 200000},
+        })
 }
 
 // -----------------------------------------------------------------------------
