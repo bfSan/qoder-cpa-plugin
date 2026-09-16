@@ -580,6 +580,15 @@ func modelsFromDiscovery(dataModels []discoveredModel, cliModelIDs []string) []p
 		if info.Name == "" {
 			info.Name = info.ID
 		}
+		// v0.9.11: surface the registration table's own modality flags.
+		// supportsImages && !disabledMultimodal is Tencent's statement
+		// that the model accepts image input; advertising it lets
+		// modality-aware clients offer attachments correctly instead of
+		// guessing. Static catalogs stay un-declared (no per-realm
+		// upstream evidence — same policy as model IDs there).
+		if m.SupportsImages && !m.DisabledMultimodal {
+			info.SupportedInputModalities = []string{"text", "image"}
+		}
 		return info
 	}
 	seen := make(map[string]bool, len(cliModelIDs)+len(dataModels))

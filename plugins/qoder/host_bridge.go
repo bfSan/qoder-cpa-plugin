@@ -141,25 +141,51 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 		},
 	}
 	raw, err := hostCall(pluginabi.MethodHostHTTPDo, mustJSON(wire))
-	if err != nil {
-		// Bridge exists but the call failed — fall back to direct so a transient
-		// host RPC error doesn't take down the executor.
-		return hostHTTPDoDirect(req, bodyBytes)
+	if err == nil {
+		result, uerr := hostBridgeUnwrap(raw, pluginabi.MethodHostHTTPDo)
+		if uerr == nil {
+			resp, perr := decodeBridgeHTTPResponse(result)
+			if perr == nil {
+				return resp, nil
+			}
+			return nil, perr
+		}
+		err = uerr
 	}
-	result, err := hostBridgeUnwrap(raw, pluginabi.MethodHostHTTPDo)
-	if err != nil {
-		return hostHTTPDoDirect(req, bodyBytes)
+	// Bridge exists but the call failed — fall back to direct so a transient
+	// host RPC error doesn't take down the executor. The host's own failure
+	// reason is preserved in the combined error when direct also fails.
+	if dResp, dErr := hostHTTPDoDirect(req, bodyBytes); dErr == nil {
+		return dResp, nil
+	} else {
+		return nil, fmt.Errorf("host http bridge: %v; direct fallback: %w", err, dErr)
 	}
+}
+
+// decodeBridgeHTTPResponse parses the host bridge's host.http.do result.
+// The host marshals pluginapi.HTTPResponse WITHOUT json tags, so the wire keys
+// are Go field names ("StatusCode"/"Headers"/"Body"). Parsing only
+// "status_code" silently decoded every bridged response with StatusCode=0
+// (underscore defeats Go's case-insensitive key fallback) — the same root
+// cause workbuddy 0.9.10 fixed for its "models API status 0" symptom.
+// qoder's callers only used the status for >=400 checks, so the bug stayed
+// latent here; both spellings are now accepted.
+func decodeBridgeHTTPResponse(result json.RawMessage) (*hostHTTPResponse, error) {
 	var resp struct {
-		StatusCode int                 `json:"status_code"`
-		Headers    map[string][]string `json:"headers,omitempty"`
-		Body       []byte              `json:"body,omitempty"`
+		StatusCode    int                 `json:"StatusCode"`
+		StatusCodeAlt int                 `json:"status_code"`
+		Headers       map[string][]string `json:"Headers"`
+		Body          []byte              `json:"Body"`
 	}
 	if err := json.Unmarshal(result, &resp); err != nil {
 		return nil, fmt.Errorf("decode host.http.do response: %w", err)
 	}
+	status := resp.StatusCode
+	if status == 0 {
+		status = resp.StatusCodeAlt
+	}
 	return &hostHTTPResponse{
-		StatusCode: resp.StatusCode,
+		StatusCode: status,
 		Headers:    http.Header(resp.Headers),
 		Body:       resp.Body,
 	}, nil

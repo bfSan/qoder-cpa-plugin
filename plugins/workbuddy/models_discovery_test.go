@@ -215,3 +215,34 @@ func TestFetchDynamicModelsPinRecordsState(t *testing.T) {
 		t.Fatalf("pin state = %+v, want source=pin count=1", st)
 	}
 }
+
+// TestModelsFromDiscoveryModalityFlags is the v0.9.11 lock for image-input
+// advertisement: supportsImages && !disabledMultimodal (Tencent's own
+// registration-table statement) maps to SupportedInputModalities
+// ["text","image"]; everything else stays un-declared so modality-aware
+// clients don't offer attachments a model would reject.
+func TestModelsFromDiscoveryModalityFlags(t *testing.T) {
+	vision := disc("glm-5v-turbo", "GLM-5V Turbo", 200000, false)
+	vision.SupportsImages = true
+	textOnly := disc("deepseek-v4-flash", "DeepSeek V4 Flash", 1000000, false)
+	textOnly.SupportsImages = true
+	textOnly.DisabledMultimodal = true // account-level multimodal switch off
+	plain := disc("hy4-preview", "Hy4 Preview", 1000000, false)
+	got := modelsFromDiscovery([]discoveredModel{vision, textOnly, plain}, nil)
+	if len(got) != 3 {
+		t.Fatalf("ids=%v", discoveryIDs(got))
+	}
+	byID := map[string]pluginapi.ModelInfo{}
+	for _, m := range got {
+		byID[m.ID] = m
+	}
+	if m := byID["glm-5v-turbo"]; len(m.SupportedInputModalities) != 2 {
+		t.Fatalf("vision modalities = %v, want [text image]", m.SupportedInputModalities)
+	}
+	if m := byID["deepseek-v4-flash"]; len(m.SupportedInputModalities) != 0 {
+		t.Fatalf("disabledMultimodal must stay un-declared, got %v", m.SupportedInputModalities)
+	}
+	if m := byID["hy4-preview"]; len(m.SupportedInputModalities) != 0 {
+		t.Fatalf("no upstream flag must stay un-declared, got %v", m.SupportedInputModalities)
+	}
+}

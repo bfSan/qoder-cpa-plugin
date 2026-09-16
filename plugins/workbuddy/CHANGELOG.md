@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.11
+
+### Image-input capability advertisement + image-forwarding audit (repo v0.12.50)
+
+User question: "workbuddy/trae 不能转发图片？是模型的问题还是我们没做转发？"
+Audit conclusion across the whole chain (host → plugin → upstream), cross-checked
+against the two reference implementations the user pointed at
+(diegosouzapw/OmniRoute, jlcodes99/cockpit-tools):
+
+- **workbuddy**: images were NEVER stripped. The host's claude→openai
+  translation emits `image_url` parts, and the plugin's payload rewriter
+  (`rewriteContentField`) only touches `text` parts — image parts pass
+  through verbatim to `/v2/chat/completions`. OmniRoute's codebuddy-cn
+  executor behaves identically and its catalog marks most models
+  `supportsVision: true`.
+- **trae intl** (`flattenQuery`): the reverse-engineered `chat_sessions`
+  protocol is text-only — the `query` block has no image shape, so image
+  parts are dropped during flattening. OmniRoute's TraeExecutor flattens
+  the exact same way (text extraction only); this is an upstream protocol
+  limitation, not a plugin regression.
+- **trae CN/SOLO**: array content passes through untested ("保守透传"); the
+  official client's image-block shape for `llm_utils_chat` is unknown.
+
+What 0.9.11 ships: discovery entries with upstream's own
+`supportsImages && !disabledMultimodal` flags (Tencent's registration table —
+direct upstream evidence) now advertise
+`SupportedInputModalities: ["text","image"]` so modality-aware clients can
+offer/hide image attachments per model instead of guessing. Static catalogs
+stay un-declared. Regression-locked in `TestModelsFromDiscoveryModalityFlags`.
+
+Also: qoder's `host_bridge.go` had the same latent tag-less-wire decode bug
+that 0.9.10 fixed for workbuddy (its `>=400` checks never fired on the
+phantom 0, so it went unnoticed) — same dual-key decoder applied, qoder
+0.8.9.
+
 ## 0.9.10
 
 ### Fix bridged HTTP status decode — dynamic discovery always saw "status 0" (repo v0.12.49)
