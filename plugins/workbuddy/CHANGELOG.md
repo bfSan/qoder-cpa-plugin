@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.9.12
+
+### /v3/config dual-probe discovery + capability surfacing + non-chat model filter (repo v0.12.51)
+
+Third leg of the reference-implementation alignment
+(`linguo2625469/workbuddy2api-panel`, `iJetLi/deepseek-harness-codearts`),
+following 0.9.10 (status-0 wire fix) and 0.9.11 (modality advertisement):
+
+- **Dual-probe discovery** (`models.go`): the enterprise endpoint
+  (`/console/enterprises/personal/models`, ordering authority: cli agent
+  base + promotions) now runs CONCURRENTLY with a `/v3/config` probe —
+  the official IDE configuration catalog that needs the
+  `CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0` UA plus
+  `X-Domain`/`X-Product: SaaS`/`X-User-Id`/`X-CodeBuddy-Request: 1`
+  headers. v3 carries the full capability table (real context windows,
+  effort levels) and family models the enterprise table lacks
+  (gpt-5.3-codex etc. on global). Merge key = model id: enterprise keeps
+  ordering, v3 fills capability gaps and appends its own extras. Either
+  probe failing alone degrades to the other (warn logged); double failure
+  reports BOTH reasons in the panel's failure line.
+- **Capability surfacing**: discovery entries now also populate
+  `ContextLength`/`InputTokenLimit`, `MaxCompletionTokens`/
+  `OutputTokenLimit` (both endpoint generations' field names:
+  `contextWindow`/`maxTokens` AND `maxInputTokens`/`maxOutputTokens`),
+  and `Thinking.Levels`/`Thinking.ZeroAllowed` from
+  `reasoning.supportedEfforts`/`canDisableThinking`. The 0.9.11 modality
+  rule is unchanged and applies to v3 entries too.
+- **nonChatModel filter** (harness `isChatModel` parity): entries with id
+  prefix `nes-`/`completion-`/`codewise-`, `supportsExtra:true`, output
+  cap <= 256, or a `text-to-image` tag never reach the selectable list —
+  selecting them dies with upstream 11102/11133. This closes the v0.9.8
+  promotion hole where such an entry could be promoted into the chat list
+  (the promotion loop now filters the same classes).
+- **X-User-Id on the v3 probe**: the account uid is extracted from the
+  stored auth blob (`extractAccountUID`) and sent as the IDE clients do;
+  empty = header omitted.
+
+Regression locks: `models_v3_test.go` (nonChatModel matrix, promotion
+filter, capability mapping, merge/overlay, uid extraction, per-realm v3
+endpoints/domains).
+
 ## 0.9.11
 
 ### Image-input capability advertisement + image-forwarding audit (repo v0.12.50)

@@ -141,7 +141,7 @@ func TestFetchDynamicModelsRecordsSourceState(t *testing.T) {
 	defer func() { discoverModelsFn = orig }()
 	storage := []byte(`{"accessToken":"tok","region":"cn"}`)
 
-	discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+	discoverModelsFn = func(accessToken, realm, uid string) ([]pluginapi.ModelInfo, error) {
 		return nil, errors.New("models API status 403")
 	}
 	got := fetchDynamicModelsFromStorage(storage)
@@ -162,7 +162,7 @@ func TestFetchDynamicModelsRecordsSourceState(t *testing.T) {
 		t.Error("state last_error_at must be set")
 	}
 
-	discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+	discoverModelsFn = func(accessToken, realm, uid string) ([]pluginapi.ModelInfo, error) {
 		return realmTestModels("deepseek-v4.1-flash", "glm-5.2"), nil
 	}
 	got = fetchDynamicModelsFromStorage(storage)
@@ -199,7 +199,7 @@ func TestFetchDynamicModelsPinRecordsState(t *testing.T) {
 		pinnedModelsMu.Unlock()
 	}()
 	called := false
-	discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+	discoverModelsFn = func(accessToken, realm, uid string) ([]pluginapi.ModelInfo, error) {
 		called = true
 		return realmTestModels("x"), nil
 	}

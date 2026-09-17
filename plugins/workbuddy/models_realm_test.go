@@ -264,7 +264,7 @@ func TestFetchDynamicModelsPinnedWins(t *testing.T) {
 	pinnedModelsMu.Unlock()
 	calls := 0
 	orig := discoverModelsFn
-	discoverModelsFn = func(token, realm string) ([]pluginapi.ModelInfo, error) {
+	discoverModelsFn = func(token, realm, uid string) ([]pluginapi.ModelInfo, error) {
 		calls++
 		return realmTestModels("should-not-be-used"), nil
 	}
@@ -287,7 +287,7 @@ func TestFetchDynamicModelsFallbackPerRealm(t *testing.T) {
 	resetDynamicModelsCache()
 	defer func() { resetPinnedModels(); resetDynamicModelsCache() }()
 	orig := discoverModelsFn
-	discoverModelsFn = func(token, realm string) ([]pluginapi.ModelInfo, error) {
+	discoverModelsFn = func(token, realm, uid string) ([]pluginapi.ModelInfo, error) {
 		return nil, errors.New("models API status 500")
 	}
 	defer func() { discoverModelsFn = orig }()
