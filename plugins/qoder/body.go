@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,8 @@ func cpaToUpstreamKey(cpaModel string) string {
 		return "auto"
 	case "qwen3.8-max-preview", "qwen3.8-max", "qmodel_preview":
 		return "qmodel_preview"
+	case "qwen3.8-flash", "qfmodel":
+		return "qfmodel"
 	case "qwen3.7-max", "qmodel_latest":
 		return "qmodel_latest"
 	case "qwen3.7-plus", "qmodel":
@@ -56,6 +59,10 @@ type openAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []openAIMessage `json:"messages"`
 	Stream   bool            `json:"stream"`
+	// ReasoningEffort is the OpenAI-style thinking dial. Upstream thinking_config
+	// accepts low/medium/xhigh (2026-09-18 probe); empty or invalid leaves the
+	// parameters block untouched so upstream applies its own default (medium).
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // extractLatestUserPrompt returns the content of the last user message.
@@ -64,6 +71,18 @@ func extractLatestUserPrompt(messages []openAIMessage) string {
 		if messages[i].Role == "user" {
 			return messages[i].Content
 		}
+	}
+	return ""
+}
+
+// normalizeReasoningEffort validates the OpenAI-style reasoning_effort dial.
+// Upstream accepts low/medium/xhigh; anything else returns "" = inject nothing.
+// All models share the qfmodel dial set (2026-09-19 unified reasoning chain).
+func normalizeReasoningEffort(s string) string {
+	effort := strings.ToLower(strings.TrimSpace(s))
+	switch effort {
+	case "low", "medium", "xhigh":
+		return effort
 	}
 	return ""
 }
@@ -90,9 +109,17 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 	base["aliyun_user_type"] = userType
 	base["agent_id"] = "agent_common"
 
-	// model_config
+	// model_config. 2026-09-19 upstream behavior: every request sends
+	// is_reasoning=true + source="system" (the qwen3.8-flash reasoning chain).
+	// Models that cannot think ignore these fields upstream (verified by the
+	// reference proxy with a fabricated model key). source="system" is the real
+	// reasoning trigger — without it the gateway never streams reasoning_content.
 	if mc, ok := base["model_config"].(map[string]any); ok {
 		mc["key"] = modelKey
+		mc["is_reasoning"] = true
+		if _, ok := mc["source"]; !ok {
+			mc["source"] = "system"
+		}
 	}
 
 	// chat_context.text.text + chat_context.extra.originalContent.text
@@ -106,6 +133,7 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 			}
 			if mc, ok := extra["modelConfig"].(map[string]any); ok {
 				mc["key"] = modelKey
+				mc["is_reasoning"] = true
 			}
 		}
 	}
@@ -139,6 +167,19 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 		} else {
 			biz["name"] = prompt
 		}
+	}
+
+	// Reasoning dial: inject upstream thinking parameters only when the client
+	// supplied a valid reasoning_effort. Absent/invalid keeps upstream defaults;
+	// the template parameters (max_tokens) are preserved either way.
+	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+		params, _ := base["parameters"].(map[string]any)
+		if params == nil {
+			params = map[string]any{}
+			base["parameters"] = params
+		}
+		params["enable_thinking"] = true
+		params["reasoning_effort"] = effort
 	}
 
 	return json.Marshal(base)

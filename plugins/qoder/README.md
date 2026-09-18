@@ -92,7 +92,9 @@ auth 文件字段（可共存）：
 
 ## 模型
 
-10 个静态模型（`qmodel_preview` 等）+ COSY 动态拉取。CPA 侧别名示例：`qoder/qwen3.8-max` → `qmodel_preview`。
+11 个静态模型（`qmodel_preview`、`qfmodel` 等）+ COSY 动态拉取。CPA 侧别名示例：`qoder/qwen3.8-max` → `qmodel_preview`。
+
+思考模式：2026-09-19 起对齐上游——所有请求统一 `is_reasoning: true` + `source: "system"`（不支持思考的模型上游自动忽略）；客户端可传 OpenAI 风格 `reasoning_effort`（`low`/`medium`/`xhigh`），非法值/缺省走上游默认（medium）。`Qwen3.8-Flash`（`qfmodel`）为官方限时免费模型（2026-10 前），动态发现与静态目录均已收录。
 
 ## 参考文档
 
