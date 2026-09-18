@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -748,11 +749,52 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 // RefreshTokenIfNeeded refreshes the token only if it will expire within `within`.
 // Returns true if a refresh actually happened.
 func (c *Client) RefreshTokenIfNeeded(a *Auth, within time.Duration) (bool, error) {
-	if !a.NeedsRefresh(within) {
+	// v0.12.49: near-expiry check plus issuance-age check — see issuedRotateMax.
+	if !a.NeedsRefresh(within) && !issuedTooLong(a.AccessToken) {
 		return false, nil
 	}
 	if err := c.RefreshToken(a); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// tokenIssuedAt parses the `iat` (unix seconds) out of a JWT accessToken
+// payload ({data:{...},exp,iat}); ok=false when absent/unparseable — callers
+// then fall back to the expiresAt-only rule (legacy behaviour).
+func tokenIssuedAt(jwtRaw string) (time.Time, bool) {
+	parts := strings.Split(strings.TrimSpace(jwtRaw), ".")
+	if len(parts) < 2 || parts[1] == "" {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if raw, err = base64.StdEncoding.DecodeString(parts[1]); err != nil {
+			return time.Time{}, false
+		}
+	}
+	var payload struct {
+		Iat int64 `json:"iat"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.Iat <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(payload.Iat, 0), true
+}
+
+// issuedRotateMax mirrors the CN side (dsh-router-traework 23d06cb): refresh
+// proactively once the token is 15 days past issuance — the backend may
+// revoke long-lived credentials server-side before expiry, and an unused
+// credential never hits the near-expiry window, so a broken refresh chain
+// would otherwise surface only as a hard session_dead later.
+const issuedRotateMax = 15 * 24 * time.Hour
+
+// issuedTooLong reports whether the token's issuance age exceeds the
+// proactive rotation cap.
+func issuedTooLong(jwtRaw string) bool {
+	iat, ok := tokenIssuedAt(jwtRaw)
+	if !ok {
+		return false
+	}
+	return time.Since(iat) >= issuedRotateMax
 }

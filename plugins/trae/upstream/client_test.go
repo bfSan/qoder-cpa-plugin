@@ -183,7 +183,7 @@ func TestChatStreamSendsHeadersAndRewritesBody(t *testing.T) {
 	if gotAuth != "Cloud-IDE-JWT at" || gotUID != "u1" {
 		t.Errorf("headers: auth=%q uid=%q", gotAuth, gotUID)
 	}
-	if gotAppID != AppID || gotIdeVer != "0.1.43" {
+	if gotAppID != AppID || gotIdeVer != "0.1.61" {
 		t.Errorf("app headers: appid=%q idever=%q", gotAppID, gotIdeVer)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) || !bytes.Contains(gotBody, []byte(`"function":"inline_chat"`)) {

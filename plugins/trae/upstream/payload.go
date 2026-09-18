@@ -128,6 +128,16 @@ func PrepareBody(src []byte, variant string) []byte {
 	if _, ok := out["max_tokens"]; !ok {
 		out["max_tokens"] = 1000000
 	}
+	// v0.12.49: reasoning_effort 透传（dsh-router 生产实证上游容忍；
+	// auto/none/off 不显式下发，与真实客户端一致）。v0.12.37 白名单
+	// 曾整体丢弃它，客户端要的推理等级到不了上游。
+	if re, ok := obj["reasoning_effort"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(re)) {
+		case "", "auto", "none", "off":
+		default:
+			out["reasoning_effort"] = re
+		}
+	}
 	switch stop := obj["stop"].(type) {
 	case string:
 		out["stop"] = stop

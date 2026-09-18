@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -398,5 +399,27 @@ func TestPrepareBodyDefaultsMaxTokens(t *testing.T) {
 	json.Unmarshal(out2, &m2)
 	if v, ok := m2["max_tokens"].(float64); !ok || v != 4096 {
 		t.Errorf("explicit max_tokens = %v, want 4096 (passthrough)", m2["max_tokens"])
+	}
+}
+
+// v0.12.49: reasoning_effort 非 auto/none/off 时透传上游（dsh-router 生产
+// 实证上游容忍）；auto/none/off 不显式下发，与真实客户端一致。v0.12.37
+// 白名单曾整体丢弃它。
+func TestPrepareBodyForwardsReasoningEffort(t *testing.T) {
+	out := PrepareBody([]byte(`{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`), "solo")
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if m["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort = %v, want high (forwarded)", m["reasoning_effort"])
+	}
+
+	for _, lv := range []string{"auto", "none", "off"} {
+		in := fmt.Sprintf(`{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}],"reasoning_effort":%q}`, lv)
+		out := PrepareBody([]byte(in), "solo")
+		var m map[string]any
+		json.Unmarshal(out, &m)
+		if _, ok := m["reasoning_effort"]; ok {
+			t.Errorf("reasoning_effort=%q must not be sent upstream", lv)
+		}
 	}
 }

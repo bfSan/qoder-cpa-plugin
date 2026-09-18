@@ -192,7 +192,9 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, skew time.Duration) (bool, error) {
 	a.Lock()
 	defer a.Unlock()
-	if !a.NeedsRefreshLocked(skew) {
+	if !a.NeedsRefreshLocked(skew) && !auth.IssuedTooLongLocked(a.AccessToken) {
+		// v0.12.49: 临到期判之外加签发龄判——iat 距今超 15 天也轮换
+		//（服务端吊销旧凭据风险，见 auth.issuedRotateMax 注释）。
 		return false, nil
 	}
 	if err := c.refreshLocked(a); err != nil {
