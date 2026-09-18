@@ -309,6 +309,7 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 			AppLanguage   string `json:"appLanguage"`
 			AppVersion    string `json:"appVersion"`
 			RefererOrigin string `json:"refererOrigin"`
+			Timezone      string `json:"timezone"`
 		} `json:"auth"`
 		Account struct {
 			UID          string `json:"uid"`
@@ -335,6 +336,7 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 		AppLanguage   string `json:"appLanguage"`
 		AppVersion    string `json:"appVersion"`
 		RefererOrigin string `json:"refererOrigin"`
+		Timezone      string `json:"timezone"`
 	}
 	if _, ok := probe["auth"]; ok {
 		if err := json.Unmarshal(raw, &nested); err != nil {
@@ -359,6 +361,7 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 			AppLanguage:   nested.Auth.AppLanguage,
 			AppVersion:    nested.Auth.AppVersion,
 			RefererOrigin: nested.Auth.RefererOrigin,
+			Timezone:      nested.Auth.Timezone,
 		}, nil
 	}
 	if err := json.Unmarshal(raw, &flat); err != nil {
@@ -383,6 +386,7 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 		AppLanguage:   flat.AppLanguage,
 		AppVersion:    flat.AppVersion,
 		RefererOrigin: flat.RefererOrigin,
+		Timezone:      flat.Timezone,
 	}, nil
 }
 

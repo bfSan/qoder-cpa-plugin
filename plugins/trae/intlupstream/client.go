@@ -85,6 +85,12 @@ type Auth struct {
 	// (DefaultWebOrigin when empty). Providers mirroring an auth file that
 	// was captured against the legacy solo.trae.ai host can pin it here.
 	RefererOrigin string
+
+	// Timezone optionally sets the x-trae-user-timezone header (OmniRoute
+	// #13255 forwards psd.userTimezone alongside the Referer/Origin refresh
+	// — both halves together stopped imported connections failing with 401).
+	// Empty = header omitted, matching upstream's conditional send.
+	Timezone string
 }
 
 // Client is the Trae Intl upstream client.
@@ -117,6 +123,9 @@ func New() *Client {
 // rejects chat-session calls whose origin does not match the JWT session's
 // real origin with a bare 401 (checkin/billing endpoints do not validate
 // them, which is why check-in kept working while chat broke).
+// v0.12.48: forward x-trae-user-timezone when the auth file carries one —
+// OmniRoute #13255 ships the timezone header as the second half of the 401
+// fix ("refresh Trae's stale Referer/Origin and forward user timezone").
 func buildHeaders(a *Auth) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Cloud-IDE-JWT "+a.AccessToken)
@@ -127,6 +136,9 @@ func buildHeaders(a *Auth) http.Header {
 	origin := strings.TrimRight(nonEmpty(a.RefererOrigin, DefaultWebOrigin), "/")
 	h.Set("Origin", origin)
 	h.Set("Referer", origin+"/")
+	if tz := strings.TrimSpace(a.Timezone); tz != "" {
+		h.Set("x-trae-user-timezone", tz)
+	}
 	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 	return h
 }

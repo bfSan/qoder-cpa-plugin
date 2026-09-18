@@ -121,6 +121,13 @@ func PrepareBody(src []byte, variant string) []byte {
 			out[k] = v
 		}
 	}
+	// v0.12.48: max_tokens 未显式指定时默认 1M —— 上游会把输出截在 128k
+	// （dsh-router-traework cfc7572，2026-09-15「修复 trae 傻逼的只有 128k
+	// 上下文」）。客户端没带就补一个大上限，让长回复不再被上游腰斩；
+	// 显式指定的值仍原样透传。
+	if _, ok := out["max_tokens"]; !ok {
+		out["max_tokens"] = 1000000
+	}
 	switch stop := obj["stop"].(type) {
 	case string:
 		out["stop"] = stop

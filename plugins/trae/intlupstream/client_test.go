@@ -44,3 +44,18 @@ func TestBuildHeadersWebOrigin(t *testing.T) {
 		t.Errorf("override Referer = %q", got)
 	}
 }
+
+// v0.12.48: x-trae-user-timezone is forwarded only when the auth file carries
+// a timezone (OmniRoute #13255 ships it as the second half of the 401 fix);
+// empty must omit the header to match upstream's conditional send.
+func TestBuildHeadersUserTimezone(t *testing.T) {
+	h := buildHeaders(&Auth{AccessToken: "tok", Timezone: "Asia/Shanghai"})
+	if got := h.Get("x-trae-user-timezone"); got != "Asia/Shanghai" {
+		t.Errorf("timezone header = %q, want Asia/Shanghai", got)
+	}
+
+	h2 := buildHeaders(&Auth{AccessToken: "tok"})
+	if got := h2.Get("x-trae-user-timezone"); got != "" {
+		t.Errorf("timezone header should be omitted, got %q", got)
+	}
+}
