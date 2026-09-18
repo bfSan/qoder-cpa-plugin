@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -78,6 +79,15 @@ var hardCreditMarkers = []string{
 // isHardCreditError reports business "out of credits" style failures.
 // 402 is treated as payment/credit. Pure 429 is not hard unless body has credit markers.
 func isHardCreditError(status int, body string) bool {
+	if status == http.StatusTooManyRequests {
+		// 429 precedes the balance word list (same reordering the upstream
+		// 2api sync shipped): a 429 is throttling even when the body says
+		// "quota"/"额度" — model-level rate limits use that wording while the
+		// ACCOUNT still has credits. Classifying it as hard credit used to
+		// trigger the disable/delete lifecycle off a soft rate-limit body.
+		// Genuine exhaustion is still caught by the periodic credits reconcile.
+		return false
+	}
 	if status == httpStatusPaymentRequired {
 		return true
 	}

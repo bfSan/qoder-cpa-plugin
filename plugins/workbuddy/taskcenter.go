@@ -231,6 +231,10 @@ func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 		}
 	}
 
+	// 9. School-season activity (开学季, time-boxed upstream window). Silent
+	// when the activity is not running — post-window runs are unchanged.
+	tasksSchoolOnce(sa, add)
+
 	res.Success = true
 	return res
 }
@@ -372,6 +376,36 @@ func handleTasksQuery(req pluginapi.ManagementRequest) map[string]any {
 				entry["claimable_count"] = len(pendingView)
 			} else {
 				entry["tasks_error"] = err.Error()
+			}
+			// School-season block: only emitted while the activity is live
+			// (in_period=true from the API). Keys are absent otherwise so
+			// consumers can treat "no school" as "no keys".
+			if sTasks, inPeriod, err := schoolTasksList(sa); err == nil && inPeriod {
+				entry["school_in_period"] = true
+				entry["school_tasks_total"] = len(sTasks)
+				sClaimable := 0
+				for _, t := range sTasks {
+					if schoolTaskClaimable(t) {
+						sClaimable++
+					}
+				}
+				entry["school_claimable"] = sClaimable
+				if chances, err := schoolChances(sa); err == nil {
+					entry["school_chances"] = chances
+				}
+				if vs, err := schoolVouchers(sa); err == nil {
+					vView := make([]map[string]any, 0, len(vs))
+					for _, v := range vs {
+						vView = append(vView, map[string]any{
+							"prize_name": v.PrizeName,
+							"sku_code":   v.SKUCode,
+							"code":       v.Code,
+							"valid_to":   v.ValidTo,
+						})
+					}
+					entry["vouchers"] = vView
+					entry["voucher_count"] = len(vView)
+				}
 			}
 			mu.Lock()
 			out = append(out, entry)

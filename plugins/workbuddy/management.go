@@ -207,10 +207,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksQuery(req)))
 	case req.Method == http.MethodPost && path == base+"/tasks/run":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksRun(req)))
-	case req.Method == http.MethodGet && path == base+"/tasks":
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksQuery(req)))
-	case req.Method == http.MethodPost && path == base+"/tasks/run":
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksRun(req)))
+	case req.Method == http.MethodGet && path == base+"/school/vouchers":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleSchoolVouchers(req)))
 	case req.Method == http.MethodGet && path == base+"/credits":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCreditsQuery(req)))
 	case req.Method == http.MethodPost && path == base+"/import":

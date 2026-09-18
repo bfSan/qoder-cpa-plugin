@@ -83,7 +83,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		defer cancel()
 	}
 
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+	stream, statusCode, respHdr, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
@@ -97,7 +97,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, string(errPayload))
 		}
-		streamEmitError(streamID, translateChatUpstreamError(statusCode, string(errPayload), sa).Error())
+		streamEmitError(streamID, translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr).Error())
 		return
 	}
 	collector := &sseUsageCollector{}
@@ -144,7 +144,7 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 	}
 	backendHeaders(httpReq, sa)
 	// Compliance: route via host.http.do_stream so request-log captures the call.
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+	stream, statusCode, respHdr, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
@@ -155,7 +155,7 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		if sa != nil && sa.Account.UID != "" {
 			go reconcileByUID(sa.Account.UID, statusCode, string(errPayload))
 		}
-		return nil, statusCode, translateChatUpstreamError(statusCode, string(errPayload), sa)
+		return nil, statusCode, translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr)
 	}
 	chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector)
 	if errAgg != nil {
@@ -371,7 +371,16 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		for _, idx := range toolOrder {
 			calls = append(calls, toolCalls[idx])
 		}
-		message["tool_calls"] = calls
+		// Drop tool calls whose arguments are non-empty but unparseable — a
+		// stream cut mid-arguments (connection drop / finish_reason==length)
+		// leaves half a JSON string that would wedge the client's parser into
+		// an illegal-JSON loop. Kept calls are untouched; when every call is
+		// damaged the field is omitted entirely and finish_reason (often
+		// "length") tells the client why. Upstream-ref: wb2api truncation.go.
+		calls = dropTruncatedToolCalls(calls)
+		if len(calls) > 0 {
+			message["tool_calls"] = calls
+		}
 	}
 	if created == 0 {
 		created = time.Now().Unix()
@@ -443,4 +452,38 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// isTruncatedArguments reports whether a tool-call argument string was cut
+// off mid-stream: empty/whitespace-only is a LEGAL no-argument call, and any
+// parseable JSON (null/scalars/arrays included) is passed through for client
+// schema validation. Only "non-empty AND unparseable" counts as truncation
+// damage. (Upstream-ref: wb2api truncation.go / sse.ts:158-167.)
+func isTruncatedArguments(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+	var v any
+	return json.Unmarshal([]byte(trimmed), &v) != nil
+}
+
+// dropTruncatedToolCalls filters out tool calls with truncated argument
+// strings; kept calls are returned unchanged (zero mutation on the clean
+// path).
+func dropTruncatedToolCalls(calls []map[string]any) []map[string]any {
+	kept := make([]map[string]any, 0, len(calls))
+	for _, call := range calls {
+		fn, _ := call["function"].(map[string]any)
+		if fn == nil {
+			kept = append(kept, call)
+			continue
+		}
+		args, _ := fn["arguments"].(string)
+		if isTruncatedArguments(args) {
+			continue
+		}
+		kept = append(kept, call)
+	}
+	return kept
 }

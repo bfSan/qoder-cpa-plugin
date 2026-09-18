@@ -65,6 +65,17 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
         // 5. rewriteModel: swap client model name to upstream model id.
         rewriteModelInPlace(obj, upstreamModel)
 
+        // 6. maxTokenRename: OpenAI-newer clients send max_completion_tokens;
+        // the CodeBuddy upstream speaks max_tokens. Copy the value across when
+        // max_tokens is absent, then drop the foreign key so the gateway does
+        // not see an unknown parameter (wb2api payload.go, PR #116 semantics).
+        if v, ok := obj["max_completion_tokens"]; ok {
+                if _, has := obj["max_tokens"]; !has && v != nil {
+                        obj["max_tokens"] = v
+                }
+                delete(obj, "max_completion_tokens")
+        }
+
         out, err := json.Marshal(obj)
         if err != nil {
                 return src

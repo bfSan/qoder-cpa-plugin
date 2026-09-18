@@ -15,7 +15,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // upstreamErrorShape mirrors the APISIX/business-JSON error envelope the
@@ -106,4 +108,107 @@ func translateChatUpstreamError(statusCode int, payload string, sa *storedAuth) 
 			truncateRedacted(payload, 200))
 	}
 	return fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(payload, 200))
+}
+
+// isPromptTooLong reports the 11115 prompt-overflow rejection (400/404/413 +
+// code 11115 / "prompt is too long" wording). Same marker philosophy as the
+// wb2api Classify: context overflow is a REQUEST-level problem — the same
+// body overflows on any account — so the message must say so instead of
+// implying an account failure.
+func isPromptTooLong(statusCode int, payload string) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound &&
+		statusCode != http.StatusRequestEntityTooLarge {
+		return false
+	}
+	var shape upstreamErrorShape
+	if err := json.Unmarshal([]byte(payload), &shape); err == nil && shape.Code == 11115 {
+		return true
+	}
+	low := strings.ToLower(payload)
+	if strings.Contains(low, "prompt is too long") {
+		return true
+	}
+	return strings.Contains(low, `"code":11115`) || strings.Contains(low, `"code":"11115"`)
+}
+
+// hasBusinessEnvelope reports whether an error body carries the upstream
+// business JSON envelope (a "code": or "msg": field name hit). Envelope
+// presence is all that matters — malformed JSON with a "msg": marker is
+// still treated as a business response (better to miss a WAF page than to
+// misfile a business 403).
+func hasBusinessEnvelope(payload string) bool {
+	return strings.Contains(payload, `"code":`) || strings.Contains(payload, `"msg":`)
+}
+
+// isWafBlocked reports the APISIX WAF interception shape: HTTP 403 with NO
+// business envelope (HTML challenge page / empty body / plain text).
+// Business 403s (11140 request illegal, etc.) keep their own classification.
+func isWafBlocked(statusCode int, payload string) bool {
+	return statusCode == http.StatusForbidden && !hasBusinessEnvelope(payload)
+}
+
+// retryAfterHint renders the upstream retry-guidance headers as a hint
+// suffix, mirroring the wb2api Retry-After family: Retry-After (seconds) →
+// Retry-After-Ms (milliseconds) → X-RateLimit-Reset (epoch seconds or
+// milliseconds; relative seconds below 1e9 also accepted). Sanity-capped at
+// 2h; absent/invalid values yield "" — never invent a wait time.
+func retryAfterHint(h http.Header) string {
+	if h == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(h.Get("Retry-After")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 7200 {
+			return fmt.Sprintf("上游建议 %d 秒后重试（Retry-After）", n)
+		}
+	}
+	if v := strings.TrimSpace(h.Get("Retry-After-Ms")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 7200_000 {
+			return fmt.Sprintf("上游建议 %d 毫秒后重试（retry-after-ms）", n)
+		}
+	}
+	if v := strings.TrimSpace(h.Get("X-RateLimit-Reset")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			var wait int64
+			switch {
+			case n > 1e12: // epoch milliseconds
+				wait = n/1000 - time.Now().Unix()
+			case n > 1e9: // epoch seconds
+				wait = n - time.Now().Unix()
+			default: // relative seconds
+				wait = n
+			}
+			if wait > 0 && wait <= 7200 {
+				return fmt.Sprintf("上游限流窗口约 %d 秒后重置（x-ratelimit-reset）", wait)
+			}
+		}
+	}
+	return ""
+}
+
+// translateChatUpstreamErrorFull is translateChatUpstreamError with the
+// response headers available: 11115 prompt-overflow and WAF-shaped bare 403s
+// get dedicated actionable copy, and upstream Retry-After guidance is
+// appended to every other failure so the client can back off intelligently.
+// The 11102 translation inside the base function keeps its priority — a
+// model-catalog rejection is never rewritten by the newer shapes.
+func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAuth, hdr http.Header) error {
+	base := translateChatUpstreamError(statusCode, payload, sa)
+	switch {
+	case isModelNotRegistered(statusCode, payload):
+		return base
+	case isPromptTooLong(statusCode, payload):
+		return fmt.Errorf(
+			"提示词过长（code 11115 prompt is too long）——上下文超出模型上限，属于请求本身的问题，与账号无关；请缩短上下文/清理会话或开新会话后重试。"+
+				" // Prompt too long for the model's context window (request-level, not account-level); shrink the context or start a new session. | raw: %s",
+			truncateRedacted(payload, 200))
+	case isWafBlocked(statusCode, payload):
+		return fmt.Errorf(
+			"请求被上游风控拦截（HTTP 403 无业务信封，APISIX WAF）——通常由请求频率或网络环境触发，与账号状态无关；请降低频率稍后再试，持续出现请更换网络出口。"+
+				" // Blocked by the upstream WAF (bare 403, no business envelope); back off and retry, switch network if it persists. | raw: %s",
+			truncateRedacted(payload, 200))
+	}
+	if hint := retryAfterHint(hdr); hint != "" {
+		return fmt.Errorf("%w；%s", base, hint)
+	}
+	return base
 }

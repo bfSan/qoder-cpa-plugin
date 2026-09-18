@@ -333,7 +333,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.13"
+var version = "0.9.14"
 
 func wbRegistration() registration {
 	return registration{
@@ -772,7 +772,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	backendHeaders(httpReq, sa)
 	// Compliance: route via host.http.do_stream so request-log captures the
 	// outbound call. Read entire body via the bridge, then fold SSE → completion.
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+	stream, statusCode, respHdr, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, fmt.Errorf("http_error: %w", err)
@@ -784,8 +784,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
 		// v0.12.18: 11102 model-catalog rejections become a bilingual,
-		// realm-aware actionable error; other failures keep the raw shape.
-		return nil, translateChatUpstreamError(statusCode, string(payload), sa)
+		// realm-aware actionable error; 0.9.14 adds 11115/WAF/Retry-After
+		// shapes on top (header-aware full translator).
+		return nil, translateChatUpstreamErrorFull(statusCode, string(payload), sa, respHdr)
 	}
 	completion, err := aggregateCompletion(reader, req.Model)
 	if err != nil {

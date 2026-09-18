@@ -47,6 +47,11 @@ func TestIsHardCreditError(t *testing.T) {
 		{403, "credit exhausted", true},
 		{429, "rate limit exceeded", false},
 		{400, "invalid request", false},
+		// 0.9.14: 429 precedes the balance word list — quota/额度 wording on a
+		// 429 is model-level throttling, not account exhaustion (upstream fix).
+		{429, "quota exceeded", false},
+		{429, "额度不足", false},
+		{429, "insufficient credits for model", false},
 	}
 	for _, tc := range cases {
 		if got := isHardCreditError(tc.status, tc.body); got != tc.want {

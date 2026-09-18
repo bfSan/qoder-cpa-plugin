@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.9.14
+
+### School-season automation + chat error-shape alignment (repo v0.12.56)
+
+Second round of the wb2api upstream review (the panel repo absorbed
+Sliverkiss/workbuddy2api master@76bb543 on 09-17 — "错误处理/WAF/调度/模型目录/
+连接层" — and added the 开学季 activity family on 09-16). Only the pieces that
+map onto the plugin's architecture are ported; pool scheduling / cost tiers /
+static-catalog removal stay 2api-specific.
+
+**School-season activity (`school.go`, CN only, time-boxed)** — the
+开学季 loop the wb2api panel automates (activity window 2026-09-13 ~ 09-24,
+gated at runtime by the API's own `in_period` flag, so post-window runs are
+silent and unchanged). All endpoints live on the billing domain
+(www.codebuddy.cn) under `/portal/activity/school` with the same account
+Bearer + X-User-Id family as check-in (no web cookie needed):
+
+- `GET /tasks` → task list + `in_period`; `POST /tasks/share-complete`
+  {channel:"wechat"} → daily +100c +1 lottery chance (pure report, server
+  does not verify a real share — same trust model as the growth activity
+  report); `POST /tasks/{code}/viewed` → pending→in_progress activation
+  (counting prerequisite for desktop_chat_1_time-style tasks, three-account
+  verified upstream); `POST /tasks/{code}/claim` → reward + chance_granted;
+  `GET /config` → chance balance; `POST /wheel/draw` {draw_uuid} → prize;
+  `GET /vouchers` → third-party coupon list (KFC/瑞幸/酷狗…).
+- Task-center integration: run loop gains step 9 (share → activate → claim →
+  drain chances → vouchers recap); `GET /tasks` scan gains a school block
+  (in_period/tasks/claimable/chances/vouchers) emitted ONLY while the
+  activity is live; new read-only `GET /school/vouchers` endpoint (2 upstream
+  calls per account vs the full scan's 5) backs the panel dialog.
+- Panel: per-account 「券码」 button + toolbar 「开学季」 button opening a
+  copy-friendly voucher dialog (prize name, monospace code with one-click
+  copy + clipboard fallback, valid_to, expired highlighted).
+- Deliberately NOT ported: the fabricated mini-program telemetry chain
+  (chat_3_times / expert_use via forged `WorkBuddy_MP` /v2/report events) —
+  forging a device fingerprint crosses our pure-API automation line.
+
+**Chat error-shape alignment (from the 76bb543 sync)**:
+
+- `policy.go` — 429 now precedes the balance word list (upstream fix
+  "429+quota 措辞误硬冷却"): a 429 is soft throttling even when the body
+  says quota/额度 (model-level limits reuse that wording); it no longer
+  triggers the hard-credit disable/delete lifecycle. Real exhaustion is still
+  caught by the periodic credits reconcile.
+- `chat_error.go` — 11115 "prompt is too long" (400/404/413) now says
+  "请求级问题，与账号无关，缩短上下文重试" instead of raw upstream JSON;
+  bare-403-no-business-envelope (APISIX WAF page) says "风控拦截，降频/换网络";
+  `Retry-After` / `Retry-After-Ms` / `X-RateLimit-Reset` headers are parsed
+  (sanity-capped at 2h) and appended to every other chat failure as an
+  upstream-suggested back-off hint. All three chat error sites (execute,
+  stream pump, sync collect) now feed response headers into the translator.
+- `payload.go` — `max_completion_tokens` → `max_tokens` rename in
+  prepareUpstreamBody (OpenAI-newer clients; PR #116 semantics) so the
+  gateway no longer sees an unknown parameter.
+- `stream.go` — the non-stream aggregate drops tool calls whose arguments
+  are non-empty but unparseable (stream cut mid-arguments → half a JSON
+  string that would wedge the client's parser); clean calls pass through
+  untouched, and finish_reason (often "length") explains the drop. The
+  emit-as-you-go stream path cannot retract chunks and is unchanged.
+
 ## 0.9.13
 
 ### Growth-center task loop (repo v0.12.55)
