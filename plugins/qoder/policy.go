@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -135,6 +136,42 @@ func shouldReenableCN(disabled bool, cr *creditsSummary) bool {
 	}
 	// Known positive remain, or non-exhausted with packages still having room.
 	return cr.TotalRemain > 0
+}
+
+// chatSizeMarkers are substrings (case-insensitive) of upstream rejections
+// caused by oversized input/context. These are REQUEST-level problems: they
+// must never read as account trouble (credits) and deserve actionable copy.
+var chatSizeMarkers = []string{
+	"too long", "too large", "context length", "context_length", "context too",
+	"max input", "input token", "token limit", "prompt is too long",
+	"内容过长", "输入过长", "上下文过长", "上下文太长", "超过最大",
+}
+
+// chatInputTooLarge reports whether an upstream chat rejection was caused by
+// oversized input: explicit HTTP 413 (without credit semantics), or a body
+// naming a size/context limit.
+func chatInputTooLarge(status int, body string) bool {
+	if status == http.StatusRequestEntityTooLarge {
+		return !isHardCreditError(status, body)
+	}
+	lower := strings.ToLower(body)
+	for _, m := range chatSizeMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+// chatUpstreamError renders an upstream chat failure for the client, adding
+// actionable copy when the rejection was caused by oversized input so users
+// don't mistake it for an account/quota problem.
+func chatUpstreamError(status int, body string) error {
+	trimmed := truncateRedacted(body, 200)
+	if chatInputTooLarge(status, body) {
+		return fmt.Errorf("输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文/清理会话后重试 — upstream %d: %s", status, trimmed)
+	}
+	return fmt.Errorf("upstream %d: %s", status, trimmed)
 }
 
 // displayNote builds a one-line note for CPAMP Auth cards.

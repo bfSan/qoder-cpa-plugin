@@ -340,7 +340,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.10"
+var version = "0.8.11"
 
 func wbRegistration() registration {
         return registration{
@@ -749,7 +749,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
                 payload, _ := io.ReadAll(reader)
                 publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
                 reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-                return nil, fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(string(payload), 200))
+                return nil, chatUpstreamError(statusCode, string(payload))
         }
         completion, err := aggregateQoderSSE(reader, req.Model)
         if err != nil {
