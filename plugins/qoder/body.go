@@ -75,7 +75,14 @@ func (m *openAIMessage) UnmarshalJSON(data []byte) error {
 	if content, ok := fields["content"]; ok {
 		m.contentSet = true
 		var s string
-		if err := json.Unmarshal(content, &s); err == nil {
+		// 0.8.12: JSON null round-trips verbatim — unmarshaling null into a
+		// string silently yields "" and would rewrite the member behind the
+		// client's back (assistant messages carrying tool_calls commonly have
+		// content:null; the protocol authority qoderwork2api preserves null
+		// the same way via plain map decode).
+		if trimmed := strings.TrimSpace(string(content)); trimmed == "null" {
+			m.rawContent = string(content)
+		} else if err := json.Unmarshal(content, &s); err == nil {
 			m.Content = s
 		} else {
 			m.rawContent = string(content)

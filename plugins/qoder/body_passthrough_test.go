@@ -41,6 +41,34 @@ func TestOpenAIMessageVerbatimRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOpenAIMessageNullContentRoundTrip(t *testing.T) {
+	// 0.8.12: content:null (the common assistant+tool_calls shape) must
+	// round-trip as null, not collapse to "" (verbatim contract).
+	raw := `{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}`
+	var m openAIMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	v, ok := back["content"]
+	if !ok {
+		t.Fatal("content member dropped")
+	}
+	if v != nil {
+		t.Errorf("content null drifted to %v", v)
+	}
+	if _, ok := back["tool_calls"]; !ok {
+		t.Error("tool_calls lost in roundtrip")
+	}
+}
+
 func TestOpenAIMessageStructuredContentRoundTrip(t *testing.T) {
 	raw := `{"role":"user","content":[{"type":"text","text":"阅读这段"},{"type":"text","text":"代码"}]}`
 	var m openAIMessage
