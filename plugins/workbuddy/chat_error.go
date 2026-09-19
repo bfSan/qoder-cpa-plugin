@@ -248,10 +248,16 @@ func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAu
 	case isModelNotRegistered(statusCode, payload):
 		return base
 	case isPromptTooLong(statusCode, payload):
+		// v0.9.16: 11115 码提及条件化——413 裸 HTML/空体与其他词族命中时
+		// body 里并没有 11115，硬编码会误导用户去查一个不存在的码。
+		detail := "413/context limit exceeded"
+		if strings.Contains(payload, "11115") {
+			detail = "code 11115 prompt is too long"
+		}
 		return fmt.Errorf(
-			"提示词过长（code 11115 prompt is too long）——上下文超出模型上限，属于请求本身的问题，与账号无关；请缩短上下文/清理会话或开新会话后重试。"+
+			"提示词过长（%s）——上下文超出模型上限，属于请求本身的问题，与账号无关；请缩短上下文/清理会话或开新会话后重试。"+
 				" // Prompt too long for the model's context window (request-level, not account-level); shrink the context or start a new session. | raw: %s",
-			truncateRedacted(payload, 200))
+			detail, truncateRedacted(payload, 200))
 	case isChannelRiskControl(statusCode, payload):
 		return fmt.Errorf(
 			"上游渠道风控（code 11128）——通常由请求特征或频率触发，与账号状态无关；请降低请求频率稍后再试，持续出现请更新插件以对齐官方客户端请求特征。"+

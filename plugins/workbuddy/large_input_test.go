@@ -137,3 +137,22 @@ func TestReconcileGuardsSkipPromptTooLong(t *testing.T) {
 	reconcileAfterExecutorError("nonexistent-auth-id", 413, `<html>quota exceeded too long</html>`)
 	reconcileByUID("nonexistent-uid", 400, `{"msg":"prompt is too long, quota exceeded"}`)
 }
+
+// v0.9.16: 过长文案的 11115 码提及条件化——413 裸 HTML 不再硬提一个
+// body 里不存在的码；11115 信封保留码提及。
+func TestTranslateChatUpstreamErrorTooLargeCopyPreciseCode(t *testing.T) {
+	err := translateChatUpstreamErrorFull(413, `<html></html>`, nil, nil)
+	if strings.Contains(err.Error(), "11115") {
+		t.Errorf("413 HTML copy should not claim code 11115: %s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "413/context limit exceeded") {
+		t.Errorf("413 detail missing: %s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "缩短上下文") || !strings.Contains(err.Error(), "与账号无关") {
+		t.Errorf("guidance missing: %s", err.Error())
+	}
+	err2 := translateChatUpstreamErrorFull(400, `{"code":11115,"msg":"prompt is too long"}`, nil, nil)
+	if !strings.Contains(err2.Error(), "code 11115 prompt is too long") {
+		t.Errorf("11115 detail missing: %s", err2.Error())
+	}
+}

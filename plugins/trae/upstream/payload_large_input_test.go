@@ -114,6 +114,12 @@ func TestClassifyInputTooLarge(t *testing.T) {
 	}{
 		{http.StatusRequestEntityTooLarge, `<html>413 Request Entity Too Large</html>`, ErrInputTooLarge},
 		{http.StatusRequestEntityTooLarge, ``, ErrInputTooLarge},
+		// v0.12.51: 413 判定在最顶——body 带宽松 plan 字样也不得被劫持成
+		// ErrPlanLimit（那会硬冷却健康账号 12h）
+		{http.StatusRequestEntityTooLarge, `{"code":1005,"msg":"plan quota"}`, ErrInputTooLarge},
+		{http.StatusRequestEntityTooLarge, `token limit 100500 exceeded for your plan`, ErrInputTooLarge},
+		// 非 413 的宽松 plan 匹配保持原语义
+		{http.StatusForbidden, `token limit 100500 exceeded for your plan`, ErrPlanLimit},
 		{400, `{"code":4001,"msg":"prompt is too long: 200000 tokens > 131072 maximum context length"}`, ErrInputTooLarge},
 		{400, `{"msg":"输入过长，请压缩上下文"}`, ErrInputTooLarge},
 		{400, `{"msg":"context window exceeded"}`, ErrInputTooLarge},

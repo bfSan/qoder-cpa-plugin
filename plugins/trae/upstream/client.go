@@ -125,6 +125,16 @@ func MsgIndicatesInputTooLarge(s string) bool {
 // Classify 按 HTTP 状态码 + body 判定错误类别（SPEC §4.3）。
 func Classify(status int, body string) ErrKind {
 	lower := strings.ToLower(body)
+	// v0.12.50: 输入过大（上下文超模型窗口/请求体超网关限制）是请求级
+	// 问题——同一 body 在任何账号上都会被拒，冷却账号只会误伤（原路径
+	// 400→ErrClient→NoteError 累计 3 次→冷却 10 分钟，大输入连撞会拖垮
+	// 健康账号）。413 语义唯一；其余 4xx 命中过大文案同样归此类。
+	// v0.12.51: 413 判定提到最顶——body 恰好带 "1005…plan" 字样时不得被
+	// 宽松 plan 匹配劫持成 ErrPlanLimit（那会硬冷却健康账号 12h），
+	// 让「413 语义唯一」真正落实到代码顺序。
+	if status == http.StatusRequestEntityTooLarge {
+		return ErrInputTooLarge
+	}
 	// 1005 plan 权益不足
 	if strings.Contains(body, `"code":1005`) || (strings.Contains(body, "1005") && strings.Contains(lower, "plan")) {
 		return ErrPlanLimit
@@ -134,13 +144,6 @@ func Classify(status int, body string) ErrKind {
 	// 避免两条路径对一个码给出两种语义（对齐 dsh-router-traework 2026-09-15）。
 	if strings.Contains(body, `"code":4008`) {
 		return ErrPlanLimit
-	}
-	// v0.12.50: 输入过大（上下文超模型窗口/请求体超网关限制）是请求级
-	// 问题——同一 body 在任何账号上都会被拒，冷却账号只会误伤（原路径
-	// 400→ErrClient→NoteError 累计 3 次→冷却 10 分钟，大输入连撞会拖垮
-	// 健康账号）。413 语义唯一；其余 4xx 命中过大文案同样归此类。
-	if status == http.StatusRequestEntityTooLarge {
-		return ErrInputTooLarge
 	}
 	if status >= 400 && status < 500 && MsgIndicatesInputTooLarge(body) {
 		return ErrInputTooLarge

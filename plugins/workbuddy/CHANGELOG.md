@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.16
+
+### Copy precision for prompt-too-long (repo v0.12.61)
+
+Code-review follow-up on v0.12.59/0.9.15: the prompt-too-long translation
+hardcoded "code 11115 prompt is too long" in its client-facing copy, but the
+detection itself (v0.9.15) also matches bare 413 gateway rejections (HTML /
+empty body) and the extended wording family — none of which carry code 11115.
+
+- The code mention is now conditional: bodies containing 11115 keep the
+  "code 11115 prompt is too long" detail; everything else shows
+  "413/context limit exceeded" instead of pointing users at a code that
+  is not in the raw response.
+- Guidance core (缩短上下文 / 与账号无关 / request-level) unchanged.
+
 ## 0.9.15
 
 ### Large-input resilience (repo v0.12.59)
