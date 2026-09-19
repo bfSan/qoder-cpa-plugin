@@ -280,10 +280,10 @@ func TestMergeToolCallStripsSOLOFields(t *testing.T) {
 
 func TestPrepareBodyAssistantToolCallsToFunctionCall(t *testing.T) {
 	src := `{"model":"glm-5.2","messages":[
-	  {"role":"user","content":"hi"},
-	  {"role":"assistant","content":null,"tool_calls":[{"id":"call_x","type":"function","function":{"name":"skill_view","arguments":"{\"name\":\"hermes-agent\"}"}}]},
-	  {"role":"tool","tool_call_id":"call_x","content":"skill content"}
-	],"tools":[{"type":"function","function":{"name":"skill_view"}}]}`
+          {"role":"user","content":"hi"},
+          {"role":"assistant","content":null,"tool_calls":[{"id":"call_x","type":"function","function":{"name":"skill_view","arguments":"{\"name\":\"hermes-agent\"}"}}]},
+          {"role":"tool","tool_call_id":"call_x","content":"skill content"}
+        ],"tools":[{"type":"function","function":{"name":"skill_view"}}]}`
 	out := PrepareBody([]byte(src), "cn")
 	var obj map[string]any
 	_ = json.Unmarshal(out, &obj)
@@ -305,16 +305,20 @@ func TestPrepareBodyAssistantToolCallsToFunctionCall(t *testing.T) {
 
 func TestPrepareBodyToolCallWithoutNameDropped(t *testing.T) {
 	src := `{"model":"glm-5.2","messages":[
-	  {"role":"user","content":"hi"},
-	  {"role":"assistant","tool_calls":[{"id":"call_bad","type":"function","function":{"arguments":"{}"}}]}
-	]}`
+          {"role":"user","content":"hi"},
+          {"role":"assistant","tool_calls":[{"id":"call_bad","type":"function","function":{"arguments":"{}"}}]}
+        ]}`
 	out := PrepareBody([]byte(src), "cn")
 	var obj map[string]any
 	_ = json.Unmarshal(out, &obj)
 	msgs := obj["messages"].([]any)
-	assistant := msgs[1].(map[string]any)
-	if _, has := assistant["tool_calls"]; has {
-		t.Error("tool_call without name should be dropped")
+	// v0.12.50: tool_calls 全被剔且无内容的 assistant 占位消息整条剔除
+	// （大输入韧性：上游对空 assistant 可能空流/报错）。
+	if len(msgs) != 1 {
+		t.Fatalf("messages=%d want 1 (empty placeholder dropped)", len(msgs))
+	}
+	if role := msgs[0].(map[string]any)["role"]; role != "user" {
+		t.Errorf("role=%v want user", role)
 	}
 }
 

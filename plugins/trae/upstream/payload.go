@@ -30,13 +30,21 @@ func PrepareBody(src []byte, variant string) []byte {
 	obj["function"] = FunctionFor(variant)
 
 	if msgs, ok := obj["messages"].([]any); ok {
-		for _, mi := range msgs {
+		for i, mi := range msgs {
 			m, ok := mi.(map[string]any)
 			if !ok {
 				continue
 			}
 			content, present := m["content"]
 			role, _ := m["role"].(string)
+
+			// v0.12.50: developer 角色归一。部分推理客户端（PI 等）把 system
+			// 转成 OpenAI developer 角色，上游不认——实测静默空流（biz 3003）
+			// → 归一为 system（RobbsLuo/Coding2API prepare_body 2026-09 实证）。
+			if role == "developer" {
+				m["role"] = "system"
+				role = "system"
+			}
 
 			// assistant 消息回传 tool_calls: OpenAI function → 上游 function_call
 			if role == "assistant" {
@@ -63,6 +71,12 @@ func PrepareBody(src []byte, variant string) []byte {
 					}
 					if len(kept) == 0 {
 						delete(m, "tool_calls")
+						// v0.12.50: tool_calls 全被剔且无内容的 assistant 占位
+						// 消息整条剔除（上游对空 assistant 可能空流/报错；
+						// Coding2API 同款对策）。无正文则后续 content 分支自然跳过。
+						if !present || content == nil {
+							msgs[i] = nil
+						}
 					} else {
 						m["tool_calls"] = kept
 					}
@@ -81,6 +95,58 @@ func PrepareBody(src []byte, variant string) []byte {
 				// 已是数组 → 透传（兼容多模态，未实测，保守透传）
 			}
 		}
+	}
+
+	// v0.12.50: 孤儿 tool 结果剔除（大输入韧性）。客户端在上下文超限时
+	// 修剪历史（常从中间丢消息），留下引用已不存在 tool_call 的悬空
+	// role=tool 消息 → 上游空流/报错。tool_call_id 不在任何 assistant
+	// tool_calls 里的 tool 消息直接剔除（Coding2API _drop_orphan_tool_results
+	// 同款「TRAE 空流对策」；第一段循环剔掉的脏 tool_call 亦计入孤儿）。
+	if msgs, ok := obj["messages"].([]any); ok {
+		known := map[string]struct{}{}
+		for _, mi := range msgs {
+			if mi == nil {
+				continue
+			}
+			m, ok := mi.(map[string]any)
+			if !ok {
+				continue
+			}
+			if r, _ := m["role"].(string); r != "assistant" {
+				continue
+			}
+			tcs, ok := m["tool_calls"].([]any)
+			if !ok {
+				continue
+			}
+			for _, tci := range tcs {
+				if tc, ok := tci.(map[string]any); ok {
+					if id, _ := tc["id"].(string); id != "" {
+						known[id] = struct{}{}
+					}
+				}
+			}
+		}
+		keptMsgs := make([]any, 0, len(msgs))
+		for _, mi := range msgs {
+			if mi == nil {
+				continue
+			}
+			m, ok := mi.(map[string]any)
+			if !ok {
+				keptMsgs = append(keptMsgs, mi)
+				continue
+			}
+			r, _ := m["role"].(string)
+			if r == "tool" {
+				id, _ := m["tool_call_id"].(string)
+				if _, found := known[id]; !found {
+					continue
+				}
+			}
+			keptMsgs = append(keptMsgs, mi)
+		}
+		obj["messages"] = keptMsgs
 	}
 
 	model, _ := obj["model"].(string)

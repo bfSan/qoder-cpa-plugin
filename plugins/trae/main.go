@@ -139,7 +139,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.49"
+var version = "0.12.50"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -1894,7 +1894,7 @@ func handleExecExecute(request []byte) ([]byte, error) {
 		// Non-2xx: classify and cool the account.
 		kind := upstream.Classify(status, string(body))
 		applyCooldown(a.UID, kind)
-		return nil, fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(string(body), 200))
+		return nil, chatHTTPErrorFor(status, kind, string(body))
 	}
 	defer rc.Close()
 
@@ -1902,6 +1902,7 @@ func handleExecExecute(request []byte) ([]byte, error) {
 	if err != nil {
 		if se, ok := err.(*upstream.SOLOStreamError); ok {
 			applyCooldown(a.UID, se.Kind())
+			err = soloStreamErrorCopy(se)
 		}
 		return nil, fmt.Errorf("aggregate: %w", err)
 	}
@@ -1974,7 +1975,7 @@ func handleExecStream(request []byte) ([]byte, error) {
 	if rc == nil {
 		kind := upstream.Classify(status, string(body))
 		applyCooldown(a.UID, kind)
-		return nil, fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(string(body), 200))
+		return nil, chatHTTPErrorFor(status, kind, string(body))
 	}
 
 	// v0.12.30: the RPC envelope MUST carry chunks as a slice — the host
@@ -2043,6 +2044,37 @@ func handleExecStream(request []byte) ([]byte, error) {
 // Cooldown / lifecycle
 // -----------------------------------------------------------------------------
 
+// chatHTTPErrorFor renders one upstream HTTP rejection for the client.
+// v0.12.50: input-oversize rejections get request-level actionable copy
+// instead of the historical bare "upstream 400 (client): ..." shape.
+func chatHTTPErrorFor(status int, kind upstream.ErrKind, body string) error {
+	if kind == upstream.ErrInputTooLarge {
+		return fmt.Errorf("输入过大被上游拒绝（上下文/请求体超出上限，请求级问题，与账号无关）：请压缩上下文或清理会话后重试。"+
+			" // Input too large for the upstream model window (request-level, not account-level); shrink the context or start a new session."+
+			" | raw: %s", truncate(body, 200))
+	}
+	return fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(body, 200))
+}
+
+// soloStreamErrorCopy wraps an aggregated in-stream SOLO error: oversize
+// gets request-level guidance (same copy as the HTTP path), rest unchanged.
+func soloStreamErrorCopy(se *upstream.SOLOStreamError) error {
+	if se.Kind() == upstream.ErrInputTooLarge {
+		return fmt.Errorf("%w —— 输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文或清理会话后重试", se)
+	}
+	return se
+}
+
+// soloStreamEventMsg renders one in-stream error event for the SSE client;
+// oversize wording gets request-level guidance appended (v0.12.50).
+func soloStreamEventMsg(code int64, msg string) string {
+	base := fmt.Sprintf("trae error code=%d msg=%s", code, msg)
+	if upstream.MsgIndicatesInputTooLarge(msg) {
+		return base + " —— 输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文或清理会话后重试"
+	}
+	return base
+}
+
 func applyCooldown(uid string, kind upstream.ErrKind) {
 	switch kind {
 	case upstream.ErrPlanLimit:
@@ -2055,6 +2087,10 @@ func applyCooldown(uid string, kind upstream.ErrKind) {
 		accountPool.Cooldown(uid, pool.CoolSoft, 60*time.Second, "not found (404)")
 	case upstream.ErrServer, upstream.ErrClient:
 		accountPool.NoteError(uid, 3, 10*time.Minute)
+	// v0.12.50: 输入过大是请求级问题——同一请求在任何账号上都会被拒，
+	// 记错误只会把健康账号冷却（NoteError 累计 3 次 → 10 分钟）。
+	case upstream.ErrInputTooLarge:
+		// 请求级失败，不惩罚账号
 	}
 }
 

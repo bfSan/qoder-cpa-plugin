@@ -69,6 +69,10 @@ func (e *SOLOStreamError) Kind() ErrKind {
 	if _, ok := soloPlanLimitCodes[e.Code]; ok {
 		return ErrPlanLimit
 	}
+	// v0.12.50: 流内过大文案 → 请求级问题，不冷却账号。
+	if MsgIndicatesInputTooLarge(e.Msg) {
+		return ErrInputTooLarge
+	}
 	return ErrClient
 }
 

@@ -19,13 +19,14 @@ import (
 type ErrKind int
 
 const (
-	ErrNone        ErrKind = iota // 成功
-	ErrPlanLimit                  // 1005 + plan → 权益不足（硬冷却 12h）
-	ErrSoftRate                   // 429 → 短冷却 60s
-	ErrSessionDead                // 401 + Cloud-IDE-JWT 失效 → 禁用
-	ErrNotFound                   // 404 → 短冷却 60s 不累计 errCount
-	ErrServer                     // 5xx
-	ErrClient                     // 其他 4xx
+	ErrNone          ErrKind = iota // 成功
+	ErrPlanLimit                    // 1005 + plan → 权益不足（硬冷却 12h）
+	ErrSoftRate                     // 429 → 短冷却 60s
+	ErrSessionDead                  // 401 + Cloud-IDE-JWT 失效 → 禁用
+	ErrNotFound                     // 404 → 短冷却 60s 不累计 errCount
+	ErrServer                       // 5xx
+	ErrClient                       // 其他 4xx
+	ErrInputTooLarge                // v0.12.50: 413/过大文案 → 请求级问题，不冷却账号
 )
 
 func (k ErrKind) String() string {
@@ -42,6 +43,8 @@ func (k ErrKind) String() string {
 		return "server"
 	case ErrClient:
 		return "client"
+	case ErrInputTooLarge:
+		return "input_too_large"
 	default:
 		return "none"
 	}
@@ -89,6 +92,36 @@ func bizError(code int32, prefix, upstreamMsg string) *Error {
 
 var sessionDeadMarkers = []string{"login", "token 失效", "token invalid", "session", "unauthorized", "401"}
 
+// inputTooLargeMarkers 大输入判定的子串词表（大小写不敏感；中文原样匹配）。
+var inputTooLargeMarkers = []string{
+	"too long",
+	"too many tokens",
+	"context length",
+	"maximum context",
+	"context window",
+	"request entity too large",
+	"input too large",
+	"输入过长",
+	"内容过长",
+	"上下文过长",
+	"上下文长度",
+	"超出模型上限",
+}
+
+// MsgIndicatesInputTooLarge 判定上游错误文案是否为「输入过大」。
+// v0.12.50: 大输入（上下文超出模型窗口/请求体超网关限制）是请求级问题，
+// 与账号健康无关——命中词表的错误不冷却账号并给明确指引（对齐
+// qoder 0.8.11 chatSizeMarkers；Coding2API 400→INVALID 不冷却同哲学）。
+func MsgIndicatesInputTooLarge(s string) bool {
+	lower := strings.ToLower(s)
+	for _, m := range inputTooLargeMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // Classify 按 HTTP 状态码 + body 判定错误类别（SPEC §4.3）。
 func Classify(status int, body string) ErrKind {
 	lower := strings.ToLower(body)
@@ -101,6 +134,16 @@ func Classify(status int, body string) ErrKind {
 	// 避免两条路径对一个码给出两种语义（对齐 dsh-router-traework 2026-09-15）。
 	if strings.Contains(body, `"code":4008`) {
 		return ErrPlanLimit
+	}
+	// v0.12.50: 输入过大（上下文超模型窗口/请求体超网关限制）是请求级
+	// 问题——同一 body 在任何账号上都会被拒，冷却账号只会误伤（原路径
+	// 400→ErrClient→NoteError 累计 3 次→冷却 10 分钟，大输入连撞会拖垮
+	// 健康账号）。413 语义唯一；其余 4xx 命中过大文案同样归此类。
+	if status == http.StatusRequestEntityTooLarge {
+		return ErrInputTooLarge
+	}
+	if status >= 400 && status < 500 && MsgIndicatesInputTooLarge(body) {
+		return ErrInputTooLarge
 	}
 	// session 失效
 	if status == http.StatusUnauthorized {
