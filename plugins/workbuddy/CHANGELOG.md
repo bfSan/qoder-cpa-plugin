@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.15
+
+### Large-input resilience (repo v0.12.59)
+
+Same treatment qoder 0.8.11 got, ported to the CodeBuddy gateway after user
+reports of "context/input too large → request just fails" on the agent side.
+Upstream evidence: RobbsLuo/Coding2API (2026-09-18, same endpoints —
+copilot.tencent.com / codebuddy.ai /v2/chat/completions).
+
+- `normalizeHistoryInPlace` (payload step 2.5): OpenAI `developer` role →
+  `system` (the Tencent backend rejects developer with channel risk-control
+  11128); dirty tool_calls (missing function/name) dropped, emptied content-less
+  assistant placeholders and dangling role=tool results dropped with them —
+  oversized agent histories trimmed mid-conversation are the main orphan source.
+- Error classification: `isChannelRiskControl` (code 11128 → actionable copy,
+  request-shaped not account-level); prompt-too-long detection now covers bare
+  413 (gateway body-limit rejections, HTML/empty, no envelope) plus an extended
+  wording family (maximum context length / context window / too many tokens /
+  输入过长…), aligned with qoder 0.8.11 chatSizeMarkers.
+- Lifecycle guards: `reconcileAfterExecutorError` / `reconcileByUID` skip
+  prompt-too-long bodies entirely — a 413 body that happens to carry
+  "quota exceeded" wording could previously collide with hardCreditMarkers
+  and mis-trigger the credits reconcile lifecycle.
+
 ## 0.9.14
 
 ### School-season automation + chat error-shape alignment (repo v0.12.56)

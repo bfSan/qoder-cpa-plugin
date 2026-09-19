@@ -56,6 +56,12 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
         // 2. normalizeTools: tool_choice object form → string; "none" suppresses tools.
         normalizeToolsInPlace(obj)
 
+        // 2.5 normalizeHistory: OpenAI developer 角色 → system（腾讯后端不认
+        // developer，实测判 11128 渠道风控——Coding2API 2026-09 生产实证）；
+        // 脏 tool_call（无 function/name）剔除，清空后无内容的 assistant 占位
+        // 与悬空 role=tool 结果成对清理（大输入/长会话韧性，同源实证对策）。
+        normalizeHistoryInPlace(obj)
+
         // 3. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
         rewriteSystemInPlace(obj)
 
@@ -81,6 +87,96 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
                 return src
         }
         return out
+}
+
+// normalizeHistoryInPlace normalizes message history before the upstream
+// sees it (v0.9.15, large-input resilience):
+//   - role "developer" → "system": the Tencent backend does not recognize
+//     the OpenAI developer role and rejects the whole request as channel
+//     risk-control 11128 (reasoning-model clients like PI convert system
+//     messages to developer; Coding2API production evidence 2026-09).
+//   - dirty tool_calls (missing function or empty name) are dropped; an
+//     assistant placeholder left with no content after the cleanup is
+//     dropped entirely; dangling role=tool results whose tool_call_id
+//     points at a dropped call are dropped with it (same shape as the
+//     Coding2API _clean_history_tool_calls defense). Oversized agent
+//     histories trimmed by the client mid-conversation are the main
+//     source of such orphans.
+func normalizeHistoryInPlace(obj map[string]any) bool {
+        msgs, ok := obj["messages"].([]any)
+        if !ok || len(msgs) == 0 {
+                return false
+        }
+        changed := false
+        orphan := map[string]struct{}{}
+        rewritten := make([]any, 0, len(msgs))
+        for _, mi := range msgs {
+                m, ok := mi.(map[string]any)
+                if !ok {
+                        rewritten = append(rewritten, mi)
+                        continue
+                }
+                if role, _ := m["role"].(string); strings.EqualFold(role, "developer") {
+                        m["role"] = "system"
+                        changed = true
+                }
+                if tcs, ok := m["tool_calls"].([]any); ok {
+                        kept := make([]any, 0, len(tcs))
+                        for _, tci := range tcs {
+                                tc, ok := tci.(map[string]any)
+                                if !ok {
+                                        continue
+                                }
+                                fn, _ := tc["function"].(map[string]any)
+                                name := ""
+                                if fn != nil {
+                                        name, _ = fn["name"].(string)
+                                }
+                                if strings.TrimSpace(name) == "" {
+                                        if id, _ := tc["id"].(string); id != "" {
+                                                orphan[id] = struct{}{}
+                                        }
+                                        changed = true
+                                        continue
+                                }
+                                kept = append(kept, tc)
+                        }
+                        if len(kept) == 0 {
+                                delete(m, "tool_calls")
+                                changed = true
+                                if cv, has := m["content"]; !has || cv == nil {
+                                        continue // 清空后无内容的占位 assistant 整条丢弃
+                                }
+                        } else {
+                                m["tool_calls"] = kept
+                        }
+                }
+                rewritten = append(rewritten, m)
+        }
+        if len(orphan) > 0 {
+                filtered := make([]any, 0, len(rewritten))
+                for _, mi := range rewritten {
+                        m, ok := mi.(map[string]any)
+                        if !ok {
+                                filtered = append(filtered, mi)
+                                continue
+                        }
+                        if role, _ := m["role"].(string); strings.EqualFold(role, "tool") {
+                                id, _ := m["tool_call_id"].(string)
+                                if _, bad := orphan[id]; bad {
+                                        changed = true
+                                        continue
+                                }
+                        }
+                        filtered = append(filtered, m)
+                }
+                rewritten = filtered
+        }
+        if !changed {
+                return false
+        }
+        obj["messages"] = rewritten
+        return true
 }
 
 // normalizeToolsInPlace is the in-place form of normalizeToolsForUpstream.

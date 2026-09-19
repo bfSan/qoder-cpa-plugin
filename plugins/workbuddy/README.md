@@ -144,6 +144,12 @@ duplication needed.
 
 Hard credit errors from the executor (status 402, "insufficient credits",
 "积分不足", etc.) trigger an immediate reconcile of the failing account.
+Request-level chat failures are exempted: input-oversize rejections (code
+11115, bare 413, extended too-long wording) and channel risk-control (11128)
+translate into actionable copy ("请求级问题，与账号无关") and never touch the
+account lifecycle. Oversized agent histories are also scrubbed before the
+upstream sees them (developer → system role normalization, orphan tool-result
+pairing cleanup) — see CHANGELOG 0.9.15.
 
 ## Development
 

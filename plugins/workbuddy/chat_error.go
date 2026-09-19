@@ -110,14 +110,45 @@ func translateChatUpstreamError(statusCode int, payload string, sa *storedAuth) 
 	return fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(payload, 200))
 }
 
+// inputTooLargeMarkers 过大错误文案词族（除 11115/"prompt is too long"
+// 外的变体；对齐 qoder 0.8.11 chatSizeMarkers）。大小写不敏感。
+var inputTooLargeMarkers = []string{
+	"maximum context length",
+	"context length exceeded",
+	"exceeds the context",
+	"context window",
+	"too many tokens",
+	"input too long",
+	"prompt too long",
+	"request entity too large",
+	"输入过长",
+	"上下文过长",
+	"超出上限",
+}
+
+// containsInputTooLargeMarker reports whether a lowercased payload hits
+// any input-oversize wording.
+func containsInputTooLargeMarker(low string) bool {
+	for _, m := range inputTooLargeMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // isPromptTooLong reports the 11115 prompt-overflow rejection (400/404/413 +
 // code 11115 / "prompt is too long" wording). Same marker philosophy as the
 // wb2api Classify: context overflow is a REQUEST-level problem — the same
 // body overflows on any account — so the message must say so instead of
 // implying an account failure.
 func isPromptTooLong(statusCode int, payload string) bool {
-	if statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound &&
-		statusCode != http.StatusRequestEntityTooLarge {
+	// v0.9.15: 413 语义唯一（请求体/输入超限）——网关层 HTML/空体拒绝
+	//（无业务信封）也算，请求级问题一律给明确文案。
+	if statusCode == http.StatusRequestEntityTooLarge {
+		return true
+	}
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound {
 		return false
 	}
 	var shape upstreamErrorShape
@@ -128,7 +159,27 @@ func isPromptTooLong(statusCode int, payload string) bool {
 	if strings.Contains(low, "prompt is too long") {
 		return true
 	}
-	return strings.Contains(low, `"code":11115`) || strings.Contains(low, `"code":"11115"`)
+	return strings.Contains(low, `"code":11115`) || strings.Contains(low, `"code":"11115"`) ||
+		// v0.9.15: 扩大过大词族（对齐 qoder 0.8.11 chatSizeMarkers）。
+		containsInputTooLargeMarker(low)
+}
+
+// isChannelRiskControl reports the Tencent channel risk-control rejection
+// (code 11128). Production evidence (RobbsLuo/Coding2API 2026-09): the
+// backend rejects requests carrying the OpenAI `developer` role, missing
+// official-CLI request-shape fields, or bursty frequency with this code —
+// a request-shaped/transient problem, not an account failure.
+func isChannelRiskControl(statusCode int, payload string) bool {
+	if statusCode < 400 {
+		return false
+	}
+	var shape upstreamErrorShape
+	if err := json.Unmarshal([]byte(payload), &shape); err == nil && shape.Code == 11128 {
+		return true
+	}
+	// 信封变体容错：JSON 解析失败但带着 "code":11128 字样（含空格变体）。
+	low := strings.ReplaceAll(payload, " ", "")
+	return strings.Contains(low, `"code":11128`) || strings.Contains(low, `"code":"11128"`)
 }
 
 // hasBusinessEnvelope reports whether an error body carries the upstream
@@ -200,6 +251,11 @@ func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAu
 		return fmt.Errorf(
 			"提示词过长（code 11115 prompt is too long）——上下文超出模型上限，属于请求本身的问题，与账号无关；请缩短上下文/清理会话或开新会话后重试。"+
 				" // Prompt too long for the model's context window (request-level, not account-level); shrink the context or start a new session. | raw: %s",
+			truncateRedacted(payload, 200))
+	case isChannelRiskControl(statusCode, payload):
+		return fmt.Errorf(
+			"上游渠道风控（code 11128）——通常由请求特征或频率触发，与账号状态无关；请降低请求频率稍后再试，持续出现请更新插件以对齐官方客户端请求特征。"+
+				" // Upstream channel risk control (11128); back off and retry — request-shaped, not account-level. | raw: %s",
 			truncateRedacted(payload, 200))
 	case isWafBlocked(statusCode, payload):
 		return fmt.Errorf(

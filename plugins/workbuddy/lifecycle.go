@@ -380,6 +380,12 @@ func reconcileAfterExecutorError(authID string, status int, body string) {
 	if !lifecycleEnabled() || strings.TrimSpace(authID) == "" {
 		return
 	}
+	// v0.9.15: 输入过大是请求级问题（同一 body 在任何账号上都会被拒），
+	// 不触发积分 reconcile——413/过长 body 若恰好携带 "quota exceeded"
+	// 等词曾可能经 hardCreditMarkers 词表碰撞误触发生命周期。
+	if isPromptTooLong(status, body) {
+		return
+	}
 	if isSoftRateLimit(status, body) && !isHardCreditError(status, body) {
 		return
 	}
@@ -446,6 +452,12 @@ func resolveAuthIndexAndID(authID string) (string, string) {
 func reconcileByUID(uid string, status int, body string) {
 	uid = strings.TrimSpace(uid)
 	if uid == "" || !lifecycleEnabled() {
+		return
+	}
+	// v0.9.15: 输入过大是请求级问题（同一 body 在任何账号上都会被拒），
+	// 不触发积分 reconcile——413/过长 body 若恰好携带 "quota exceeded"
+	// 等词曾可能经 hardCreditMarkers 词表碰撞误触发生命周期。
+	if isPromptTooLong(status, body) {
 		return
 	}
 	if !isHardCreditError(status, body) {
