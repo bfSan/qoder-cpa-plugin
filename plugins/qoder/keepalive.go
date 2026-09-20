@@ -5,7 +5,7 @@
 // inference call is rejected with TOKEN_EXPIRE. Refreshing daily (plus
 // PAT re-exchange fallback) keeps accounts alive automatically.
 //
-//   - Runs on the existing schedulerLoop at 22:00 local (keepaliveHours is
+//   - Runs on the existing checkinLoop at 22:00 local (keepaliveHours is
 //     separate from checkinHours so the two cadences can evolve independently).
 //     separate from checkinHours so the two cadences can evolve independently).
 //   - Iterates all qoderwork auths via host.auth.list/get, calls
@@ -129,7 +129,7 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 		if status == 401 && isSessionDeadError(msg) {
 			// Upstream killed the offline session: refresh token is dead and
 			// every API call for this account will 401. Flag disabled so the
-			// scheduler stops routing traffic to it until manual re-login.
+			// host stops routing traffic to it until manual re-login.
 			if derr := markSessionDead(authIndex, authID, sa); derr != nil {
 				return "session-dead", fmt.Errorf("session dead; flag failed: %v", derr)
 			}
@@ -309,7 +309,7 @@ func runTokenKeepalive() *keepaliveSummary {
 }
 
 // shouldRunKeepaliveNow reports whether the current local time is within
-// one hour after any scheduled keepalive hour today. Used by schedulerLoop
+// one hour after any scheduled keepalive hour today. Used by checkinLoop
 // to fire keepalive on the same tick as checkin when the schedules coincide.
 func shouldRunKeepaliveNow(now time.Time) bool {
 	for _, h := range keepaliveHours {

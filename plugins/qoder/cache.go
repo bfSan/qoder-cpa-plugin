@@ -1,7 +1,7 @@
 // cache.go holds the per-account in-memory cache for plan / checkin / credits
 // snapshots and the singleflight machinery that dedups concurrent upstream
 // fetches for the same account. The cache is the coordination point between
-// the dashboard, reconcile, and scheduler pick paths.
+// the dashboard and reconcile paths.
 package main
 
 import (
@@ -145,6 +145,21 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 
 // accountCacheSoftCap limits concurrent cache entries (auth churn / index thrash).
 const accountCacheSoftCap = 256
+
+// cachedAccountDetailsSnapshot returns the last known account details without
+// hitting upstream. The panel uses it on first paint so a recent snapshot is
+// visible immediately instead of every card starting as "loading".
+func cachedAccountDetailsSnapshot(authID string) (plan string, ci *checkinSummary, cr *creditsSummary, ok bool) {
+	v, found := accountCache.Load(authID)
+	if !found {
+		return "", nil, nil, false
+	}
+	entry, typeOK := v.(*accountCacheEntry)
+	if !typeOK || entry == nil {
+		return "", nil, nil, false
+	}
+	return entry.plan, entry.checkin, entry.credits, true
+}
 
 // pruneAccountCacheSoftCap drops excess entries with the oldest fetched time.
 // Called after Store; O(n) over map size — fine for dozens of accounts.

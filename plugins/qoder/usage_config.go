@@ -69,9 +69,8 @@ func configure(raw []byte) {
 	// Parse config without holding any lock (fixes nested-lock hazard).
 	nextCheckinAuto := true
 	nextLifecycleAuto := true
-	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
-	nextLoginRegion := regionCN // reset to default on reconfigure (like scheduler_mode)
+	nextLoginRegion := regionCN // reset to default on reconfigure
 	nextMgmtKey := ""
 
 	cfgURL, cfgKey := "", ""
@@ -91,13 +90,6 @@ func configure(raw []byte) {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "lifecycle_auto:"))
 					v = strings.Trim(v, "\"'")
 					nextLifecycleAuto = v == "true" || v == "1" || v == "yes" || v == "on"
-				}
-				if strings.HasPrefix(line, "scheduler_mode:") {
-					v := strings.TrimSpace(strings.TrimPrefix(line, "scheduler_mode:"))
-					v = strings.Trim(v, "\"'")
-					if v == schedulerModeCredits {
-						nextSchedulerMode = schedulerModeCredits
-					}
 				}
 				if strings.HasPrefix(line, "usage_report_url:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "usage_report_url:"))
@@ -141,10 +133,6 @@ func configure(raw []byte) {
 	lifecycleAuto = nextLifecycleAuto
 	lifecycleAutoMu.Unlock()
 
-	schedulerModeMu.Lock()
-	schedulerMode = nextSchedulerMode
-	schedulerModeMu.Unlock()
-
 	keepaliveAutoMu.Lock()
 	keepaliveAuto = nextKeepaliveAuto
 	keepaliveAutoMu.Unlock()
@@ -164,7 +152,7 @@ func configure(raw []byte) {
 
 	syncOverlayHiddenModels(nextHiddenModels)
 	resolveUsageReport(cfgURL, cfgKey)
-	ensureScheduler()
+	ensureCheckinLoop()
 }
 
 func normalizedConfiguredModelIDs(node yaml.Node) ([]string, error) {

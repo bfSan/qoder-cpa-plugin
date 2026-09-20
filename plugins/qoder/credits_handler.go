@@ -1,6 +1,6 @@
 // credits_handler.go implements the management API endpoints that mutate or
-// read account state: import credential, toggle check-in, claim trial, select
-// active auth, and query credits for one account or all.
+// read account state: import credential, toggle check-in, claim trial, and
+// query credits for one account or all.
 package main
 
 import (
@@ -87,44 +87,6 @@ func handleCheckinConfig(req pluginapi.ManagementRequest) map[string]any {
 	return map[string]any{"checkin_auto": cur, "persistent": false}
 }
 
-// handleSelectAuth sets the panel-selected account used for chat routing.
-// Region is always CN for QoderWork.
-func handleSelectAuth(req pluginapi.ManagementRequest) map[string]any {
-	var body struct {
-		AuthIndex string `json:"auth_index"`
-	}
-	_ = json.Unmarshal(req.Body, &body)
-	authIndex := strings.TrimSpace(body.AuthIndex)
-	if authIndex == "" {
-		return map[string]any{"error": "auth_index is required", "active_auth": getActiveAuthID()}
-	}
-	files, err := hostAuthList()
-	if err != nil {
-		return map[string]any{"error": err.Error()}
-	}
-	for _, f := range files {
-		if f.AuthIndex != authIndex {
-			continue
-		}
-		if f.Disabled {
-			return map[string]any{"error": "账号已禁用，无法选中", "auth_index": authIndex}
-		}
-		sa, err := hostAuthGet(f.AuthIndex)
-		if err != nil {
-			return map[string]any{"error": err.Error(), "auth_index": authIndex}
-		}
-		setActiveAuthID(f.ID)
-		return map[string]any{
-			"ok":          true,
-			"active_auth": f.ID,
-			"region":      authRegion(sa),
-			"nickname":    sa.Account.Nickname,
-			"uid":         sa.Account.UID,
-		}
-	}
-	return map[string]any{"error": "account not found", "auth_index": authIndex}
-}
-
 // handleCreditsQuery returns real-time credits for one or all accounts.
 // Pass ?auth_index=<idx> to query a single account; omit for all.
 // Single-account mode returns full account info (nickname, region, credits,
@@ -160,7 +122,6 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				"name":       f.Name,
 				"label":      f.Label,
 				"disabled":   f.Disabled,
-				"selected":   getActiveAuthID() == f.ID,
 			}
 			if err != nil {
 				acct["error"] = err.Error()

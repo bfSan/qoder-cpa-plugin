@@ -53,7 +53,6 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;margin-bottom:80px}
 .card,.summary{background:var(--card);border:1px solid var(--border);border-radius:12px}
 .card{padding:16px}
-.card.selected{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-ring)}
 .card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center}
 .uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
 .badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
@@ -183,7 +182,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 </head>
 <body>
 <div class="wrap">
-  <h1>QoderWork 账号面板</h1>
+  <h1>Qoder 账号面板</h1>
   <div class="sub">积分余额 · 每日签到（CN daily / Intl campaign，09:00 与 21:00）· 耗尽自动关</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
     <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。错误密钥请勿连点，避免 IP 封禁。</div>
@@ -246,11 +245,11 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 <div class="modal-mask" id="importModal" onclick="onImportMaskClick(event)">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
     <div class="modal-hd">
-      <h2 id="importModalTitle">导入 QoderWork 凭证</h2>
+      <h2 id="importModalTitle">导入 Qoder 凭证</h2>
       <button type="button" class="modal-x" onclick="closeImportModal()" aria-label="关闭">×</button>
     </div>
     <div class="modal-bd">
-      <p class="hint">到 <a href="https://qoder.com.cn/settings/personal-access-tokens" target="_blank" rel="noopener">qoder.com.cn → 设置 → Personal Access Tokens</a> 创建一个 PAT（pt- 开头），粘贴到下方。插件会自动换取 jobToken 并保存为 <code>qoderwork-&lt;uid&gt;.json</code>。</p>
+      <p class="hint">到 <a href="https://qoder.com.cn/settings/personal-access-tokens" target="_blank" rel="noopener">qoder.com.cn → 设置 → Personal Access Tokens</a> 创建一个 PAT（pt- 开头），粘贴到下方。插件会自动换取 jobToken 并保存为 <code>qoder-&lt;region&gt;-&lt;uid&gt;.json</code>。</p>
       <input id="importPAT" type="password" placeholder="pt-xxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" style="width:100%;padding:8px 10px;font-family:ui-monospace,monospace;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);"/>
       <p class="hint" style="margin-top:8px;opacity:0.7">PAT 长期有效（可在创建时设置过期时间）。插件存储 PAT 用于 jrt- 过期后自动续期，无需重新导入。</p>
     </div>
@@ -367,7 +366,6 @@ function bindCardActions(root){
       const act=ev.currentTarget.dataset.action;
       const idx=ev.currentTarget.dataset.authIndex;
       if(act==="checkin") checkin(idx, ev.currentTarget);
-      else if(act==="select") selectAuth(idx, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
       else if(act==="claim-pro") claimPro(idx, ev.currentTarget);
       else if(act==="cooldown-clear") clearCooldown(ev.currentTarget.getAttribute("data-auth-id")||idx, ev.currentTarget.getAttribute("data-model"), ev.currentTarget);
@@ -381,7 +379,6 @@ function card(a){
   const region=a.region||"cn";
   
   const disabled=!!a.disabled;
-  const selected=!!a.selected;
   const isIntl=(a.region||"cn")==="intl";
   const regionBadge=`<span class="badge ${isIntl?"global":"cn"}">${isIntl?"Intl":"CN"}</span>`;
   // Both regions have a check-in: CN uses daily-check-in, Intl uses the
@@ -397,13 +394,10 @@ function card(a){
   }else{
     actionHTML+=`<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`;
   }
-  const selectBtn=selected
-    ? `<button class="done" disabled="disabled">使用中</button>`
-    : (disabled?``:`<button class="sec" data-action="select" data-auth-index="${esc(a.auth_index)}">选用</button>`);
   const refreshBtn=`<button class="sec" data-action="refresh" data-auth-index="${esc(a.auth_index)}" title="刷新积分">刷新</button>`;
   const cooling=Array.isArray(a.cooling)?a.cooling.filter(c=>Number(c&&c.seconds)>0):[];
   const coolingBadge=cooling.length?`<span class="badge cooling" title="按模型维度的临时冷却">冷却 ${cooling.length}</span>`:"";
-  const badges=(selected?`<span class="badge" style="background:var(--acc-ring);color:var(--acc);border-color:var(--acc)">使用中</span>`:"")+(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${esc(plan)}">${esc(a.plan||"-")}</span>`;
+  const badges=(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${esc(plan)}">${esc(a.plan||"-")}</span>`;
   const coolingHTML=cooling.length?`<div class="cooldown-list">`+cooling.map(c=>{
     const model=asText(c.model);
     const left=Number(c.seconds)||0;
@@ -412,24 +406,23 @@ function card(a){
   }).join("")+`</div>`:"";
   const display=(a.nickname||a.label||a.name||"").replace(/^qoderwork-?/i,"");
   const nick=display||("u"+(a.uid||"").slice(-8));
-  return `<div class="card${selected?" selected":""}" data-region="${region}" data-auth="${esc(a.auth_index)}">
+  return `<div class="card" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(nick)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
   ${coolingHTML}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
-  <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
+  <div class="actions">${refreshBtn}${actionHTML}</div>
   </div>`;
 }
 let currentFilter="all";
 let lastAccounts=[];
-let activeAuthId="";
 let authFailCount=0;
 let authFailUntil=0;
 // Lazy-load: fetch credits for all cards that lack them, concurrently.
 // Each card fetches independently; failed ones retry once after 2s.
 function lazyLoadCredits(accounts){
-  const need=accounts.filter(a=>!a.credits&&!a.error&&!a.disabled);
+  const need=accounts.filter(a=>!a.disabled);
   if(!need.length) return;
   need.forEach(a=>{
     const idx=a.auth_index;
@@ -443,6 +436,7 @@ function lazyLoadCredits(accounts){
           if(acct.plan) a.plan=acct.plan;
         }
         if(acct&&acct.error){ a.error=acct.error; }
+        else if(acct&&acct.credits){ a.error=""; }
         updateOneCard(a);
       })
       .catch(()=>{
@@ -454,6 +448,7 @@ function lazyLoadCredits(accounts){
               if(acct&&acct.credits){ a.credits=acct.credits; a.exhausted=acct.exhausted; }
               if(acct&&acct.plan) a.plan=acct.plan;
               if(d.error||acct&&acct.error) a.error=d.error||acct.error;
+              else if(acct&&acct.credits) a.error="";
               updateOneCard(a);
             })
             .catch(()=>{ a.error="积分查询失败"; updateOneCard(a); });
@@ -473,33 +468,10 @@ function updateOneCard(a){
     bindCardActions(newCard);
   }
   filterRegion(currentFilter, null);
-  // Update summary + re-check selection when all done.
+    // Update the summary once every card has settled.
   const all=lastAccounts||[];
   if(all.every(x=>x.credits||x.error||x.disabled)){
     renderSummary(all);
-    // After all lazy credits loaded, the backend cache now has fresh exhausted
-    // flags. Re-fetch /accounts (light, cache-only) so ensureDefaultActiveAuth
-    // can pick the correct card — first load may have selected an account that
-    // turned out to be exhausted.
-    api("/accounts").then(d=>{
-      if(!d||d.error) return;
-      const fresh=d.accounts||[];
-      activeAuthId=d.active_auth||activeAuthId;
-      // Merge fresh selected/exhausted into lastAccounts and re-render.
-      (fresh||[]).forEach(fa=>{
-        const idx=all.findIndex(x=>x.auth_index===fa.auth_index);
-        if(idx>=0){
-          all[idx].selected=!!fa.selected;
-          all[idx].exhausted=!!fa.exhausted;
-        }
-      });
-      const g=document.getElementById("grid");
-      if(g){
-        g.innerHTML=accountsForFilter(all).map(card).join("");
-        bindCardActions(g);
-      }
-      filterRegion(currentFilter, null);
-    }).catch(()=>{});
   }
 }
 function filterRegion(region, btn){
@@ -690,12 +662,11 @@ async function load(force, btn){
     }
     const accounts=d.accounts||[];
     lastAccounts=accounts;
-    activeAuthId=d.active_auth||"";
     updateFilterCounts(accounts);
     if(!accounts.length){
-      g.innerHTML='<div class="loading">暂无 QoderWork 账号</div>';
+      g.innerHTML='<div class="loading">暂无 Qoder 账号</div>';
       renderSummary([]);
-      if(force) toast("数据已刷新", "warn", "暂无 QoderWork 账号");
+      if(force) toast("数据已刷新", "warn", "暂无 Qoder 账号");
       return;
     }
     g.innerHTML=accounts.map(card).join("");
@@ -864,33 +835,6 @@ async function claimPro(idx, btn){
     await load(true);
   }catch(e){
     toast("领取请求失败","err",e.message);
-    busy(btn,false);
-  }
-}
-async function selectAuth(idx, btn){
-  busy(btn,true);
-  try{
-    const d=await api("/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
-    if(d.error){
-      toast("选用失败","err",d.error);
-      busy(btn,false);
-      return;
-    }
-    activeAuthId=d.active_auth||idx;
-    const who=d.nickname||idx;
-    const region=(d.region||"").toUpperCase()||(lastAccounts.find(a=>a.auth_index===activeAuthId)?.region==="intl"?"Intl":"CN");
-    toast("已选用","ok",who+" · "+region);
-    // Re-render from local state for instant feedback, then soft reload
-    (lastAccounts||[]).forEach(a=>{a.selected=(a.auth_index===activeAuthId);});
-    const g=document.getElementById("grid");
-    if(g){
-      g.innerHTML=accountsForFilter(lastAccounts).map(card).join("");
-      bindCardActions(g);
-    }
-    filterRegion(currentFilter, null);
-  }catch(e){
-    toast("选用失败","err",e.message||String(e));
-  }finally{
     busy(btn,false);
   }
 }

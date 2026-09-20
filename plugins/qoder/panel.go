@@ -11,6 +11,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+var (
+	panelHostAuthList   = hostAuthList
+	panelHostAuthBundle = hostAuthGetBundle
+)
+
 // wbAccount is one row of the dashboard.
 type wbAccount struct {
 	AuthIndex string           `json:"auth_index"`
@@ -24,19 +29,18 @@ type wbAccount struct {
 	Status    string           `json:"status"`
 	Disabled  bool             `json:"disabled"`
 	Exhausted bool             `json:"exhausted"`
-	Selected  bool             `json:"selected"` // panel active routing card
 	Credits   *creditsSummary  `json:"credits,omitempty"`
 	Checkin   *checkinSummary  `json:"checkin,omitempty"`
 	Cooling   []map[string]any `json:"cooling,omitempty"`
 	Error     string           `json:"error,omitempty"`
 }
 
-// credits/checkin/plan fields are left empty — the panel renders skeletons
-// and fetches them lazily via /credits?auth_index=<idx>. This avoids hitting
-// upstream billing APIs for all accounts simultaneously on page load (which
-// causes 500 from rate-limited /v2/billing/meter/get-user-resource).
+// On a light load we return the last cached plan/checkin/credits snapshot
+// so cards render usable data immediately. The panel then refreshes each
+// account lazily via /credits?auth_index=<idx>, avoiding a thundering herd
+// against the upstream billing API.
 func buildDashboardEx(force, fetchCredits bool) map[string]any {
-	files, err := hostAuthList()
+	files, err := panelHostAuthList()
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -80,7 +84,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 				Status:    f.Status,
 				Disabled:  f.Disabled,
 			}
-			sa, phys, err := hostAuthGetBundle(f.AuthIndex)
+			sa, phys, err := panelHostAuthBundle(f.AuthIndex)
 			if err != nil {
 				acct.Error = "load auth: " + err.Error()
 				out[i] = acct
@@ -108,13 +112,11 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 				acct.Error = strings.Join(errs, "; ")
 			} else {
 				// Light load: use cached values if available, but don't fetch upstream.
-				if v, ok := accountCache.Load(f.ID); ok {
-					if e, ok2 := v.(*accountCacheEntry); ok2 {
-						acct.Plan = e.plan
-						acct.Checkin = e.checkin
-						acct.Credits = e.credits
-						acct.Exhausted = isCreditsExhausted(e.credits)
-					}
+				if plan, ci, cr, ok := cachedAccountDetailsSnapshot(f.ID); ok {
+					acct.Plan = plan
+					acct.Checkin = ci
+					acct.Credits = cr
+					acct.Exhausted = isCreditsExhausted(cr)
 				}
 			}
 			out[i] = acct
@@ -127,7 +129,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 		life = reconcileAllAccounts(true)
 		// Drop accounts deleted during reconcile (CN exhaust) and refresh
 		// disabled/exhausted from disk/cache (host list may lag after save).
-		if files2, err2 := hostAuthList(); err2 == nil {
+		if files2, err2 := panelHostAuthList(); err2 == nil {
 			live := make(map[string]struct{}, len(files2))
 			disabledBy := make(map[string]bool, len(files2))
 			for _, f := range files2 {
@@ -167,17 +169,10 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 	checkinAutoMu.RLock()
 	auto := checkinAuto
 	checkinAutoMu.RUnlock()
-	// Ensure default selection for panel + scheduler (first usable card).
-	activeID := ensureDefaultActiveAuth(out)
 	// Aggregate credits for panel/API consumers (all accounts currently in out).
 	sum := summarizeCredits(out)
-	// Mark selected account in list for UI.
-	for i := range out {
-		out[i].Selected = out[i].AuthID == activeID
-	}
 	resp := map[string]any{
 		"accounts":       out,
-		"active_auth":    activeID,
 		"checkin_auto":   auto,
 		"lifecycle_auto": lifecycleEnabled(),
 		"schedule":       []string{"09:00", "21:00"},

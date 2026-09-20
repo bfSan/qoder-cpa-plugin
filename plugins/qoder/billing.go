@@ -212,7 +212,7 @@ func performCheckinCall(sa *storedAuth) (map[string]any, error) {
 	return m, nil
 }
 
-// isCreditsExhausted is the shared "耗尽" definition for panel + scheduler.
+// isCreditsExhausted is the shared "耗尽" definition for the panel.
 // Exhausted = we have usage signal and no remaining credits.
 // Missing credits data is NOT exhausted (unknown).
 func isCreditsExhausted(cr *creditsSummary) bool {

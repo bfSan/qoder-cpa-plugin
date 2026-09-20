@@ -4,8 +4,8 @@
 // account's catalog. Cooling the whole credential would turn a single
 // degraded model (for example an empty_stream on one upstream model) into
 // an auth-wide outage, which is especially harmful when only one Qoder auth
-// is configured. Keep throttling scoped to the failed (auth, model) pair and
-// let the scheduler route other models through the same auth.
+// is configured. Keep throttling scoped to the failed (auth, model) pair so
+// one degraded model does not block unrelated models on the same auth.
 //
 // State is process-local: it survives config reloads but not a CPA restart.
 package main
@@ -53,9 +53,9 @@ type modelCooldownEntry struct {
 //
 // CPA performs model aliasing/rewriting between auth selection and plugin
 // execution, so req.Model at execution time may already be the upstream model
-// (for example "dfmodel") while the scheduler saw the client-facing route model
-// (for example "deepseek-v4.1-flash"). Keep cooldowns keyed by the routing
-// model so the scheduler can skip the same (auth, model) pair that failed.
+// (for example "dfmodel") while the routed client model was
+// "deepseek-v4.1-flash". Keep cooldowns keyed by the routing model so the
+// recorded pair is stable across alias rewrites.
 //
 // requested_model is set by CPA's execution handlers and survives the
 // model-alias rewrite. Metadata values are checked first; req.Model remains
@@ -105,8 +105,7 @@ var (
 )
 
 // markModelCooldown records a throttled (account, model) pair. An empty model
-// is ignored: without a model ID the entry would freeze the account, which is
-// exactly what this table exists to avoid.
+// is ignored: without a model ID the entry would freeze the account.
 func markModelCooldown(authID, model string, reason cooldownReason) {
 	authID = strings.TrimSpace(authID)
 	model = strings.TrimSpace(model)
@@ -162,7 +161,7 @@ func modelCoolingUntil(authID, model string) time.Time {
 	return entry.Until
 }
 
-// modelIsCooling reports whether the pair should be skipped right now.
+// modelIsCooling reports whether the pair is cooling right now.
 func modelIsCooling(authID, model string) bool {
 	return !modelCoolingUntil(authID, model).IsZero()
 }
@@ -293,11 +292,10 @@ func cooldownSweepLocked(now time.Time) {
 //
 // Qoder's worst failure mode is not an HTTP 429: the gateway can accept the
 // request and then close the SSE stream before the first payload, which the
-// plugin observes as empty_stream with status 0. That must cool the specific
-// model too, otherwise the only configured auth gets repeatedly selected and
-// every request to that model fails. Account-level failures (hard credit
-// exhaustion, invalid credentials) stay with the existing lifecycle/status
-// handling.
+// plugin observes as empty_stream with status 0. Record that against the
+// specific model so the panel exposes the degraded pair. Account-level
+// failures (hard credit exhaustion, invalid credentials) stay with the
+// existing lifecycle/status handling.
 func recordUpstreamFailure(authID, model string, status int, body string) {
 	model = normalizeCooldownModel(model)
 	if model == "" {

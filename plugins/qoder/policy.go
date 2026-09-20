@@ -238,15 +238,15 @@ func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
 	return note
 }
 
-// labelForAuth adds [CN] for host labels.
+// labelForAuth adds the account region for host labels.
 func labelForAuth(sa *storedAuth) string {
-	base := "QoderWork"
+	base := "Qoder"
 	if sa != nil && strings.TrimSpace(sa.Account.Nickname) != "" {
 		base = strings.TrimSpace(sa.Account.Nickname)
 	}
 	tag := "CN"
-	if "cn" == "global" {
-		tag = "CN"
+	if authRegion(sa) == regionIntl {
+		tag = "Intl"
 	}
 	return base + " [" + tag + "]"
 }
