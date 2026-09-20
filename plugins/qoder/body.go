@@ -18,14 +18,28 @@ import (
 //go:embed baseprompt.json
 var basepromptJSON []byte
 
-// cpaToUpstreamKey maps CPA-facing model names to upstream keys.
-// Unknown names pass through unchanged (server silently routes to auto).
+// cpaToUpstreamKey maps CPA-facing model names (human-friendly aliases plus
+// legacy keys from the pre-merge CN/Intl plugins) to the upstream keys the
+// Qoder gateway recognises. Unknown names pass through unchanged (the server
+// silently routes them to auto).
+//
+// Upstream chat-scene catalog as of 2026-09: auto, ultimate, performance,
+// efficient, qmodel_38max, qfmodel, qmodel_latest, qmodel, kmodel_latest,
+// kmodel, gmodel, gfmodel, dmodel, dfmodel, mmodel (issue #8 — a stale table
+// here meant a requested rename silently routed to auto).
 func cpaToUpstreamKey(cpaModel string) string {
 	switch cpaModel {
 	case "qoder-auto", "auto":
 		return "auto"
-	case "qwen3.8-max-preview", "qwen3.8-max", "qmodel_preview":
-		return "qmodel_preview"
+	case "qoder-ultimate", "ultimate":
+		return "ultimate"
+	case "qoder-performance", "performance":
+		return "performance"
+	case "qoder-efficient", "efficient":
+		return "efficient"
+	// Qwen3.8-Max. qmodel_preview / qwen3.8-max-preview are the retired pre-0.12 keys.
+	case "qwen3.8-max", "qwen3.8-max-preview", "qmodel_38max", "qmodel_preview":
+		return "qmodel_38max"
 	case "qwen3.8-flash", "qfmodel":
 		return "qfmodel"
 	case "qwen3.7-max", "qmodel_latest":
@@ -36,13 +50,18 @@ func cpaToUpstreamKey(cpaModel string) string {
 		return "q36fmodel"
 	case "deepseek-v4-pro", "dmodel":
 		return "dmodel"
-	case "deepseek-v4-flash", "dfmodel":
+	case "deepseek-flash", "deepseek-v4-flash", "dfmodel":
 		return "dfmodel"
-	case "glm-5.2", "gm51model":
-		return "gm51model"
-	case "kimi-k2.7-code", "kmodel":
+	// GLM-5.3. gm51model (GLM-5.2) was retired upstream.
+	case "glm-5.3", "glm-5.2", "gmodel", "gm51model":
+		return "gmodel"
+	case "glm-5.3-flash", "gfmodel":
+		return "gfmodel"
+	case "kimi-k3", "kmodel_latest":
+		return "kmodel_latest"
+	case "kimi-k2.8-preview", "kimi-k2.7-code", "kmodel":
 		return "kmodel"
-	case "minimax-m2.7", "mmodel":
+	case "minimax-m3", "minimax-m2.7", "mmodel":
 		return "mmodel"
 	}
 	return cpaModel

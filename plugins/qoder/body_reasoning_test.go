@@ -16,13 +16,31 @@ import (
 
 func TestCPAToUpstreamKeyQwen38Flash(t *testing.T) {
 	cases := map[string]string{
-		"qwen3.8-flash":       "qfmodel",
-		"qfmodel":             "qfmodel",
-		"qwen3.8-max-preview": "qmodel_preview",
+		"qwen3.8-flash": "qfmodel",
+		"qfmodel":       "qfmodel",
+		// issue #8: qmodel_preview / qwen3.8-max-preview are retired
+		// upstream keys; both now map to the current Qwen3.8-Max key.
+		"qwen3.8-max-preview": "qmodel_38max",
+		"qwen3.8-max":         "qmodel_38max",
+		"qmodel_preview":      "qmodel_38max",
+		"qmodel_38max":        "qmodel_38max",
+		"glm-5.2":             "gmodel",
+		"glm-5.3":             "gmodel",
+		"gm51model":           "gmodel",
+		"gfmodel":             "gfmodel",
+		"kimi-k3":             "kmodel_latest",
+		"kmodel":              "kmodel",
+		"kimi-k2.7-code":      "kmodel",
+		"minimax-m2.7":        "mmodel",
+		"minimax-m3":          "mmodel",
+		"deepseek-flash":      "dfmodel",
 		"qwen3.7-max":         "qmodel_latest",
 		"qwen3.6-flash":       "q36fmodel",
 		"deepseek-v4-flash":   "dfmodel",
 		"auto":                "auto",
+		"ultimate":            "ultimate",
+		"qoder-performance":   "performance",
+		"efficient":           "efficient",
 		// dynamic-discovery keys ride along unchanged
 		"brand-new-key": "brand-new-key",
 	}
@@ -114,11 +132,11 @@ func TestBuildQoderBodyReasoningEffortInjection(t *testing.T) {
 func TestBuildQoderBodyReasoningEffortInvalidIgnored(t *testing.T) {
 	for _, effort := range []string{"", "ultra", "off", "10"} {
 		req := &openAIRequest{
-			Model:           "qmodel_preview",
+			Model:           "qmodel_38max",
 			Messages:        []openAIMessage{{Role: "user", Content: "hi"}},
 			ReasoningEffort: effort,
 		}
-		raw, err := buildQoderBody(req, "qmodel_preview", "personal_professional_trial")
+		raw, err := buildQoderBody(req, "qmodel_38max", "personal_professional_trial")
 		if err != nil {
 			t.Fatalf("build(%q): %v", effort, err)
 		}
