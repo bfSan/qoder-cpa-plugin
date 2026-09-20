@@ -147,7 +147,16 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 	return "refreshed", nil
 }
 
-// persistAuthTokens writes the updated credential back through the host API.
+// persistAuthTokens writes the updated credential back through the host API,
+// merging the refreshed auth/account objects into the existing on-disk
+// document so top-level fields the plugin does not own survive the refresh.
+// v0.9.27 (adapted from PR #6 / 4d5533e): a naive json.Marshal(sa) rebuilds
+// the document from the storedAuth struct alone and silently drops every
+// other top-level key — panel-managed fields (proxy_url, logo, ...) AND the
+// plugin's own markSessionDead marker (disabled/note) were wiped on the next
+// token refresh. mergeStoredAuthIntoDoc overwrites only the auth/account
+// objects and preserves the rest, mirroring the merge pattern markSessionDead
+// already uses.
 // The host's file watcher reloads it; we deliberately do NOT dual-write the
 // physical path (same rule as hostAuthPersist).
 func persistAuthTokens(authIndex string, sa *storedAuth) error {
@@ -159,11 +168,39 @@ func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	if name == "" {
 		name = authFileNameFor(sa)
 	}
-	raw, err := json.Marshal(sa)
+	raw, err := mergeStoredAuthIntoDoc(phys.JSON, sa)
 	if err != nil {
 		return err
 	}
 	return hostAuthSaveJSON(name, raw)
+}
+
+// mergeStoredAuthIntoDoc re-marshals the refreshed credential into the
+// existing on-disk document (phys.JSON) without discarding unknown top-level
+// fields. Only the auth/account objects the plugin owns are overwritten; any
+// extra panel-managed keys (proxy_url, logo, future fields) and lifecycle
+// markers (disabled, note) survive untouched. An empty phys.JSON builds a
+// fresh document; a phys.JSON that fails to unmarshal is an error — silently
+// discarding it would reintroduce the wipeout this merge exists to prevent.
+func mergeStoredAuthIntoDoc(physJSON []byte, sa *storedAuth) ([]byte, error) {
+	doc := map[string]any{}
+	if len(physJSON) > 0 {
+		if err := json.Unmarshal(physJSON, &doc); err != nil {
+			return nil, fmt.Errorf("auth doc merge: existing document unreadable: %w", err)
+		}
+	}
+	saRaw, err := json.Marshal(sa)
+	if err != nil {
+		return nil, err
+	}
+	var saMap map[string]any
+	if err := json.Unmarshal(saRaw, &saMap); err != nil {
+		return nil, err
+	}
+	for k, v := range saMap {
+		doc[k] = v // overwrite auth/account with refreshed values; keep the rest
+	}
+	return json.Marshal(doc)
 }
 
 // markSessionDead flags an auth disabled via the host's standard `disabled`

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.27
+
+### PR #6 recheck round: auth document merge on token refresh (repo v0.12.72)
+
+The v0.12.71 absorb review missed one real fix: 4d5533e ("preserve unknown
+top-level auth fields on token refresh") was dismissed with "the function no
+longer exists" — wrong. `persistAuthTokens` is alive in keepalive.go and
+still rebuilt the on-disk credential with `json.Marshal(sa)` alone, wiping
+every top-level key outside the storedAuth struct on each token refresh:
+panel-managed fields (proxy_url, logo, ...) AND the plugin's own
+`markSessionDead` markers (disabled/note — a resurrected token would
+silently un-disable a dead auth).
+
+**Fix.** `persistAuthTokens` now goes through `mergeStoredAuthIntoDoc`
+(phys.JSON, sa): the existing document is decoded, only the owned
+auth/account objects are overwritten with the refreshed values, and every
+other top-level key survives verbatim — the same merge pattern
+`markSessionDead` already uses. An unreadable existing document is an error
+(silently discarding it would reintroduce the wipeout); an empty one builds
+a fresh document. The overwrite is deliberately top-level key-level: the
+auth/account objects are replaced wholesale so stale object-internal
+sub-fields can never contradict the refreshed tokens.
+
+**Tests.** `authdoc_merge_test.go`: unknown top-level fields + lifecycle
+markers survive (proxy_url/logo/disabled/note), fresh-document build,
+bad-document error, and the owned-object-replace boundary pinned both ways.
+
 ## 0.9.26
 
 ### PR #4 / PR #6 code absorbed clean-room (repo v0.12.71)
