@@ -33,13 +33,38 @@ func streamEmit(streamID string, payload []byte) error {
 	return err
 }
 
+// streamEmitError forwards a terminal stream failure to the host.
+//
+// The message must travel in the RPC `error` field (rpcStreamEmitRequest.Error),
+// not inside a JSON payload: the host turns that field into the chunk's Err,
+// which is what its cooldown layer classifies. Sending an `{"error":...}`
+// payload instead makes the host treat the bytes as a normal data chunk, so the
+// client sees a truncated stream and CPA synthesizes its own generic
+// "empty_stream" error at the transport layer — which is classified as a
+// credential-scoped failure and cools the whole auth. Keeping the error on the
+// RPC field also preserves our connection-lifecycle wording.
+//
+// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
 func streamEmitError(streamID, message string) {
 	if streamID == "" {
 		return
 	}
-	// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
-	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": redactSecrets(message)}})
-	_ = streamEmit(streamID, errJSON)
+	body, err := streamErrorFrame(streamID, redactSecrets(message))
+	if err != nil {
+		return
+	}
+	_, _ = hostCall(pluginabi.MethodHostStreamEmit, body)
+}
+
+// streamErrorFrame renders the host.stream.emit request for a terminal error.
+// Kept separate from streamEmitError so tests can pin the wire shape without a
+// live host RPC bridge: the message must live in the top-level "error" field
+// (rpcStreamEmitRequest.Error), never inside "payload".
+func streamErrorFrame(streamID, message string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"stream_id": streamID,
+		"error":     message,
+	})
 }
 
 var streamCloseOnce sync.Map // streamID -> sync.Once
@@ -147,12 +172,13 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	// surface it as an error frame and record the attempt as failed.
 	if err := scanner.Err(); err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
-		recordUpstreamFailure(authID, cooldownModel, 0, err.Error())
-		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		readErr := upstreamReadError(err)
+		recordUpstreamFailure(authID, cooldownModel, 0, readErr.Error())
+		streamEmitError(streamID, readErr.Error())
 		return
 	}
 	if !emitted {
-		errEmpty := fmt.Errorf("empty_stream: upstream stream closed before first payload")
+		errEmpty := emptyStreamError()
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, errEmpty.Error())
 		recordUpstreamFailure(authID, cooldownModel, 0, errEmpty.Error())
 		streamEmitError(streamID, errEmpty.Error())
@@ -215,10 +241,10 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(cleaned)})
 	}
 	if err := scanner.Err(); err != nil {
-		return chunks, 0, fmt.Errorf("upstream stream read error: %w", err)
+		return chunks, 0, upstreamReadError(err)
 	}
 	if len(chunks) == 0 {
-		return nil, 0, fmt.Errorf("empty_stream: upstream stream closed before first payload")
+		return nil, 0, emptyStreamError()
 	}
 	return chunks, 0, nil
 }

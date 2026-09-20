@@ -105,6 +105,11 @@ type quotaUsageResponse struct {
 
 // fetchUserResource queries QoderWork's quota endpoint and aggregates base +
 // add-on credits into the panel's creditsSummary shape.
+//
+// fetchUserResourceFn is the indirection used by the management handlers so
+// tests can exercise the credits path without network access.
+var fetchUserResourceFn = fetchUserResource
+
 func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 	req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/api/v2/quota/usage", nil)
 	if err != nil {
@@ -146,6 +151,9 @@ type planResponse struct {
 	StartDate      int64           `json:"start_date"` // ms epoch
 	EndDate        int64           `json:"end_date"`   // ms epoch
 }
+
+// fetchPaymentTypeFn is the injectable indirection for plan lookups.
+var fetchPaymentTypeFn = fetchPaymentType
 
 func fetchPaymentType(sa *storedAuth) string {
 	req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/api/v2/user/plan", nil)

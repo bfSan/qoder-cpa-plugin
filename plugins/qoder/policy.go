@@ -196,6 +196,28 @@ func upstreamStatusError(status int, err error) error {
 	return err
 }
 
+// emptyStreamError renders an upstream "stream closed before first payload"
+// failure.
+//
+// The wording is load-bearing. When the gateway accepts the request and then
+// closes the SSE stream without sending anything, that is a transport
+// lifecycle event, not a credential or quota fault. CPA classifies the error
+// from the message text that survives the RPC boundary, so the trailing
+// "(unexpected EOF)" makes the host treat it as a connection-lifecycle failure:
+// `shouldSkipCredentialCooldown` returns early, the credential keeps its
+// healthy status, and single-model flakiness cannot promote the whole auth
+// into a cooldown. The plugin still records the pair in its own per-model
+// cooldown table for panel visibility.
+func emptyStreamError() error {
+	return fmt.Errorf("empty_stream: upstream stream closed before first payload (unexpected EOF)")
+}
+
+// upstreamReadError renders a mid-stream read failure with the same
+// transport-lifecycle classification as emptyStreamError.
+func upstreamReadError(err error) error {
+	return fmt.Errorf("upstream stream read error (unexpected EOF): %w", err)
+}
+
 // chatUpstreamError renders an upstream chat failure for the client, adding
 // actionable copy when the rejection was caused by oversized input so users
 // don't mistake it for an account/quota problem.
@@ -207,8 +229,10 @@ func chatUpstreamError(status int, body string) error {
 	return fmt.Errorf("upstream %d: %s", status, trimmed)
 }
 
-// displayNote builds a one-line note for CPAMP Auth cards.
-func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
+// notePrefix renders the region/disabled head of an auth-card note, without
+// the credit segment. Kept separate so syncAuthNote can rebuild a note while
+// preserving a previously-known credit segment.
+func notePrefix(sa *storedAuth, disabled bool) string {
 	region := "CN"
 	if sa != nil && authRegion(sa) == regionIntl {
 		region = "INTL"
@@ -217,6 +241,32 @@ func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
 	if disabled {
 		parts = append(parts, "已禁用")
 	}
+	return strings.Join(parts, " · ")
+}
+
+// creditSegmentFromNote extracts the credit segment of an existing auth note
+// (everything after the region / disabled prefix). Returns "" when the note
+// carries no usable credit information, so callers never resurrect "积分未知".
+func creditSegmentFromNote(note string) string {
+	parts := strings.Split(note, " · ")
+	segments := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "CN" || part == "INTL" || part == "已禁用" {
+			continue
+		}
+		segments = append(segments, part)
+	}
+	seg := strings.Join(segments, " · ")
+	if seg == "" || strings.HasPrefix(seg, "积分未知") {
+		return ""
+	}
+	return seg
+}
+
+// displayNote builds a one-line note for CPAMP Auth cards.
+func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
+	parts := []string{notePrefix(sa, disabled)}
 	switch {
 	case cr == nil:
 		parts = append(parts, "积分未知")

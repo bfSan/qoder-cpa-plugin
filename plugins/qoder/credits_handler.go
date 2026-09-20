@@ -97,7 +97,9 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	if vals := req.Query["auth_index"]; len(vals) > 0 {
 		authIndex = strings.TrimSpace(vals[0])
 	}
-	files, err := hostAuthList()
+	// Route through the same injectable hooks the panel uses so tests can
+	// exercise this handler without a live host RPC bridge.
+	files, err := panelHostAuthList()
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -107,13 +109,13 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			if f.AuthIndex != authIndex {
 				continue
 			}
-			sa, err := hostAuthGet(f.AuthIndex)
+			sa, _, err := panelHostAuthBundle(f.AuthIndex)
 			if err != nil {
 				return map[string]any{"accounts": []map[string]any{{
 					"auth_index": authIndex, "error": "load auth: " + err.Error(),
 				}}}
 			}
-			cr, err := fetchUserResource(sa)
+			cr, err := fetchUserResourceFn(sa)
 			acct := map[string]any{
 				"auth_index": authIndex,
 				"nickname":   sa.Account.Nickname,
@@ -129,7 +131,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				acct["credits"] = cr
 				acct["exhausted"] = isCreditsExhausted(cr)
 				// Also fetch plan so the badge updates on lazy load.
-				acct["plan"] = fetchPaymentType(sa)
+				acct["plan"] = fetchPaymentTypeFn(sa)
 				// Update cache so subsequent dashboard loads see fresh data.
 				now := time.Now()
 				if cr != nil {
@@ -148,6 +150,11 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				accountCache.Store(f.ID, &accountCacheEntry{
 					checkin: ci, credits: cr, plan: plan, fetched: now,
 				})
+				// Propagate the fresh credits into the host auth-file note so
+				// CPA's native credential card matches this panel. Without it a
+				// lazy /credits refresh updated the panel while the native card
+				// stayed on a stale "积分未知".
+				_ = syncAuthNote(f.AuthIndex, f.ID, sa, cr, f.Disabled)
 			}
 			return map[string]any{"accounts": []map[string]any{acct}}
 		}
@@ -163,17 +170,19 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	}
 	var out []acctCredits
 	for _, f := range files {
-		sa, err := hostAuthGet(f.AuthIndex)
+		sa, _, err := panelHostAuthBundle(f.AuthIndex)
 		if err != nil {
 			out = append(out, acctCredits{AuthIndex: f.AuthIndex, Error: "load auth: " + err.Error()})
 			continue
 		}
-		cr, err := fetchUserResource(sa)
+		cr, err := fetchUserResourceFn(sa)
 		ac := acctCredits{AuthIndex: f.AuthIndex, Nickname: sa.Account.Nickname, UID: sa.Account.UID}
 		if err != nil {
 			ac.Error = err.Error()
 		} else {
 			ac.Credits = cr
+			// Keep the host note in sync for the all-accounts path too.
+			_ = syncAuthNote(f.AuthIndex, f.ID, sa, cr, f.Disabled)
 		}
 		out = append(out, ac)
 	}

@@ -234,19 +234,45 @@ func applyExhaustedPolicy(authIndex, authID string, sa *storedAuth, cr *creditsS
 	}
 }
 
+// existingNoteCredits reads the credit segment already stored on disk so a
+// failed credits query can keep the last known value instead of regressing the
+// card to "积分未知".
+func existingNoteCredits(authIndex string) string {
+	phys, err := hostAuthGetPhysicalFn(authIndex)
+	if err != nil || phys == nil {
+		return ""
+	}
+	var pjson struct {
+		Note string `json:"note"`
+	}
+	if json.Unmarshal(phys.JSON, &pjson) != nil {
+		return ""
+	}
+	return creditSegmentFromNote(pjson.Note)
+}
+
 // syncAuthNote writes note without changing disabled state.
+//
+// cr == nil means "credits unknown this round" (upstream error or not fetched
+// yet). In that case the previously stored credit segment is preserved: a
+// transient billing failure must not erase a note the user already sees.
 func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, disabled bool) error {
 	if sa == nil {
 		return nil
 	}
 	note := displayNote(sa, cr, disabled)
+	if cr == nil {
+		if prev := existingNoteCredits(authIndex); prev != "" {
+			note = notePrefix(sa, disabled) + " · " + prev
+		}
+	}
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
 	}
 	mu := checkinLockFor(authIndex)
 	mu.Lock()
 	defer mu.Unlock()
-	phys, err := hostAuthGetPhysical(authIndex)
+	phys, err := hostAuthGetPhysicalFn(authIndex)
 	name := authFileNameFor(sa)
 	path := ""
 	legacyPath := ""
@@ -255,6 +281,11 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
 		note = displayNote(sa, cr, disabled)
+		if cr == nil {
+			if prev := existingNoteCredits(authIndex); prev != "" {
+				note = notePrefix(sa, disabled) + " · " + prev
+			}
+		}
 	}
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
@@ -263,7 +294,7 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 	if err != nil {
 		return err
 	}
-	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
+	if err := hostAuthPersistMigrateFn(name, path, legacyPath, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authID, disabled, note)

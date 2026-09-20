@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +31,48 @@ func TestErrorEnvelopeForPlainErrorOmitsStatus(t *testing.T) {
 	}
 	if env.Error == nil || env.Error.HTTPStatus != 0 {
 		t.Fatalf("expected http_status omitted, got %+v", env.Error)
+	}
+}
+
+// TestEmptyStreamErrorCarriesNoHTTPStatus locks the classification fix for
+// 2026-09-21: an upstream that accepts the request then closes the SSE stream
+// before the first payload is a transport-lifecycle event. It must not carry
+// a 401/402/429 status, otherwise CPA promotes the single-model failure into a
+// credential-wide cooldown.
+func TestEmptyStreamErrorCarriesNoHTTPStatus(t *testing.T) {
+	err := emptyStreamError()
+	var se *statusError
+	if errors.As(err, &se) {
+		t.Fatalf("empty stream must not carry an HTTP status, got %d", se.StatusCode())
+	}
+	if !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("empty stream should be classified as a connection lifecycle failure, got %q", err.Error())
+	}
+	// The same error must survive the RPC boundary without a status field.
+	raw := errorEnvelopeFor(err)
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil {
+		t.Fatal("expected error envelope")
+	}
+	if env.Error.HTTPStatus != 0 {
+		t.Fatalf("http_status = %d, want omitted", env.Error.HTTPStatus)
+	}
+}
+
+// TestEmptyStreamErrorStillCoolsOnlyThePair keeps the plugin-side blast radius
+// pinned to one (account, model) tuple.
+func TestEmptyStreamErrorStillCoolsOnlyThePair(t *testing.T) {
+	resetCooldowns(t)
+	err := emptyStreamError()
+	recordUpstreamFailure("qoder-a", "qfmodel", 0, err.Error())
+	if !modelIsCooling("qoder-a", "qfmodel") {
+		t.Fatal("empty_stream should still cool the specific model pair")
+	}
+	if modelIsCooling("qoder-a", "gmodel") {
+		t.Fatal("a failed model must not cool sibling models on the same auth")
 	}
 }
 
@@ -72,6 +115,35 @@ func TestUpstreamStatusErrorPolicy(t *testing.T) {
 				t.Fatalf("status = %d, want %d", se.status, tc.want)
 			}
 		})
+	}
+}
+
+// TestStreamErrorFrameUsesTopLevelErrorField pins the wire shape of a terminal
+// stream error: the host only classifies failures that arrive in
+// rpcStreamEmitRequest.Error. An `{"error":...}` JSON *payload* is a data
+// frame as far as the host is concerned, so CPA synthesizes its own
+// "empty_stream" error and cools the whole auth instead of the single model.
+func TestStreamErrorFrameUsesTopLevelErrorField(t *testing.T) {
+	raw, err := streamErrorFrame("stream-1", "empty_stream: upstream stream closed before first payload (unexpected EOF)")
+	if err != nil {
+		t.Fatalf("streamErrorFrame: %v", err)
+	}
+	var frame struct {
+		StreamID string          `json:"stream_id"`
+		Payload  json.RawMessage `json:"payload"`
+		Error    string          `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if frame.StreamID != "stream-1" {
+		t.Fatalf("stream_id = %q, want stream-1", frame.StreamID)
+	}
+	if len(frame.Payload) != 0 {
+		t.Fatalf("payload must stay empty for an error frame, got %s", frame.Payload)
+	}
+	if !strings.Contains(frame.Error, "unexpected EOF") {
+		t.Fatalf("error must carry the lifecycle wording, got %q", frame.Error)
 	}
 }
 
