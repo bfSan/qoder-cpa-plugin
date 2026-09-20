@@ -301,6 +301,16 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		out["total_credits"] = ci.TotalCredits
 		return out
 	}
+	// Campaign regions drop a claimed campaign from /me/campaigns entirely, so
+	// an inactive summary means "nothing left to claim today" — either already
+	// claimed or no campaign running. Surface it as a no-op, not a failure.
+	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign && !ci.Active {
+		out["success"] = true
+		out["skipped"] = true
+		out["reason"] = "none"
+		out["message"] = "今日暂无可领取权益"
+		return out
+	}
 
 	// Step 2: POST claim (5s budget).
 	res, err := performCheckinCall(sa)

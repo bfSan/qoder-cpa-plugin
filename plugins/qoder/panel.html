@@ -811,6 +811,9 @@ async function addModel(){
 function checkinResultToast(res, who){
   const name=res.nickname||who||"账号";
   if(res.error){toast(name+"：签到失败","err",asText(res.error));return}
+  if(res.reason==="none"){
+    toast(name+"："+(asText(res.message)||"今日暂无可领取权益"),"warn");return;
+  }
   if(res.reason==="already"||(res.skipped&&/already|已签|今日/.test(asText(res.message)))){
     toast(name+"：今日已签到","ok",asText(res.message));return;
   }
