@@ -434,12 +434,28 @@ async function tasksRunAll(btn){
     if(d.error){toast("批量任务失败","err",d.error);return}
     const s=d.summary||{};
     const ok=Number(s.success||0), skip=Number(s.skipped||0), fail=Number(s.fail||0);
-    const rewards=[];
+    const rewards=[],gates=[],deads=[];
     (d.results||[]).forEach(r=>{
-      (r.lines||[]).forEach(l=>{ if(/\+\d+/.test(l)) rewards.push((r.nickname||"")+" "+l); });
+      const who=(r.nickname||r.auth_index||"");
+      (r.lines||[]).forEach(l=>{
+        if(/\+\d+/.test(l)) rewards.push(who+" "+l);
+        else if(l.indexOf("需先完成前置")>=0){
+          // 前置门禁是用户唯一能自行解除的阻塞（first_buddy：官方客户端新建任务并发起对话）。
+          // 批量 toast 此前只保留 +N 奖励行，解释整行被吞——用户只见"没做任务"不知原因。
+          const label=(l.split("「")[1]||"").split("」")[0]||l;
+          if(gates.indexOf(label)<0) gates.push(label);
+        }else if(l.indexOf("登录态已失效")===0){
+          const head=l.split("（")[0];
+          if(deads.indexOf(who+" "+head)<0) deads.push(who+" "+head);
+        }
+      });
     });
     const title="批量任务中心："+ok+" 完成"+(skip?" / "+skip+" 跳过":"")+(fail?" / "+fail+" 失败":"");
-    toast(title, fail?"err":"ok", rewards.slice(0,8).join("；")+(rewards.length>8?" …(共 "+rewards.length+" 项)":""));
+    const total=rewards.length+gates.length+deads.length;
+    const detail=rewards.slice(0,6)
+      .concat(gates.slice(0,2).map(g=>"部分任务需先 "+g))
+      .concat(deads.slice(0,2));
+    toast(title, fail?"err":"ok", detail.join("；")+(total>detail.length?" …(另有 "+(total-detail.length)+" 条)":""));
   }catch(e){toast("批量任务请求失败","err",e.message)}
   finally{busy(btn,false)}
 }
@@ -746,7 +762,10 @@ async function api(path, opts={}){
     return JSON.parse(text);
   }catch(_){
     const snip=text.trim().slice(0,120);
-    throw new Error("管理桥接响应异常（HTTP "+r.status+"）"+(snip?"："+snip:"：响应体为空（上游扫描超时或桥接中断，请稍后重试）"));
+    const hint=r.status===404
+      ?"响应体为空（宿主未注册该插件路由——请更新插件到最新版并重启宿主）"
+      :"响应体为空（上游扫描超时或桥接中断，请稍后重试）";
+    throw new Error("管理桥接响应异常（HTTP "+r.status+"）"+(snip?"："+snip:"："+hint));
   }
 }
 async function load(force, btn){

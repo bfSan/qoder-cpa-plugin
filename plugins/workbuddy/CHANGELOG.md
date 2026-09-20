@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.9.22
+
+### management route table restored + run-all toast surfaces blockers (repo v0.12.67)
+
+User report (2026-09-20): the voucher dialog failed with
+"管理桥接响应异常（HTTP 404）：响应体为空", and the one-click 任务 run-all
+"completely did no tasks" while newly granted quota packages stayed few.
+
+Root cause (vouchers): the host dispatches plugin management routes by exact
+key lookup over the plugin's DECLARED route table — any undeclared path is
+answered by the host gin NoRoute with a 404 and an EMPTY body before the
+plugin ever sees the request. 0.9.13 declared /tasks + /tasks/run (twice),
+0.9.14 swapped their handler cases for /school/vouchers without declaring it,
+and 0.9.18 restored the tasks cases without restoring the vouchers entry —
+so since 0.9.14 the voucher dialog never reached the plugin. The original
+"JSON.parse: unexpected end of data at line 1 column 1" report was the same
+empty body hitting the old panel decoder; v0.12.64's scan-budget fix was
+real defense but not the root cause.
+
+Root cause (tasks): nothing hid the gate — the loop ran, but on fresh
+accounts ~17 growth tasks sit behind the upstream first_buddy prerequisite
+("领取一只 Buddy（在官方客户端新建任务并发起对话）"), which only an official-
+client action can clear; accepts are rejected, progress never counts, so no
+rewards and no new packages. The batch toast then filtered the loop lines to
++\d+ rewards only, swallowing the one line that explained everything — the
+user saw "did no tasks" with no reason.
+
+Fixes:
+- management.go: declared Routes deduped (/tasks, /tasks/run once each) and
+  GET /school/vouchers declared — the dialog reaches the plugin again, so
+  voucher codes are queryable/copyable for the rest of the activity window.
+- panel.html run-all toast: reward lines keep priority, prerequisite-gate
+  lines (deduped by label) and session-dead lines (deduped per account) are
+  now surfaced with a bounded total.
+- panel.html api(): empty-body hint is status-aware — 404 points at an
+  undeclared plugin route (update plugin + restart host) instead of the
+  misleading scan-timeout copy.
+- routes_table_test.go: three guards — no duplicate declarations, handler
+  surface fully declared, and a dispatch smoke proving every declared route
+  reaches a real handler (both drift directions pinned).
+
+Family audit: trae (intl cases live in intl_management.go) and qoder route
+tables are 1:1 with their handler switches — workbuddy was the only drift.
+
+Verified with a headless-browser probe: mock /tasks/run carrying a
+prerequisite line, a reward line and a non-cn skip — the batch toast now
+reads "账号A 领取 daily_share: +50 分 +0 能；部分任务需先 领取一只 Buddy
+（在官方客户端新建任务并发起对话）", zero JS errors.
+
 ## 0.9.21
 
 ### panel: selected-account button size anomaly fixed (repo v0.12.66)
