@@ -1,6 +1,11 @@
 package upstream
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 // v0.12.37: advertised Intl ids carry the "-intl" namespace suffix;
 // resolveMode must send the bare model name upstream.
@@ -57,5 +62,49 @@ func TestBuildHeadersUserTimezone(t *testing.T) {
 	h2 := buildHeaders(&Auth{AccessToken: "tok"})
 	if got := h2.Get("x-trae-user-timezone"); got != "" {
 		t.Errorf("timezone header should be omitted, got %q", got)
+	}
+}
+
+// v0.12.53: a 200 envelope carrying a business error code, or one with an
+// empty data list, must FAIL — previously both silently produced zero
+// dynamic models, so model.for_auth advertised just the auto/work virtuals
+// with no diagnostic (field report: "trae 国际服务模型拉取失效"). Errors make
+// the caller fall back to the static catalog and log the real reason.
+func TestFetchModelsBusinessAndEmptyEnvelopes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "bizerr"):
+			_, _ = w.Write([]byte(`{"code":1001,"message":"We're sorry, but we are not able to authenticate you."}`))
+		case strings.Contains(r.URL.Path, "empty"):
+			_, _ = w.Write([]byte(`{"code":0,"data":[]}`))
+		case strings.Contains(r.URL.Path, "nulldata"):
+			_, _ = w.Write([]byte(`{"code":0,"data":null}`))
+		default: // ok
+			_, _ = w.Write([]byte(`{"code":0,"data":[{"name":"m1"},{"name":""},{"name":"m2"}]}`))
+		}
+	}))
+	defer srv.Close()
+	c := &Client{HTTP: srv.Client(), BaseURL: srv.URL}
+	a := &Auth{AccessToken: "tok", RefererOrigin: "https://work.trae.ai"}
+
+	c.BaseURL = srv.URL + "/bizerr"
+	if _, err := c.FetchModels(a); err == nil || !strings.Contains(err.Error(), "1001") {
+		t.Errorf("bizerr envelope: want code 1001 error, got %v", err)
+	}
+	c.BaseURL = srv.URL + "/empty"
+	if _, err := c.FetchModels(a); err == nil || !strings.Contains(err.Error(), "empty list") {
+		t.Errorf("empty data: want empty-list error, got %v", err)
+	}
+	c.BaseURL = srv.URL + "/nulldata"
+	if _, err := c.FetchModels(a); err == nil || !strings.Contains(err.Error(), "empty list") {
+		t.Errorf("null data: want empty-list error, got %v", err)
+	}
+	c.BaseURL = srv.URL + "/ok"
+	got, err := c.FetchModels(a)
+	if err != nil {
+		t.Fatalf("ok envelope: unexpected error %v", err)
+	}
+	if len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Errorf("ok envelope: want [m1 m2], got %v", got)
 	}
 }

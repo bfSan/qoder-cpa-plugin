@@ -674,6 +674,14 @@ func (c *Client) GetUserInfo(a *Auth) (uid, nickname, enterpriseID string, err e
 }
 
 // FetchModels returns the list of available models for selection.
+//
+// v0.12.53 hardening: the decoder used to accept ANY 200 response — a
+// business-error envelope ({code:1001,...} wrapped in HTTP 200, or a
+// shape drift like data:null) silently produced an EMPTY list, and
+// intlhandleModelForAuth then advertised just the auto/work virtuals with
+// no diagnostic ("模型拉取失效" with nothing in the logs). Business codes
+// and empty payloads are now errors, so the caller falls back to the
+// static catalog and logs the actual reason.
 func (c *Client) FetchModels(a *Auth) ([]string, error) {
 	req, err := http.NewRequest(http.MethodGet, c.BaseURL+EpModels, nil)
 	if err != nil {
@@ -685,24 +693,34 @@ func (c *Client) FetchModels(a *Auth) ([]string, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("models read: %w", err)
+	}
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("models upstream %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	var env struct {
-		Code int `json:"code"`
-		Data []struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    []struct {
 			Name string `json:"name"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("models parse: %w", err)
+	}
+	if env.Code != 0 {
+		return nil, fmt.Errorf("models api code %d: %s", env.Code, truncate(strings.TrimSpace(env.Message), 120))
 	}
 	out := make([]string, 0, len(env.Data))
 	for _, m := range env.Data {
 		if m.Name != "" {
 			out = append(out, m.Name)
 		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("models api returned empty list")
 	}
 	return out, nil
 }

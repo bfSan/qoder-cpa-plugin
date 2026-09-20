@@ -390,6 +390,18 @@ func intlpersistRefreshedAuth(req pluginapi.ExecutorRequest, a *upstream.Auth) {
 	fileName := req.AuthID
 	if fileName == "" {
 		fileName = fmt.Sprintf("%s-%s.json", intlproviderName, a.UID)
+	}
+	intlpersistRefreshedAuthTo(fileName, a)
+}
+
+// intlpersistRefreshedAuthTo is the fileName-resolving core of
+// intlpersistRefreshedAuth, shared with the model.for_auth path (v0.12.53):
+// dynamic model discovery also talks to the upstream with the account token,
+// so a token refreshed there must persist or discovery keeps failing while
+// chat (which refreshes in its own path) keeps working.
+func intlpersistRefreshedAuthTo(fileName string, a *upstream.Auth) {
+	if fileName == "" {
+		fileName = fmt.Sprintf("%s-%s.json", intlproviderName, a.UID)
 	} else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
 		// v0.12.8: a uid-shaped AuthID would land as an extension-less
 		// file the watcher ignores, losing the refreshed token on restart.

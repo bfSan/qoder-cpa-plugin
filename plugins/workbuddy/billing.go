@@ -193,12 +193,38 @@ func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error)
 
 // isTransientBillingErr reports whether err came from an upstream 5xx or a
 // transport failure (both retryable). 4xx and business-code errors are not.
+//
+// v0.12.64: the comment always promised transport retries but the impl only
+// matched 5xx prefixes — transport EOFs ("Post \"https://...\": EOF" from the
+// codebuddy.ai gateway closing the connection mid-request) surfaced straight
+// to the panel as hard failures. Now classified: EOF / connection reset /
+// broken pipe / client-timeout / TLS-handshake-timeout / dial failures.
+// Business errors ("parse failed: ...", "code NNNN: ...") match none of these.
 func isTransientBillingErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.HasPrefix(msg, "http 5") || strings.HasPrefix(msg, "http=5") || strings.Contains(msg, "status 5")
+	if strings.HasPrefix(msg, "http 5") || strings.HasPrefix(msg, "http=5") || strings.Contains(msg, "status 5") {
+		return true
+	}
+	transport := []string{
+		": EOF",                     // Go http client: server closed without a response
+		"connection reset",          // TCP RST mid-request
+		"broken pipe",               // write after peer closed
+		"Client.Timeout",            // http.Client Timeout exceeded
+		"context deadline exceeded", // per-request ctx budget (host bridge too)
+		"TLS handshake timeout",     // net/http handshake dial
+		"i/o timeout",               // dial/read deadline
+		"no such host",              // DNS miss (transient resolver flaps)
+		"connection refused",        // listener temporarily down
+	}
+	for _, pat := range transport {
+		if strings.Contains(msg, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, error) {

@@ -456,11 +456,27 @@ func handleTasksQuery(req pluginapi.ManagementRequest) map[string]any {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	// Scan budget (v0.12.64): same rationale as handleSchoolVouchers — the
+	// read-only 任务 scan must always return a complete JSON envelope instead
+	// of pinning the host management bridge past its timeout (the panel then
+	// parsed an empty body). Accounts starting past the deadline report as
+	// skipped; the explicit 任务 run-all keeps unbounded semantics on purpose.
+	tasksScanDeadline := time.Now().Add(45 * time.Second)
 	for _, f := range files {
 		f := f
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if !time.Now().Before(tasksScanDeadline) {
+				mu.Lock()
+				out = append(out, map[string]any{
+					"auth_index": f.AuthIndex,
+					"skipped":    true,
+					"reason":     "scan budget exceeded（扫描超时，稍后重试）",
+				})
+				mu.Unlock()
+				return
+			}
 			sa, err := hostAuthGet(f.AuthIndex)
 			if err != nil {
 				mu.Lock()

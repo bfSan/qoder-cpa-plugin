@@ -230,6 +230,7 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 	// v0.12.2 fix — the nested "auth" shape never matched the host request).
 	var req struct {
 		StorageJSON  []byte            `json:"StorageJSON"`
+		AuthID       string            `json:"AuthID"`
 		AuthProvider string            `json:"AuthProvider"`
 		Metadata     map[string]any    `json:"Metadata"`
 		Attributes   map[string]string `json:"Attributes"`
@@ -241,6 +242,19 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 	if err != nil {
 		log.Printf("intl model.for_auth: parse storage failed (%v) — static fallback", err)
 		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: intlstaticModels()})
+	}
+	// v0.12.53: refresh before discovery. The executor path refreshes within
+	// 24h of expiry, but model discovery ran on the raw stored token — an
+	// account left idle past token expiry kept 401-ing discovery forever
+	// (static fallback every time = "国际模型拉取失效") even though a chat
+	// request would have healed the token. Refresh + persist here so
+	// discovery self-heals without needing a chat first.
+	if refreshed, rerr := intlupstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour); rerr != nil {
+		// Non-fatal: the stored token may still be valid (e.g. refresh
+		// endpoint flapping) — try discovery with what we have.
+		log.Printf("model.for_auth %s: refresh failed (continuing with stored token): %v", a.UID, rerr)
+	} else if refreshed {
+		intlpersistRefreshedAuthTo(req.AuthID, a)
 	}
 	dynamic, err := intlupstreamClient.FetchModels(a)
 	if err != nil {

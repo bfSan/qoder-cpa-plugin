@@ -246,3 +246,31 @@ func TestModelsFromDiscoveryModalityFlags(t *testing.T) {
 		t.Fatalf("no upstream flag must stay un-declared, got %v", m.SupportedInputModalities)
 	}
 }
+
+// v0.12.64: codebuddy.ai (Intl) discovery returns opaque product-tier
+// aliases (fast-model / auto-chat / balanced-model / default-model). They
+// are the real routable ids, but the display name must say so — the user
+// cannot tell a tier alias from a model family, and the limited-free
+// "deepseek flash" (2026-09) hides behind one of them. Real ids and rows
+// that already carry a richer upstream display name stay untouched.
+func TestDiscoverToInfoIntlAliasAnnotation(t *testing.T) {
+	for id, want := range map[string]string{
+		"fast-model":     "Fast Model（上游别名）",
+		"auto-chat":      "Auto Chat（上游别名）",
+		"balanced-model": "Balanced Model（上游别名）",
+		"default-model":  "Default Model（上游别名）",
+	} {
+		if got := discoverToInfo(discoveredModel{ID: id}).Name; got != want {
+			t.Errorf("discoverToInfo(%q).Name = %q, want %q", id, got, want)
+		}
+	}
+	if got := discoverToInfo(discoveredModel{ID: "o4-mini"}).Name; got != "o4-mini" {
+		t.Errorf("real id o4-mini must stay untouched, got %q", got)
+	}
+	if got := discoverToInfo(discoveredModel{ID: "fast-model", Name: "Fast (limited)"}).Name; got != "Fast (limited)" {
+		t.Errorf("richer upstream display name must win, got %q", got)
+	}
+	if got := discoverToInfo(discoveredModel{ID: "FAST-MODEL"}).Name; got != "Fast Model（上游别名）" {
+		t.Errorf("alias match must be case-insensitive, got %q", got)
+	}
+}

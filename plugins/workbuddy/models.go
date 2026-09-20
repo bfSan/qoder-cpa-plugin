@@ -868,6 +868,22 @@ func modelsFromDiscovery(dataModels []discoveredModel, cliModelIDs []string) []p
 // v0.9.12: also surface the token budgets (both endpoint generations'
 // field names) and the reasoning effort controls into Thinking.Levels/
 // ZeroAllowed.
+// intlAliasDisplayNames maps the opaque tier aliases codebuddy.ai (Intl)
+// returns from its discovery endpoints onto friendlier display names.
+// The alias IS the routable upstream id — chat requests send it verbatim —
+// but it is a product-tier label, not a model-family name, and upstream does
+// not publish which real model backs each tier (the limited-free "deepseek
+// flash" of 2026-09, if exposed on Intl, hides behind one of these).
+// Field report 2026-09-20: fast-model / auto-chat / balanced-model /
+// default-model all surface as bare ids; o4-mini is a genuine model id and
+// stays untouched.
+var intlAliasDisplayNames = map[string]string{
+	"fast-model":     "Fast Model（上游别名）",
+	"auto-chat":      "Auto Chat（上游别名）",
+	"balanced-model": "Balanced Model（上游别名）",
+	"default-model":  "Default Model（上游别名）",
+}
+
 func discoverToInfo(m discoveredModel) pluginapi.ModelInfo {
 	info := pluginapi.ModelInfo{
 		ID:                         m.ID,
@@ -881,6 +897,11 @@ func discoverToInfo(m discoveredModel) pluginapi.ModelInfo {
 	}
 	if info.Name == "" {
 		info.Name = info.ID
+	}
+	// Annotate known Intl tier aliases only when upstream gave no richer
+	// display name (Name==ID means the discovery row carried the bare id).
+	if d, ok := intlAliasDisplayNames[strings.ToLower(info.ID)]; ok && (info.Name == "" || info.Name == info.ID) {
+		info.Name = d
 	}
 	if m.SupportsImages && !m.DisabledMultimodal {
 		info.SupportedInputModalities = []string{"text", "image"}

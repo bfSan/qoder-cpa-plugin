@@ -88,3 +88,39 @@ func TestIsTransientBillingErr(t *testing.T) {
 		}
 	}
 }
+
+// TestIsTransientBillingErr_TransportClassified — v0.12.64: connection-level
+// failures must be retryable (the doc comment always said so; the impl only
+// matched 5xx). Field trigger: repeated
+// `Post "https://www.codebuddy.ai/v2/billing/meter/get-user-resource": EOF`
+// from the codebuddy.ai gateway closing connections mid-request surfaced as
+// hard credits failures with zero retries. Business/parse failures (incl.
+// "unexpected EOF" inside a parse-failed wrapper — that one means the server
+// DID answer, with garbage) stay terminal.
+func TestIsTransientBillingErr_TransportClassified(t *testing.T) {
+	retryable := []string{
+		`Post "https://www.codebuddy.ai/v2/billing/meter/get-user-resource": EOF`,
+		`Post "https://x": read tcp 1.2.3.4:5->5.6.7.8:443: connection reset by peer`,
+		`Post "https://x": write tcp 1.2.3.4:5->5.6.7.8:443: write: broken pipe`,
+		`Get "https://x": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+		`Post "https://x": net/http: TLS handshake timeout`,
+		`Post "https://x": dial tcp: lookup www.codebuddy.cn: no such host`,
+		`Post "https://x": dial tcp 1.2.3.4:443: connect: connection refused`,
+	}
+	for _, msg := range retryable {
+		if !isTransientBillingErr(errors.New(msg)) {
+			t.Errorf("isTransientBillingErr(%q) = false, want true", msg)
+		}
+	}
+	terminal := []string{
+		"parse failed: unexpected EOF",
+		"parse failed: invalid character '<' looking for beginning of value",
+		"code=10000 msg=API request failed",
+		"http 401 from /v2/billing/meter/daily-checkin: unauthorized",
+	}
+	for _, msg := range terminal {
+		if isTransientBillingErr(errors.New(msg)) {
+			t.Errorf("isTransientBillingErr(%q) = true, want false", msg)
+		}
+	}
+}

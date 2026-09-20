@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.9.19
+
+### transport-error billing retries + bounded scans + readable bridge errors (repo v0.12.64)
+
+User report (2026-09-20): the 开学季/券码 dialog failed with the cryptic
+"JSON.parse: unexpected end of data at line 1 column 1 of the JSON data",
+and credits queries against the Intl gateway surfaced repeated
+`Post "https://www.codebuddy.ai/v2/billing/meter/get-user-resource": EOF`
+as hard failures.
+
+Root cause one (billing): isTransientBillingErr's doc comment always
+promised transport retries, but the implementation only matched 5xx
+prefixes — a gateway that closes the connection mid-request (Go's
+`Post "...": EOF`) never got a second attempt. Connection-level failures
+(EOF / connection reset / broken pipe / client timeout / TLS handshake
+timeout / dial failures) are now classified transient and retried through
+the existing billingRetryDelays loop; parse-failed and business-code
+errors stay terminal (the pre-existing test boundary
+"parse failed: unexpected EOF" is preserved — that shape means the server
+DID answer, with garbage).
+
+Root cause two (management scans): handleSchoolVouchers (券码) and
+handleTasksQuery (任务) are per-account fan-outs with no deadline — three
+sequential upstream calls per CN account at up to 120s each on the shared
+client. On a flaky gateway the handler outran the host management bridge,
+which returned an EMPTY body; the panel then threw the cryptic
+JSON.parse error instead of anything actionable. Both scans now carry a
+45s budget: accounts starting past the deadline are reported as
+`skipped: "scan budget exceeded（扫描超时，稍后重试）"` and the envelope
+always completes; individual school calls are additionally capped at 20s
+via request context (honored on the direct-client path). The explicit
+任务 run-all intentionally keeps unbounded semantics — it genuinely runs
+the whole growth loop.
+
+Root cause three (panel): api() decoded responses with a bare r.json().
+It now reads text first and converts non-JSON/empty bodies into a
+readable error carrying the HTTP status and a snippet
+("管理桥接响应异常（HTTP xxx）… 响应体为空（上游扫描超时或桥接中断）").
+
+Intl model aliases (field report: only fast-model / auto-chat /
+balanced-model / default-model visible, the limited-free "deepseek
+flash" nowhere to be found): codebuddy.ai's discovery endpoints return
+product-TIER aliases, and the alias itself is the routable upstream id —
+chat requests send it verbatim and it works. Upstream does not publish
+which real model backs each tier, so no id can be invented client-side.
+The four known aliases now carry display names annotating them as
+upstream aliases (Fast Model（上游别名） etc.) via discoverToInfo; real
+ids (o4-mini) and rows with richer upstream display names are untouched.
+
 ## 0.9.18
 
 ### neutralPrompt scope fix + 2026-09 growth contract (repo v0.12.63)

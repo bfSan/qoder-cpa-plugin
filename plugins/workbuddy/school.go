@@ -25,17 +25,33 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 const schoolBase = "/portal/activity/school"
+
+// schoolCallTimeout bounds ONE school upstream call. The shared HTTP client
+// allows 120s; three sequential school calls per account (tasks/config/
+// vouchers) on a flaky gateway used to pin the whole 券码 handler long enough
+// for the host management bridge to give up mid-response — the panel then
+// parsed an EMPTY body and surfaced the cryptic "JSON.parse: unexpected end
+// of data" instead of a real error. 20s per call keeps the scan responsive.
+const schoolCallTimeout = 20 * time.Second
+
+// schoolScanBudget bounds the ENTIRE handleSchoolVouchers scan: accounts that
+// have not started by the deadline are reported as skipped instead of queued,
+// so the handler always returns a complete JSON envelope well under the host
+// management bridge timeout.
+const schoolScanBudget = 45 * time.Second
 
 // schoolCall is the school-season request: billing domain + activity prefix.
 // method mirrors the caller (GET for reads, POST for actions); body == nil
@@ -52,7 +68,9 @@ func schoolCall(sa *storedAuth, method, path string, body any) (json.RawMessage,
 	} else {
 		reader = strings.NewReader("")
 	}
-	req, err := http.NewRequest(method, billingBaseFor(sa)+schoolBase+path, reader)
+	ctx, cancel := context.WithTimeout(context.Background(), schoolCallTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, billingBaseFor(sa)+schoolBase+path, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -313,11 +331,27 @@ func handleSchoolVouchers(req pluginapi.ManagementRequest) map[string]any {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	deadline := time.Now().Add(schoolScanBudget)
 	for _, f := range files {
 		f := f
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Scan budget (v0.12.64): accounts that start after the
+			// deadline are reported skipped instead of queued — an
+			// unbounded scan on a slow gateway pinned the handler past
+			// the host bridge timeout and the panel parsed an empty
+			// body ("JSON.parse: unexpected end of data").
+			if !time.Now().Before(deadline) {
+				mu.Lock()
+				out = append(out, map[string]any{
+					"auth_index": f.AuthIndex,
+					"skipped":    true,
+					"reason":     "scan budget exceeded（扫描超时，稍后重试）",
+				})
+				mu.Unlock()
+				return
+			}
 			sa, err := hostAuthGet(f.AuthIndex)
 			if err != nil {
 				mu.Lock()
