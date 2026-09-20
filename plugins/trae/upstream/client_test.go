@@ -373,7 +373,7 @@ func TestCheckinAuthSchemeAlignment(t *testing.T) {
 	// FINDINGS §五；v0.12.34 我方 status 实测 code=0），Bearer 回退
 	// （cockpit-tools rs:2761,2859 的 token 类别）。pay/usage 恒为 Cloud-IDE-JWT。
 	a := &auth.Auth{AccessToken: "tok", DeviceID: "dev-1"}
-	req, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/x", "{}", UgSchemeCloudIDEJWT)
+	req, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/x", "{}", UgSchemeCloudIDEJWT, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestCheckinAuthSchemeAlignment(t *testing.T) {
 	if got := req.Header.Get("x-device-id"); got != "dev-1" {
 		t.Errorf("checkin x-device-id=%q, want dev-1", got)
 	}
-	reqB, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/x", "", UgSchemeBearer)
+	reqB, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/x", "", UgSchemeBearer, "")
 	if err != nil {
 		t.Fatal(err)
 	}

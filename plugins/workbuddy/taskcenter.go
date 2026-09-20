@@ -212,6 +212,7 @@ func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 			}
 			codes := growthAcceptCandidates(tasks)
 			accepted, failed := 0, 0
+			blocked := map[string][]string{} // 前置任务 code → 受影响任务名（按原因归并）
 			for start := 0; start < len(codes) && !dead; start += growthAcceptBatchSize {
 				end := start + growthAcceptBatchSize
 				if end > len(codes) {
@@ -227,16 +228,36 @@ func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 				}
 				for _, r := range results {
 					if r.Status == "error" {
-						failed++
+						// v0.12.65 三分法（对齐 Coding2API growth_runner 2026-09-20）：
+						// ①上游明示无需接单 = 正常应答，静默跳过（下一步照常尝试领奖）；
+						// ②前置未满足 = 账号状态常态，按原因归并成一条汇总（十几条逐行报
+						// 会掩盖「其实只需做一件事」）；③其余才是真失败，逐条报出。
+						if growthAcceptNeedsNoAccept(r.Message) {
+							continue
+						}
 						name := titles[r.TaskCode]
 						if name == "" {
 							name = r.TaskCode
 						}
+						if code, isPrereq := growthPrerequisiteOf(r.Message); isPrereq {
+							blocked[code] = append(blocked[code], name)
+							continue
+						}
+						failed++
 						add("接单失败「%s」: %s", name, r.Message)
 						continue
 					}
 					accepted++
 				}
+			}
+			// 前置受阻汇总：逐原因一条（排序保证输出稳定），不计入失败数。
+			prereqCodes := make([]string, 0, len(blocked))
+			for code := range blocked {
+				prereqCodes = append(prereqCodes, code)
+			}
+			sort.Strings(prereqCodes)
+			for _, code := range prereqCodes {
+				add("%d 个任务需先完成前置「%s」（官方客户端操作后自动解除）", len(blocked[code]), growthPrerequisiteLabel(code))
 			}
 			if accepted > 0 || failed > 0 {
 				add("接受任务 %d 个（失败 %d）", accepted, failed)

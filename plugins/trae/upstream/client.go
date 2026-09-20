@@ -4,10 +4,12 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -567,8 +569,43 @@ func ugCheckinSchemes() []string {
 	return []string{UgSchemeCloudIDEJWT, UgSchemeBearer}
 }
 
+// checkinDeviceDigits 签到设备号十进制位数。
+// 证据矩阵（Coding2API credential.py 2026-09-20 定稿观测，此前被推翻两次）：
+// 同一账号 claim 结果——登录 deviceId(hex32) ✗、派生定值 16 位数字 ✗×4、
+// 随机 16 位数字 ✓、登录 machineId(hex32) ✗、空串 → 9004 参数错误。
+// 数字串是必要条件而非充分条件（9074 与具体取值关系未定），故不猜格式，
+// 改为"每次生成全新随机数字串 + 失败当日退避重试"。
+const checkinDeviceDigits = 16
+
+// NewCheckinDeviceID 生成一个全新的签到设备 ID：16 位随机数字串（crypto/rand）。
+// 每次调用都不同——设备号复用是 9074 的可疑诱因（"同 uid 永远同样的号"用久后
+// 连续失败，换没用过的号当次即成功）。不持久化：设备号只是签到 API 的校验参数，
+// 上游按 uid 记账，换号不影响发放；X-Machine-Id 仍保持登录配对（非签到校验项）。
+// 注意幂等陷阱：账号当日签到成功后，任何 device_id 的 claim 都返回 code:0——
+// "成功"判定必须配合 status.checked_in 回查（调用方责任，见 scheduler/management）。
+func NewCheckinDeviceID() string {
+	max := new(big.Int).Exp(big.NewInt(10), big.NewInt(checkinDeviceDigits), nil)
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		// crypto/rand 失败极罕见；退化时间戳填充，仍保证 16 位数字形状。
+		return fmt.Sprintf("%0*d", checkinDeviceDigits, time.Now().UnixMilli())
+	}
+	return fmt.Sprintf("%0*d", checkinDeviceDigits, n.Int64())
+}
+
+// checkinDeviceArg variadic 归一：显式传入取首值（同一轮 attempt 的
+// status→claim→回查配对同一设备号，两者是配对的校验参数），否则现生成。
+func checkinDeviceArg(deviceID []string) string {
+	if len(deviceID) > 0 && deviceID[0] != "" {
+		return deviceID[0]
+	}
+	return NewCheckinDeviceID()
+}
+
 // ugCheckinRequest 构造签到请求（抓包指纹公共头 + 指定方案的 Authorization）。
-func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Request, error) {
+// v0.12.65: deviceID 非空时覆盖 ugBaseHeaders 的 X-Device-Id（登录 hex32
+// 直传）——签到族请求专用，其余 ug 端点（积分查询等）不受影响。
+func ugCheckinRequest(a *auth.Auth, method, url, body, scheme, deviceID string) (*http.Request, error) {
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
@@ -578,6 +615,9 @@ func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Req
 		return nil, err
 	}
 	ugBaseHeaders(req, a)
+	if deviceID != "" {
+		req.Header.Set("X-Device-Id", deviceID)
+	}
 	if scheme == UgSchemeBearer {
 		req.Header.Set("Authorization", "Bearer "+a.JWT()) // 读锁快照
 	} else {
@@ -588,8 +628,8 @@ func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Req
 
 // ugCheckinOnce 执行一次签到类请求，返回业务码/消息与原始 body。
 // 网络层错误（doJSON）与解析错误原样上抛，不做方案回退。
-func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (int32, string, []byte, error) {
-	req, err := ugCheckinRequest(a, method, url, body, scheme)
+func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme, deviceID string) (int32, string, []byte, error) {
+	req, err := ugCheckinRequest(a, method, url, body, scheme, deviceID)
 	if err != nil {
 		return 0, "", nil, err
 	}
@@ -607,13 +647,14 @@ func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (
 	return reply.Code, reply.Message, data, nil
 }
 
-func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
+func (c *Client) CheckinStatus(a *auth.Auth, deviceID ...string) (*CheckinStatusResult, error) {
+	did := checkinDeviceArg(deviceID)
 	bodies := ugCheckinReqSourcesFor(a.Variant)
 	attempted := make([]string, 0, len(bodies)*2) // v0.12.45: 实际尝试的 body×scheme
 	var lastBiz *Error
 	for _, body := range bodies {
 		for _, scheme := range ugCheckinSchemes() {
-			code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinStatus, body, scheme)
+			code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinStatus, body, scheme, did)
 			if err != nil {
 				return nil, err
 			}
@@ -655,6 +696,11 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 // 类别不同，Bearer 经验不可平移（详见 CheckinStatus 上方证据链）。
 // v0.12.38: 鉴权随 CheckinStatus 统一走双方案探测（Cloud-IDE-JWT 优先，
 // Bearer 回退）；v0.12.41 起 9074 触发 req_source 换源重试（同源不换方案）。
+// v0.12.65: x-device-id 改为每轮全新 16 位随机数字串（不再直传登录 hex32）；
+// 证据矩阵见 NewCheckinDeviceID。claim code:0 不再被调用方直接采信为成功：
+// 当日已签账号任何 device_id 的 claim 都幂等回 code:0（幂等假成功陷阱——
+// v0.12.41 "req_source=1 实测可用"的旧结论可能正踩于此），成功判定必须由
+// 调用方回查 status.checked_in 翻转。
 type CheckinClaimResult struct {
 	Code    int32  `json:"code"`
 	Message string `json:"message"`
@@ -666,13 +712,14 @@ type CheckinClaimResult struct {
 	ReqSourceUsed string `json:"-"`
 }
 
-func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
+func (c *Client) CheckinClaim(a *auth.Auth, deviceID ...string) (*CheckinClaimResult, error) {
+	did := checkinDeviceArg(deviceID)
 	bodies := ugCheckinReqSourcesFor(a.Variant)
 	attempted := make([]string, 0, len(bodies)*2) // v0.12.45: 实际尝试的 body×scheme
 	var lastBiz *Error
 	for _, body := range bodies {
 		for _, scheme := range ugCheckinSchemes() {
-			code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, body, scheme)
+			code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, body, scheme, did)
 			if err != nil {
 				return nil, err
 			}

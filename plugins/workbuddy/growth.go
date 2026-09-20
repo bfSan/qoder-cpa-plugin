@@ -813,3 +813,38 @@ func growthUseMakeupCard(sa *storedAuth, date string) error {
 		map[string]any{"target_date": date})
 	return err
 }
+
+// growthPrereqMarker tasks/accept 逐条结果里前置未满足的固定前缀
+// （Coding2API growth_runner 2026-09-20 对齐）。
+const growthPrereqMarker = "prerequisite not met:"
+
+// growthPrerequisiteOf 从接单失败消息提取前置任务 code；非前置类返回 ("", false)。
+// 消息形如 "prerequisite not met: first_buddy"。前置缺失是账号状态常态
+// （新账号全部任务被 first_buddy 门住），不是逐条报的故障。
+func growthPrerequisiteOf(msg string) (string, bool) {
+	lower := strings.ToLower(msg)
+	i := strings.Index(lower, growthPrereqMarker)
+	if i < 0 {
+		return "", false
+	}
+	rest := strings.TrimSpace(msg[i+len(growthPrereqMarker):])
+	if rest == "" {
+		return "", true
+	}
+	return strings.Trim(strings.Fields(rest)[0], ".,;"), true
+}
+
+// growthPrerequisiteLabel 前置任务可读标签：接口只回 task_code，这里补一句
+// 用户该做什么（未知 code 回落 code 本身）。
+func growthPrerequisiteLabel(code string) string {
+	if code == "first_buddy" {
+		return "领取一只 Buddy（在官方客户端新建任务并发起对话）"
+	}
+	return code
+}
+
+// growthAcceptNeedsNoAccept 上游明示该任务无需接单——正常应答而非失败
+// （此前当失败报，误导用户以为出了问题；对齐上游 growth_runner 2026-09-20）。
+func growthAcceptNeedsNoAccept(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "does not require acceptance")
+}

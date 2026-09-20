@@ -640,7 +640,10 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         }
                 }
                 entry["expires_at"] = a.ExpiresAt
-                status, err := upstreamClient.CheckinStatus(a)
+                // v0.12.65: 本轮 attempt 生成全新签到设备号，贯穿 status→claim→回查
+                // （随机 16 位数字串实测可领，登录 hex32 必败 9074——见 upstream.NewCheckinDeviceID）。
+                did := upstream.NewCheckinDeviceID()
+                status, err := upstreamClient.CheckinStatus(a, did)
                 if err != nil {
                         entry["error"] = "checkin_status: " + err.Error()
                         notifyCheckinRateLimited(err)
@@ -655,7 +658,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 beforeCredits := status.Credits
                 awarded := int64(-1)
                 if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
-                        claim, err := upstreamClient.CheckinClaim(a)
+                        claim, err := upstreamClient.CheckinClaim(a, did)
                         if err != nil {
                                 entry["error"] = "checkin_claim: " + err.Error()
                                 // v0.12.33: 手动签到撞 9074 也纳入当日退避重试（与调度器同节奏）。
@@ -671,8 +674,13 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                                         awarded = beforeCredits + status.ExtraCredits
                                 }
                                 // 领取成功后重查状态（对齐官方 workbench claim 后 refresh）。
-                                if after, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
+                                if after, stErr := upstreamClient.CheckinStatus(a, did); stErr == nil {
                                         status = after
+                                        // v0.12.65: code:0 存在幂等假成功（当日已签账号任何 device_id 都回 code:0），
+                                        // checked_in 未翻转 -> 标记未确认，面板如实展示，不伪装成功。
+                                        if !after.CheckedIn && !after.DidCheckedIn {
+                                                entry["claim_unconfirmed"] = true
+                                        }
                                 }
                         }
                 }

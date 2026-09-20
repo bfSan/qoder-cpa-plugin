@@ -97,7 +97,7 @@ func TestUgCheckinRequestCarriesCapturedIdentity(t *testing.T) {
 	// 且 Bearer 回退方案也共享同一身份（仅 Authorization 不同）。
 	a := &auth.Auth{AccessToken: "tok", DeviceID: "1711320556112436", Variant: "solo"}
 	for _, scheme := range ugCheckinSchemes() {
-		req, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim", `{}`, scheme)
+		req, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim", `{}`, scheme, "")
 		if err != nil {
 			t.Fatal(err)
 		}

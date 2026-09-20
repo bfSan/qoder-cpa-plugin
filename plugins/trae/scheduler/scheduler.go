@@ -32,6 +32,10 @@ type Config struct {
 //   - v0.12.33 起当日内指数退避自动重试；v0.12.39 起改为前密后疏——
 //     1m→2m→4m→8m→16m→32m→64m→2h（封顶），当日最多 maxCheckinRetries 次；
 //   - 出现一轮无 9074 或跨天即复位。
+// v0.12.65: 签到设备号对齐 Coding2API 定稿观测——x-device-id 必须是每次
+// 全新生成的 16 位随机数字串（登录 hex32/machineId 实测必败 9074；复用同号
+// 可疑诱发）；claim code:0 存在幂等假成功（当日已签账号任何 device_id 都回
+// code:0），回查 checked_in 未翻转视同失败，纳入当日退避换号重试。
 const (
         baseCheckinRetry     = 1 * time.Minute
         maxCheckinRetryDelay = 2 * time.Hour
@@ -142,7 +146,10 @@ func (s *Scheduler) RunCheckinNow() {
                 // *upstream.Error（9074 限流 → BizCode=9074，其余 → 会话失效），
                 // 与上游 trae_account_token_injection.rs 的 code!=0 报错语义一致；
                 // 未签到状态不再被静默吞掉。
-                status, err := s.cfg.Upstream.CheckinStatus(a)
+                // v0.12.65: 本轮 attempt 生成一个全新签到设备号，贯穿 status→claim→回查
+                // （随机 16 位数字串实测可领、登录 hex32 必败 9074，见 upstream.NewCheckinDeviceID）。
+                did := upstream.NewCheckinDeviceID()
+                status, err := s.cfg.Upstream.CheckinStatus(a, did)
                 if err != nil {
                         if isBizRateLimit(err) {
                                 rateLimited++
@@ -152,13 +159,13 @@ func (s *Scheduler) RunCheckinNow() {
                         }
                         status = nil
                 } else if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
-                        // v0.12.32/43: 官方 claim 需要 x-device-id 携带真实绑定 did；缺失时
-                        // 服务端可能 code=0 但静默不入账（FINDINGS §四/§五）。v0.12.43 起
-                        // 硬性跳过 claim（状态/积分查询照常），不再告警后硬签；修复路径：
-                        // 插件 OAuth 重新登录补齐设备身份。
-                        if a.DeviceID == "" {
-                                log.Printf("checkin %s: SKIP claim — auth has no deviceId (official claim requires x-device-id; re-login via plugin OAuth to bind one)", st.UID)
-                        } else if claim, err := s.cfg.Upstream.CheckinClaim(a); err != nil {
+                        // v0.12.32: 官方 claim 需要 x-device-id；缺失时服务端可能
+                        // code=0 但静默不入账（FINDINGS §四/§五）。v0.12.43 曾对无
+                        // deviceId 账号硬性跳过 claim；v0.12.65 起设备号改为每轮全新
+                        // 生成的 16 位随机数字串（不再依赖登录身份，跳过分支移除），
+                        // claim 恒可发起，成功与否由下方回查确认（幂等假成功陷阱见
+                        // upstream.NewCheckinDeviceID 证据矩阵）。
+                        if claim, err := s.cfg.Upstream.CheckinClaim(a, did); err != nil {
                                 if isBizRateLimit(err) {
                                         rateLimited++
                                         log.Printf("checkin %s: claim rate-limited (9074), will auto-retry today", st.UID)
@@ -174,11 +181,17 @@ func (s *Scheduler) RunCheckinNow() {
                                 if claim.ClaimCredits != nil {
                                         awarded = *claim.ClaimCredits
                                 }
-                                if after, stErr := s.cfg.Upstream.CheckinStatus(a); stErr == nil {
+                                after, stErr := s.cfg.Upstream.CheckinStatus(a, did)
+                                switch {
+                                case stErr != nil:
+                                        log.Printf("checkin %s: claimed +%d, recheck failed: %v — will retry today", st.UID, awarded, stErr)
+                                        rateLimited++
+                                case after.CheckedIn || after.DidCheckedIn:
                                         log.Printf("checkin %s: ok +%d (reward was %d+%d)", st.UID, awarded, status.Credits, status.ExtraCredits)
                                         status = after
-                                } else {
-                                        log.Printf("checkin %s: claimed +%d, status refresh failed: %v", st.UID, awarded, stErr)
+                                default:
+                                        log.Printf("checkin %s: claim code=0 but recheck did not confirm check-in (credits %d -> %d) — will retry today", st.UID, status.Credits, after.Credits)
+                                        rateLimited++
                                 }
                         }
                 } else if status.CheckedIn || status.DidCheckedIn {
