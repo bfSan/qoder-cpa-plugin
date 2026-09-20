@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.9.23
+
+### auto-light the growth task center (desktop/web/mp fingerprint event chains) + adopt-before-accept ordering (repo v0.12.68)
+
+User follow-up (2026-09-20): "没办法自动做吗" — can the first_buddy gate and
+the gated tasks be done automatically instead of sending the user to the
+official client?
+
+Answer: yes. Upstream scores growth tasks from behavior events on ONE
+endpoint (POST /v2/report) distinguished by client fingerprint, not by
+real client activity — a conclusion wb2api (workbuddy2api-panel) proved
+with multi-account experiments on 2026-09-12 and this release ports:
+
+- task_events.go (new): the fingerprint protocol layer —
+  * desktop channel: copilot.tencent.com/v2/report + WorkBuddy/5.5.6 UA +
+    per-event WorkBuddy/workbuddy-desktop fingerprint family (ideName/
+    ideVersion/machineId/sessionId/extName, machineId deterministically
+    derived per uid), business fields override the fingerprint;
+  * web channel: www.workbuddy.cn/v2/report + x-client-platform: web with
+    browser-shaped events (Library_read's library_doc_intro_click);
+  * mp channel: billing domain + X-Client-Platform: mp-weixin header family
+    + workbuddy-mp event fingerprint; growth-domain calls for mp-only tasks
+    (school_season, Sequential_Tasks_1) carry X-Client-Platform:
+    miniprogram — without it accept returns task not found;
+  * event chains: the 6-event desktop chat sequence (RichMeow_Chat),
+    buddyapp 5-event chain (Buddy_App + Buddy_App_QQ in one pass),
+    automation single event, template ×5 group, playbook prompt group,
+    design-canvas group, appearance/set API + skin-apply event.
+
+- task_auto.go (new): the auto-light orchestration mounted as step 4.5 of
+  the daily loop. 13 tasks are automatable end-to-end this release
+  (chat_5 top-up by delta, first_buddy adoption, RichMeow_Chat, Buddy_App,
+  Buddy_App_QQ, automation_1, Library_read, template_5, playbook_prompt,
+  create_canvas, Hp_Appearance, school_season, Sequential_Tasks_1); every
+  action is idempotent (claimed/scored tasks skipped), scores are read
+  back with a bounded poll (upstream scores asynchronously — a single
+  immediate read misjudges), and a claimable read-back auto-claims on the
+  matching domain (mp tasks fall back chat → web on 400, the 200+OK-but-
+  not-recorded accept shape is retried once with a read-back check).
+  Remaining real-conversation tasks (Model_chat_GLM5.2, skill_1, expert
+  family, black_cat) need a server-side requestId from a live chat and
+  are planned on top of the chat channel — out of this release.
+
+- taskcenter.go ordering fix: buddy adoption moved from the travel step
+  (after accept) to step 1.5 (right after the activity report, BEFORE
+  accept). On fresh accounts adoption completes first_buddy — the shared
+  prerequisite of every other task — so acceptance can now enroll on the
+  FIRST run instead of losing a full run; the travel step reports
+  "尚未领养 Buddy" instead of re-attempting adoption.
+
+- Tests: desktop chain shape + fingerprint injection precedence + header
+  families per channel + mp activityId switch + mp-claim web fallback;
+  auto-light table sanity, claimed-skip, delta top-up with deterministic
+  async-score flip and auto-claim, silent skip for accounts without the
+  tasks; and a daily-loop ordering regression that pins adoption strictly
+  before acceptance.
+
+Note: the "在官方客户端新建任务并发起对话" hint is no longer the intended
+path for first_buddy — the loop reports and adopts by API. The label in
+growthPrerequisiteLabel stays as the fallback explanation only for the
+window where adoption itself was rejected (gate not yet lifted).
+
+
 ## 0.9.22
 
 ### management route table restored + run-all toast surfaces blockers (repo v0.12.67)

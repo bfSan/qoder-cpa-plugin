@@ -175,6 +175,14 @@ func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 		add("活跃上报 ok（点亮连登/解锁领养）")
 	}
 
+	// 1.5 Buddy adoption BEFORE accept (v0.9.23): fresh accounts have every
+	// task gated by first_buddy; report + adopt in the same run lifts the
+	// gate so the accept below can enroll on the FIRST run. Previously the
+	// adopt ran inside the travel step (after accept) — one full run lost.
+	if !dead {
+		tasksEnsureBuddy(sa, add)
+	}
+
 	// 2. Makeup card: only when yesterday is empty and cards exist.
 	if !dead {
 		if missed, err := growthYesterdayMissed(sa); err == nil && missed {
@@ -270,6 +278,14 @@ func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 		} else if !abortDead(err) {
 			add("任务列表拉取失败: %s", err)
 		}
+	}
+
+	// 4.5 Auto-light automatable tasks (v0.9.23): desktop/web/mp fingerprint
+	// event chains light up progress upstream (accept only enrolls), then
+	// bounded read-back + auto-claim. wb2api autotask parity — before this
+	// those tasks never progressed (一键任务完全没能做任务主因).
+	if !dead {
+		tasksAutoLightOnce(sa, add)
 	}
 
 	// 5. Buddy travel state machine (single pass, no waiting/polling).
@@ -399,6 +415,33 @@ func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 	return res
 }
 
+// tasksEnsureBuddy ensures the account has adopted its Buddy: the report in
+// step 1 already unlocked the first_buddy adoption gate; agreement is
+// idempotent; a 400 on first is the (expected) not-yet-eligible answer.
+// Returns true when the account has (or just got) a Buddy. Running BEFORE
+// accept is the point: adoption completes first_buddy — the shared
+// prerequisite of every other task on fresh accounts.
+func tasksEnsureBuddy(sa *storedAuth, add func(string, ...any)) bool {
+	buddy, err := growthBuddyInfo(sa)
+	if err != nil {
+		add("猫档案查询失败: %s", err)
+		return false
+	}
+	if buddy != nil {
+		return true
+	}
+	if err := growthBuddyAgreement(sa); err != nil {
+		add("同意猫协议失败: %s", err)
+		return false
+	}
+	if err := growthBuddyFirst(sa); err != nil {
+		add("领养未过门槛（下轮重试）: %s", err)
+		return false
+	}
+	add("领养 ok（+300 分）")
+	return true
+}
+
 // tasksTravelOnce advances the travel state machine exactly one step.
 func tasksTravelOnce(sa *storedAuth, add func(string, ...any)) {
 	buddy, err := growthBuddyInfo(sa)
@@ -406,18 +449,10 @@ func tasksTravelOnce(sa *storedAuth, add func(string, ...any)) {
 	case err != nil:
 		add("猫档案查询失败: %s", err)
 	case buddy == nil:
-		// Adoption needs the day's report first (first_buddy gate). The loop
-		// already reported in step 1; agreement is idempotent; a 400 here is
-		// the (expected) not-yet-eligible answer — report it and move on.
-		if err := growthBuddyAgreement(sa); err != nil {
-			add("同意猫协议失败: %s", err)
-			return
-		}
-		if err := growthBuddyFirst(sa); err != nil {
-			add("领养未过门槛（明日重试）: %s", err)
-			return
-		}
-		add("领养 ok（+300 分）")
+		// Adoption moved to tasksEnsureBuddy (step 1.5, BEFORE accept —
+		// fresh-account gate must lift before enrollment). Reaching here
+		// means adoption failed earlier this run; report and move on.
+		add("旅行跳过: 尚未领养 Buddy")
 	default:
 		st, err := growthTravelStatus(sa)
 		if err != nil {
