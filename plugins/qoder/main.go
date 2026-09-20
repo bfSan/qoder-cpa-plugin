@@ -60,6 +60,7 @@ import "C"
 import (
         "context"
         "encoding/json"
+        "errors"
         "fmt"
         "io"
         "net/http"
@@ -182,7 +183,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
         }
         raw, errHandle := handleMethod(C.GoString(method), requestBytes)
         if errHandle != nil {
-                writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+                writeResponse(response, errorEnvelopeFor(errHandle))
                 return 1
         }
         writeResponse(response, raw)
@@ -307,8 +308,15 @@ type envelope struct {
 }
 
 type envelopeError struct {
-        Code    string `json:"code"`
-        Message string `json:"message"`
+        Code string `json:"code"`
+        // HTTPStatus mirrors pluginabi.Error.HTTPStatus: the host's
+        // decodeEnvelopeResult feeds it into rpcError.StatusCode(),
+        // which resultErrorFromError -> MarkResult uses for per-status
+        // cooldown policy (402->30m, 429->quota backoff, 401->30m).
+        // Without it plugin failures get only the 1-minute transient
+        // cooldown — "failed credential keeps being picked".
+        Message    string `json:"message"`
+        HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type identifierResponse struct {
@@ -340,7 +348,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.12"
+var version = "0.8.13"
 
 func wbRegistration() registration {
         return registration{
@@ -749,7 +757,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
                 payload, _ := io.ReadAll(reader)
                 publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
                 reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-                return nil, chatUpstreamError(statusCode, string(payload))
+                // 0.8.13: account-level statuses ride the error envelope so the host
+                // cooldown layer stops re-picking a drained credential.
+                return nil, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
         }
         completion, err := aggregateQoderSSE(reader, req.Model)
         if err != nil {
@@ -863,6 +873,23 @@ func okEnvelope(v any) ([]byte, error) {
 func errorEnvelope(code, message string) []byte {
         raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
         return raw
+}
+
+
+// errorEnvelopeFor serializes a handler error, preserving the upstream HTTP
+// status when the error carries one (statusError or any StatusCode()
+// implementation). The status crosses the RPC boundary as the envelope error
+// http_status field and drives the host's real per-status credential
+// cooldown (see envelopeError.HTTPStatus).
+func errorEnvelopeFor(err error) []byte {
+        var sc interface{ StatusCode() int }
+        if errors.As(err, &sc) && sc.StatusCode() > 0 {
+                raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{
+                        Code: "plugin_error", Message: err.Error(), HTTPStatus: sc.StatusCode(),
+                }})
+                return raw
+        }
+        return errorEnvelope("plugin_error", err.Error())
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {

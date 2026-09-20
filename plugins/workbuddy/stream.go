@@ -155,7 +155,10 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		if sa != nil && sa.Account.UID != "" {
 			go reconcileByUID(sa.Account.UID, statusCode, string(errPayload))
 		}
-		return nil, statusCode, translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr)
+		// v0.9.17: account-level statuses ride the error envelope so the
+		// host cooldown layer stops re-picking a drained credential.
+		return nil, statusCode, upstreamStatusError(statusCode, string(errPayload),
+			translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr))
 	}
 	chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector)
 	if errAgg != nil {

@@ -110,6 +110,52 @@ func translateChatUpstreamError(statusCode int, payload string, sa *storedAuth) 
 	return fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(payload, 200))
 }
 
+// statusError carries an upstream HTTP status across the RPC boundary. The
+// host's decodeEnvelopeResult rebuilds it as rpcError (via the envelope error
+// http_status field, see errorEnvelopeFor) whose StatusCode() drives
+// MarkResult's per-status cooldown: 402 -> 30 min, 429 -> escalating quota
+// backoff (credential-scoped across models), 401 -> 30 min. Request-level or
+// IP-level failures must NOT be wrapped — they stay plain errors with status 0
+// and only get the host's 1-minute transient cooldown, same as before 0.9.17.
+type statusError struct {
+	status int
+	err    error
+}
+
+func (e *statusError) Error() string   { return e.err.Error() }
+func (e *statusError) StatusCode() int { return e.status }
+func (e *statusError) Unwrap() error   { return e.err }
+
+// upstreamStatusError wraps a translated upstream chat failure with the HTTP
+// status the host cooldown layer should attribute to the credential.
+//
+// Passed through (account-level): 401 dead token, 402 payment/credits,
+// 429 rate/quota (free-tier exhaustion typically surfaces here — the host's
+// escalating quota backoff is exactly the "stop hammering a drained
+// credential" behavior requested on 2026-09-20), and business 403s that carry
+// the upstream envelope (permission-class, e.g. 11140).
+//
+// Kept at status 0 (request/IP-level, credential stays healthy): 413/11115
+// prompt overflow, 11128 channel risk control, 11102 model-catalog rejection,
+// bare 403 WAF challenges, and everything else (400/404/5xx keep the host
+// default transient cooldown — unchanged from pre-0.9.17 behavior).
+func upstreamStatusError(status int, payload string, err error) error {
+	switch {
+	case isPromptTooLong(status, payload),
+		isChannelRiskControl(status, payload),
+		isModelNotRegistered(status, payload),
+		isWafBlocked(status, payload):
+		return err
+	case status == http.StatusUnauthorized,
+		status == http.StatusPaymentRequired,
+		status == http.StatusTooManyRequests:
+		return &statusError{status: status, err: err}
+	case status == http.StatusForbidden && hasBusinessEnvelope(payload):
+		return &statusError{status: status, err: err}
+	}
+	return err
+}
+
 // inputTooLargeMarkers 过大错误文案词族（除 11115/"prompt is too long"
 // 外的变体；对齐 qoder 0.8.11 chatSizeMarkers）。大小写不敏感。
 var inputTooLargeMarkers = []string{

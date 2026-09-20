@@ -170,7 +170,9 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 	defer stream.Close()
 	if statusCode >= 400 {
 		payload, _ := io.ReadAll(newHostStreamReader(stream))
-		return nil, statusCode, chatUpstreamError(statusCode, string(payload))
+		// 0.8.13: account-level statuses ride the error envelope so the host
+		// cooldown layer stops re-picking a drained credential.
+		return nil, statusCode, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
 	}
 	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 64)
 	scanner := bufio.NewScanner(newHostStreamReader(stream))

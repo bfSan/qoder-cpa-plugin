@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.17
+
+### Credential cooldown finally reaches the host (repo v0.12.62)
+
+User report (2026-09-20): an account with drained credits + exhausted
+free-tier quota keeps being picked for every request — the second failure in
+a row still goes to the same credential.
+
+Root cause: our RPC error envelope carried only code+message. The host's
+decodeEnvelopeResult therefore built a status-less rpcError (StatusCode()=0)
+and MarkResult could only apply its 1-minute transient default cooldown —
+invisible in practice. The host machinery itself was always there (402 -> 30
+min, 429 -> escalating quota backoff with credential-scoped model expansion,
+401 -> 30 min; cooled credentials are filtered before scheduler pick, plugin
+routing included).
+
+- envelopeError gains `http_status` (mirrors pluginabi.Error); errorEnvelopeFor
+  extracts StatusCode() from handler errors and serializes it across the RPC.
+- statusError + upstreamStatusError wrap translated upstream chat failures in
+  the execute and collect paths with an explicit pass-through matrix:
+  account-level 401/402/429 and business-envelope 403 pass; 413/11115 prompt
+  overflow, 11128 channel risk control, 11102 model-catalog rejection and bare
+  403 WAF challenges stay status-less (request/IP-level — a credential must
+  not be cooled for problems any account would hit).
+- panel.html: the done-state button added a 1px border on top of border:0,
+  shifting its layout size by 2px versus sibling buttons; replaced with an
+  inset box-shadow ring (no layout change).
+- Regression tests: envelope carries/omits http_status; the full
+  upstreamStatusError policy matrix.
+
 ## 0.9.16
 
 ### Copy precision for prompt-too-long (repo v0.12.61)

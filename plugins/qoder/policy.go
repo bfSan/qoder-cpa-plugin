@@ -163,6 +163,39 @@ func chatInputTooLarge(status int, body string) bool {
 	return false
 }
 
+// statusError carries an upstream HTTP status across the RPC boundary. The
+// host's decodeEnvelopeResult rebuilds it as rpcError (via the envelope error
+// http_status field, see errorEnvelopeFor) whose StatusCode() drives
+// MarkResult's per-status cooldown: 402 -> 30 min, 429 -> escalating quota
+// backoff (credential-scoped across models), 401 -> 30 min. Free-tier
+// exhaustion (qfmodel 等) typically surfaces as 429 — this is exactly the
+// "stop hammering a drained credential" behavior requested on 2026-09-20.
+type statusError struct {
+	status int
+	err    error
+}
+
+func (e *statusError) Error() string   { return e.err.Error() }
+func (e *statusError) StatusCode() int { return e.status }
+func (e *statusError) Unwrap() error   { return e.err }
+
+// upstreamStatusError wraps a translated upstream chat failure with the HTTP
+// status the host cooldown layer should attribute to the credential.
+//
+// qoder variant: only unambiguous account-level statuses pass (401/402/429).
+// 403 and the request-level shapes (413/输入过大 etc.) stay status-less — the
+// qoder upstream has no evidenced business-403 family, and chatSizeMarkers
+// failures are request-level by definition; both keep the host's 1-minute
+// transient default (pre-0.8.13 behavior unchanged).
+func upstreamStatusError(status int, err error) error {
+	if status == http.StatusUnauthorized ||
+		status == http.StatusPaymentRequired ||
+		status == http.StatusTooManyRequests {
+		return &statusError{status: status, err: err}
+	}
+	return err
+}
+
 // chatUpstreamError renders an upstream chat failure for the client, adding
 // actionable copy when the rejection was caused by oversized input so users
 // don't mistake it for an account/quota problem.

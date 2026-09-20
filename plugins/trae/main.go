@@ -69,6 +69,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -139,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.51"
+var version = "0.12.52"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -277,7 +278,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	}
 	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
 	if errHandle != nil {
-		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		writeResponse(response, errorEnvelopeFor(errHandle))
 		return 1
 	}
 	writeResponse(response, raw)
@@ -432,8 +433,15 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code string `json:"code"`
+	// HTTPStatus mirrors pluginabi.Error.HTTPStatus: the host's
+	// decodeEnvelopeResult feeds it into rpcError.StatusCode(), which
+	// resultErrorFromError -> MarkResult uses for per-status cooldown
+	// policy (402->30m, 429->quota backoff, 401->30m). Without it every
+	// plugin failure looks status-less to the host and only gets the
+	// 1-minute transient cooldown, on top of the plugin-side pool.
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type identifierResponse struct {
@@ -1894,7 +1902,9 @@ func handleExecExecute(request []byte) ([]byte, error) {
 		// Non-2xx: classify and cool the account.
 		kind := upstream.Classify(status, string(body))
 		applyCooldown(a.UID, kind)
-		return nil, chatHTTPErrorFor(status, kind, string(body))
+		// 0.12.52: account-level statuses ride the error envelope so the
+		// host cooldown layer also stops re-picking a drained credential.
+		return nil, upstreamStatusError(status, chatHTTPErrorFor(status, kind, string(body)))
 	}
 	defer rc.Close()
 
@@ -1975,7 +1985,9 @@ func handleExecStream(request []byte) ([]byte, error) {
 	if rc == nil {
 		kind := upstream.Classify(status, string(body))
 		applyCooldown(a.UID, kind)
-		return nil, chatHTTPErrorFor(status, kind, string(body))
+		// 0.12.52: account-level statuses ride the error envelope so the
+		// host cooldown layer also stops re-picking a drained credential.
+		return nil, upstreamStatusError(status, chatHTTPErrorFor(status, kind, string(body)))
 	}
 
 	// v0.12.30: the RPC envelope MUST carry chunks as a slice — the host
@@ -2109,6 +2121,49 @@ func okEnvelope(result any) ([]byte, error) {
 func errorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
 	return raw
+}
+
+// errorEnvelopeFor serializes a handler error, preserving the upstream HTTP
+// status when the error carries one (statusError or any StatusCode()
+// implementation). The status crosses the RPC boundary as the envelope error
+// http_status field and drives the host's real per-status credential
+// cooldown (see envelopeError.HTTPStatus).
+func errorEnvelopeFor(err error) []byte {
+	var sc interface{ StatusCode() int }
+	if errors.As(err, &sc) && sc.StatusCode() > 0 {
+		raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{
+			Code: "plugin_error", Message: err.Error(), HTTPStatus: sc.StatusCode(),
+		}})
+		return raw
+	}
+	return errorEnvelope("plugin_error", err.Error())
+}
+
+// statusError carries an upstream HTTP status across the RPC boundary. The
+// host rebuilds it as rpcError whose StatusCode() drives MarkResult's
+// per-status cooldown: 402 -> 30 min, 429 -> escalating quota backoff
+// (credential-scoped), 401 -> 30 min.
+type statusError struct {
+	status int
+	err    error
+}
+
+func (e *statusError) Error() string   { return e.err.Error() }
+func (e *statusError) StatusCode() int { return e.status }
+func (e *statusError) Unwrap() error   { return e.err }
+
+// upstreamStatusError wraps a chat failure for the host cooldown layer.
+// trae policy: only 401/402/429 pass. 404 stays status-less — the host maps
+// 404 to 12h while the plugin pool intends CoolSoft 60s; plan-limit bodies
+// and input-too-large are already handled plugin-side (ErrPlanLimit 12h /
+// ErrInputTooLarge no-op) and must not be double-cooled by host policy.
+func upstreamStatusError(status int, err error) error {
+	if status == http.StatusUnauthorized ||
+		status == http.StatusPaymentRequired ||
+		status == http.StatusTooManyRequests {
+		return &statusError{status: status, err: err}
+	}
+	return err
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {
