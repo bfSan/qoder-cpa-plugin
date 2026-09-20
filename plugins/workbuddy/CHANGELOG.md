@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.9.21
+
+### panel: selected-account button size anomaly fixed (repo v0.12.66)
+
+User report (2026-09-20): on the account panel, the buttons of the card
+showing the selected state rendered with an abnormal size — visibly taller
+than the same buttons on every other card, with their labels stacked
+vertically (使/用/中 one character per line).
+
+Root cause: the CN action row holds five buttons (选用/使用中 + 刷新 +
+签到/已签到 + 任务 + 券码). Their natural widths fit the card, but any
+three-character label ("使用中" on the selected card, "已签到" after
+check-in) pushed the row's natural width ~2px past the available content
+width. `flex-shrink` then squeezed every button by a fraction of a pixel,
+and 26px of CJK label content lost to 25.6px — each two-character label
+wrapped onto two lines, doubling button height (34px -> 52px). Narrow
+viewports widened the squeeze. The row lacked `flex-wrap`, so there was no
+escape valve; trae's panel has had `flex-wrap: wrap` all along, which is
+why only workbuddy exhibited the bug.
+
+Fix (panel.html, embedded):
+- `.actions` gains `flex-wrap: wrap` — a tight row wraps its last button
+  to a second line instead of compressing the others.
+- base `button` gains `white-space: nowrap` — a button label can never
+  stack vertically again, regardless of future label changes.
+
+Verified with a headless-browser probe (mock /accounts + /credits across
+1280px and 720px viewports): every action button now measures 34px tall in
+all six mock cards (selected / checked-in / disabled+exhausted / Global /
+Intl / long-nickname), zero vertical stacking, zero row overflow.
+
+## 0.9.20
+
+### growth acceptance triage (repo v0.12.65)
+
+Aligned with upstream growth_runner 2026-09-20 observations:
+
+- "task does not require acceptance" is now treated as a normal answer,
+  not a failure (previously it misled users into thinking tasks broke).
+- "prerequisite not met: <code>" replies are merged into one summary line
+  per reason (new accounts see ~17 tasks gated behind first_buddy; the
+  per-line noise hid the one actionable item).
+  growthPrerequisiteOf/growthPrerequisiteLabel map codes to actionable
+  copy (first_buddy -> chat first to unlock), sorted for stable output.
+- everything else remains a per-task real failure; blocked tasks no longer
+  count toward the failure count.
+
 ## 0.9.19
 
 ### transport-error billing retries + bounded scans + readable bridge errors (repo v0.12.64)
