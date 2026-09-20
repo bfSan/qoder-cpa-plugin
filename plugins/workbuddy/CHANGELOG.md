@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.26
+
+### PR #4 / PR #6 code absorbed clean-room (repo v0.12.71)
+
+The two open PRs carried Claude co-author trailers, so neither was merged —
+the CODE was ported by hand onto the current tree with fresh tests
+(`pr_absorb_test.go`); the PR branches stay out of main's history and the
+contributors list stays clean.
+
+**reasoning replay (issue #5).** `injectReasoningInPlace` folds each
+historical assistant turn's `reasoning_content` (or `reasoning`) into its
+content as a `<thought>` block during `prepareUpstreamBody` (step 3.5). The
+Tencent gateway silently drops the non-standard field from multi-turn
+history, so the model never saw its own prior chain of thought — inlined
+text survives the field whitelist. Idempotent; handles string and
+multimodal content (the thought becomes a new leading text part).
+
+**SSE comment frames (from PR #6).** `cleanChunkJSON` returns "" for
+leading-colon lines, so upstream `: keep-alive` / `: heartbeat` frames are
+never re-emitted as `data: : heartbeat` — the malformed event that crashed
+strict clients which JSON-parse every `data:` line.
+
+**blocked-template regex net (from PR #4).** `sanitizeBlockedTemplates`
+gains case/quote-drift regex variants of the two OmniRoute templates in
+addition to the byte-exact `ReplaceAll` pair. PR #4's wholesale removal of
+the 2000-byte system replacement is intentionally NOT adopted — the v0.9.18
+scope fix already restored the role gate, and the system-only length
+replacement stays as the WAF backstop.
+
+**discovery transient guard (from PR #6).** `noteRealmError` no longer
+wipes the realm's last successful discovery; the failure path serves
+`cachedDynamicModelsStale` (the last good list, TTL notwithstanding) and
+only falls back to the static catalog when nothing was ever discovered.
+Diagnostics distinguish "last discovery (transient failure)" from "static
+(discovery failed)".
+
 ## 0.9.25
 
 ### check-in status stability + Intl tier-alias display evidence (repo v0.12.70)
