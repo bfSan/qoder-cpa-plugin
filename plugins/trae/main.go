@@ -399,6 +399,11 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodExecutorCountTokens:
 		return okEnvelope(pluginapi.ExecutorResponse{Payload: []byte(`{"input_tokens":0}`)})
 
+	case pluginabi.MethodSchedulerPick:
+		// issue #2: the method must EXIST even though trae defers routing to
+		// the host — a missing method made the host 500 every request.
+		return handleSchedulerPick(request)
+
 	case pluginabi.MethodManagementRegister:
 		// Cache host-injected BasePath so handleManagement doesn't hardcode
 		// /v0/management (tolerate future host path changes).
