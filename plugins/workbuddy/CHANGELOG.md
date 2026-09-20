@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.9.18
+
+### neutralPrompt scope fix + 2026-09 growth contract (repo v0.12.63)
+
+User report (2026-09-20): workbuddy conversations "reset every so often",
+the model answers "You are a helpful AI assistant that helps with software
+engineering tasks." when interrupted, tool output "looks truncated" (long
+stdout comes back empty, .ps1/.md files unreadable) — the agent itself
+started printing files in small chunks to work around it. Separately, the
+task center showed far fewer tasks than expected.
+
+Root cause one (payload): the neutralPrompt wholesale replacement was applied
+to messages of EVERY role. OmniRoute codebuddy-cn.ts (the porting source)
+gates it on `message.role !== "system" -> return message` verbatim; our port
+lost the role check. Any user paste / tool result / assistant history entry
+over maxSystemPromptBytes (2000) — or merely quoting an agent identity line —
+was silently rewritten to neutralPrompt. The upstream model then saw a
+history full of hollow "You are a helpful AI assistant..." messages: long
+tool output appeared "truncated", long pastes disappeared, and the neutral
+prompt itself leaked into answers. Fixed by scoping the replacement to
+role=system messages only (rewriteSystemMessagesInPlace /
+rewriteSystemContentField); the array shape now collapses into a single text
+part (OmniRoute parity) instead of one neutralPrompt per part.
+
+Root cause two (task center): the 2026-09 upstream contract changed
+(Coding2API f18dc3d, "five stuck tasks piled up 650 unclaimed credits"):
+
+- accept_status is FIVE-state (not_accepted | accepted | in_progress |
+  completed | claimed); only ""/"not_accepted" tasks need enrolling. The old
+  three-state guess treated non-empty statuses as accepted.
+- Claimability now also trusts accept_status=="completed" (progress fields
+  lag on some task types); the progress-reached test stays as fallback.
+- Batched accept (20/call) with per-task results surfaced — silent
+  "prerequisite not met" rejections stay visible.
+- Redemption reads the GRANTED fields (credit_granted/energy_granted); a
+  400 "unknown tier" retries once with the legacy day-number form; the 403
+  "连续登录天数不足" tier-lock renders as a normal "not unlocked" line.
+- Claims run BEFORE the lottery (task rewards grant chances — spendable the
+  same run). Travel claim reads the credit field with reward_credit fallback.
+- New steps: buddy box (the energy sink — energy has no other outlet) and an
+  energy-balance tail. Lottery chances moved to /lottery/chances (balance)
+  with the legacy summary endpoint as fallback.
+- A credential-level 401/403 aborts the remaining growth-domain steps
+  (growthHTTPError carries the HTTP status; tier-locked 403 exempt).
+
+Regression tests: sanitize_scope_test.go (non-system messages preserved
+verbatim, agent-identity user text preserved, system array collapse,
+end-to-end pipeline), growth_contract_test.go (five-state matrix, completed
+claimability, error taxonomy, per-task accept results, granted fields +
+day retry, travel-claim credit priority, lottery endpoint fallback).
+
 ## 0.9.17
 
 ### Credential cooldown finally reaches the host (repo v0.12.62)

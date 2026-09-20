@@ -28,6 +28,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -48,15 +49,19 @@ const (
 	growthBuddyFirstPath   = "/activity/growth/buddy/first"
 	growthBuddyAgreePath   = "/activity/growth/buddy/agreement"
 
-	growthStreakPath        = "/activity/growth/streak"
-	growthRedeemPath        = "/activity/growth/redeem"
-	growthLotterySummary    = "/activity/growth/lottery/summary"
-	growthLotteryDrawPath   = "/activity/growth/lottery/draw"
-	growthHeatmapPath       = "/activity/growth/heatmap"
-	growthMakeupUsePath     = "/activity/growth/makeup-cards/use"
-	billingReportPath       = "/v2/report"
-	billingClaimGiftPath    = "/billing/meter/claim-gift"
-	billingClaimCompensPath = "/billing/meter/claim-compensation"
+	growthStreakPath         = "/activity/growth/streak"
+	growthRedeemPath         = "/activity/growth/redeem"
+	growthLotterySummary     = "/activity/growth/lottery/summary"
+	growthLotteryChancesPath = "/activity/growth/lottery/chances"
+	growthLotteryDrawPath    = "/activity/growth/lottery/draw"
+	growthBuddyQuotaPath     = "/activity/growth/buddy/quota"
+	growthBuddyOpenPath      = "/activity/growth/buddy/open"
+	growthEnergyPath         = "/activity/growth/energy"
+	growthHeatmapPath        = "/activity/growth/heatmap"
+	growthMakeupUsePath      = "/activity/growth/makeup-cards/use"
+	billingReportPath        = "/v2/report"
+	billingClaimGiftPath     = "/billing/meter/claim-gift"
+	billingClaimCompensPath  = "/billing/meter/claim-compensation"
 )
 
 // growthWebBaseCN hosts the web growth-center claim endpoint (workbuddy.cn,
@@ -79,6 +84,23 @@ func growthClientToken() string {
 // (GET semantics); otherwise it is JSON-marshalled. Envelope and error
 // semantics match billingCallOnce: HTTP >= 500 → transient-shaped error,
 // code != 0 → business error carrying code+msg.
+// growthBaseOverride lets tests retarget the growth domain (same pattern as
+// setBillingBase); empty means the CN const applies.
+var growthBaseOverride string
+
+func setGrowthBase(s string) func() {
+	old := growthBaseOverride
+	growthBaseOverride = s
+	return func() { growthBaseOverride = old }
+}
+
+func growthBase() string {
+	if growthBaseOverride != "" {
+		return growthBaseOverride
+	}
+	return upstreamBaseCN
+}
+
 func growthCall(sa *storedAuth, method, path string, body any) (json.RawMessage, error) {
 	var reader *bytes.Reader
 	if body != nil {
@@ -90,7 +112,7 @@ func growthCall(sa *storedAuth, method, path string, body any) (json.RawMessage,
 	} else {
 		reader = bytes.NewReader(nil)
 	}
-	req, err := http.NewRequest(method, upstreamBaseCN+path, reader)
+	req, err := http.NewRequest(method, growthBase()+path, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -128,12 +150,22 @@ func growthDo(req *http.Request) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode >= 400 {
 		snippet := strings.TrimSpace(redactSecrets(string(resp.Body)))
 		if len(snippet) > 120 {
 			snippet = snippet[:120]
 		}
-		return nil, fmt.Errorf("http %d from %s: %s", resp.StatusCode, req.URL.Path, snippet)
+		// Prefer the envelope msg when the failure body is our usual
+		// {code,msg,data} shape; fall back to the raw snippet (WAF pages).
+		var env apiEnvelope
+		msg := ""
+		if json.Unmarshal(resp.Body, &env) == nil && env.Code != 0 {
+			msg = truncateRedacted(env.Msg, 120)
+		}
+		if msg == "" {
+			msg = snippet
+		}
+		return nil, &growthHTTPError{status: resp.StatusCode, msg: msg}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(resp.Body, &env); err != nil {
@@ -147,6 +179,67 @@ func growthDo(req *http.Request) (json.RawMessage, error) {
 		return nil, fmt.Errorf("code=%d msg=%s", env.Code, truncateRedacted(env.Msg, 120))
 	}
 	return env.Data, nil
+}
+
+// growthHTTPError carries the upstream HTTP status of a growth-center call so
+// callers can separate credential-level rejections (401/403 — Coding2API
+// growth_runner discipline: abort the run, every further call just 401s
+// again) from business rules (tier locked / quota exhausted) and
+// infrastructure failures (5xx).
+type growthHTTPError struct {
+	status int
+	msg    string
+}
+
+func (e *growthHTTPError) Error() string {
+	if e.msg != "" {
+		return fmt.Sprintf("http %d: %s", e.status, e.msg)
+	}
+	return fmt.Sprintf("http %d", e.status)
+}
+
+// growthErrStatus reports the HTTP status carried by err (0 when none).
+func growthErrStatus(err error) int {
+	var he *growthHTTPError
+	if errors.As(err, &he) {
+		return he.status
+	}
+	return 0
+}
+
+// isGrowthSessionDead mirrors Coding2API growth_runner._is_session_dead:
+// 401/403 means the credential was rejected — continuing would just pile up
+// more rejections. The tier-locked 403 ("连续登录天数不足") is exempt: it is
+// the normal "tier not unlocked" state, and treating it as session death
+// would abort the whole run over a healthy credential (upstream issue #6).
+func isGrowthSessionDead(err error) bool {
+	st := growthErrStatus(err)
+	if st != 401 && st != 403 {
+		return false
+	}
+	return !isGrowthTierLocked(err)
+}
+
+// isGrowthTierLocked reports the expected 403 "连续登录天数不足" answer for
+// an unredeemed-tier attempt — a normal state, not a failure.
+func isGrowthTierLocked(err error) bool {
+	if growthErrStatus(err) != 403 {
+		return false
+	}
+	return strings.Contains(err.Error(), "不足")
+}
+
+// isGrowthUnknownTier reports the 400 "unknown tier" parameter-form
+// rejection — the server redeemed nothing, so retrying with the legacy
+// day-number form is safe (Coding2API is_unknown_tier, f18dc3d).
+func isGrowthUnknownTier(err error) bool {
+	if growthErrStatus(err) != 400 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "tier") &&
+		(strings.Contains(msg, "unknown") || strings.Contains(msg, "invalid") ||
+			strings.Contains(msg, "unsupported"))
 }
 
 // -----------------------------------------------------------------------------
@@ -203,7 +296,12 @@ func parseGrowthTasks(data json.RawMessage) []growthTask {
 			}
 		}
 		task.Claimed = task.AcceptStatus == "claimed"
-		task.Claimable = !task.Claimed && task.Locked == false && task.Target > 0 && task.Current >= task.Target
+		// 2026-09 five-state contract: accept_status=="completed" is the
+		// authoritative claim signal (progress fields lag on some task types);
+		// the progress-reached test stays as the fallback for shapes where
+		// completed is not yet published.
+		task.Claimable = !task.Claimed && !task.Locked &&
+			(task.AcceptStatus == "completed" || (task.Target > 0 && task.Current >= task.Target))
 		out = append(out, task)
 	}
 	return out
@@ -217,16 +315,43 @@ func growthListTasks(sa *storedAuth) ([]growthTask, error) {
 	return parseGrowthTasks(data), nil
 }
 
+// growthAcceptResult is one per-task outcome of a batch accept call
+// (2026-09 contract: data.results carries each code's status — "error"
+// entries carry the upstream message, e.g. "prerequisite not met").
+type growthAcceptResult struct {
+	TaskCode string `json:"task_code"`
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+}
+
 // growthAcceptTasks accepts (enrolls) tasks. Upstream counts progress only
 // for accepted tasks — skipping this step is the classic "report 200 but
-// progress stuck at not_accepted" failure. Idempotent: already-accepted
-// tasks return success or a benign business message.
-func growthAcceptTasks(sa *storedAuth, taskCodes []string) error {
+// progress stuck at not_accepted" failure. The 2026-09 contract requires the
+// PLURAL array body {"task_codes": [...]} (the singular form answers 400) and
+// reports per-task outcomes in data.results; surfacing them is the only way
+// per-task rejections stay visible (silence here is how five tasks piled up
+// 650 unclaimed credits on a real account upstream). When the upstream omits
+// results, every code is treated as accepted.
+func growthAcceptTasks(sa *storedAuth, taskCodes []string) ([]growthAcceptResult, error) {
 	if len(taskCodes) == 0 {
-		return nil
+		return nil, nil
 	}
-	_, err := growthCall(sa, http.MethodPost, growthTasksAcceptPath, map[string]any{"task_codes": taskCodes})
-	return err
+	data, err := growthCall(sa, http.MethodPost, growthTasksAcceptPath, map[string]any{"task_codes": taskCodes})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Results []growthAcceptResult `json:"results"`
+	}
+	_ = json.Unmarshal(data, &resp)
+	if len(resp.Results) > 0 {
+		return resp.Results, nil
+	}
+	out := make([]growthAcceptResult, 0, len(taskCodes))
+	for _, code := range taskCodes {
+		out = append(out, growthAcceptResult{TaskCode: code, Status: "ok"})
+	}
+	return out, nil
 }
 
 // growthClaimReward claims ONE task's reward on the WEB domain (workbuddy.cn).
@@ -310,17 +435,72 @@ func growthStreak(sa *storedAuth) (*growthStreakFull, error) {
 	return out, nil
 }
 
-// growthRedeemTier exchanges one streak tier ("7d"/"14d"/"28d"). Locked
-// tiers answer 403 "连续登录天数不足" — callers treat that as expected skip.
-func growthRedeemTier(sa *storedAuth, tier string) error {
-	_, err := growthCall(sa, http.MethodPost, growthRedeemPath,
-		map[string]any{"tier": tier, "client_token": growthClientToken()})
-	return err
+// growthRedeemTier exchanges one streak tier ("7d"/"14d"/"28d") and returns
+// what was actually granted. Locked tiers answer 403 "连续登录天数不足" —
+// callers treat that as expected skip (isGrowthTierLocked). A 400 "unknown
+// tier" is a parameter-form rejection (nothing was redeemed) — retry once
+// with the legacy day-number form (Coding2API f18dc3d keeps the same
+// fallback). The 2026-09 response carries the GRANTED fields
+// (credit_granted/energy_granted); the bare credit/energy members are empty
+// on this endpoint, so reading them reports zero for every redemption.
+func growthRedeemTier(sa *storedAuth, tier string) (credit, energy int64, err error) {
+	credit, energy, err = growthRedeemOnce(sa, tier)
+	if err != nil && isGrowthUnknownTier(err) {
+		if days, ok := growthTierDays[tier]; ok {
+			credit, energy, err = growthRedeemOnce(sa, days)
+		}
+	}
+	return credit, energy, err
 }
 
-// growthLotteryChances returns the current lottery draw balance.
+// growthTierDays maps tier ids to the legacy day-number parameter form —
+// only used for the unknown-tier fallback retry.
+var growthTierDays = map[string]int{"7d": 7, "14d": 14, "28d": 28}
+
+func growthRedeemOnce(sa *storedAuth, tier any) (int64, int64, error) {
+	data, err := growthCall(sa, http.MethodPost, growthRedeemPath,
+		map[string]any{"tier": tier, "client_token": growthClientToken()})
+	if err != nil {
+		return 0, 0, err
+	}
+	var resp struct {
+		CreditGranted int64 `json:"credit_granted"`
+		EnergyGranted int64 `json:"energy_granted"`
+		Credit        int64 `json:"credit"`
+		Energy        int64 `json:"energy"`
+	}
+	_ = json.Unmarshal(data, &resp)
+	if resp.CreditGranted != 0 || resp.EnergyGranted != 0 {
+		return resp.CreditGranted, resp.EnergyGranted, nil
+	}
+	return resp.Credit, resp.Energy, nil
+}
+
+// growthLotteryChances returns the current lottery draw balance. The
+// 2026-09 contract serves it at /lottery/chances (balance field); the older
+// /lottery/summary (chances field) stays as the fallback so an endpoint
+// rollout never silently zeroes the draw loop. A session-dead answer is
+// propagated instead of retried on the legacy endpoint.
 func growthLotteryChances(sa *storedAuth) (int, error) {
-	data, err := growthCall(sa, http.MethodGet, growthLotterySummary, nil)
+	data, err := growthCall(sa, http.MethodGet, growthLotteryChancesPath, nil)
+	if err == nil {
+		var resp struct {
+			Balance int `json:"balance"`
+			Chances int `json:"chances"`
+		}
+		if json.Unmarshal(data, &resp) == nil {
+			if resp.Balance != 0 {
+				return resp.Balance, nil
+			}
+			if resp.Chances != 0 {
+				return resp.Chances, nil
+			}
+			return 0, nil // a valid "nothing to draw" on the new endpoint
+		}
+	} else if isGrowthSessionDead(err) {
+		return 0, err
+	}
+	data, err = growthCall(sa, http.MethodGet, growthLotterySummary, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -341,6 +521,48 @@ func growthLotteryChances(sa *storedAuth) (int, error) {
 func growthLotteryDraw(sa *storedAuth) (json.RawMessage, error) {
 	return growthCall(sa, http.MethodPost, growthLotteryDrawPath,
 		map[string]any{"client_token": growthClientToken()})
+}
+
+// growthBuddyQuota returns (affordable, costPerOpen, maxOpen) for the energy
+// buddy box. This is the ENERGY SINK: energy has no other spend outlet, so
+// unspent energy just sits there (Coding2API _buddy_box).
+func growthBuddyQuota(sa *storedAuth) (affordable, costPerOpen, maxOpen int, err error) {
+	data, err := growthCall(sa, http.MethodGet, growthBuddyQuotaPath, nil)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	var resp struct {
+		Affordable   int `json:"affordable"`
+		CostPerOpen  int `json:"cost_per_open"`
+		MaxOpenCount int `json:"max_open_count"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, 0, 0, err
+	}
+	if resp.MaxOpenCount <= 0 {
+		resp.MaxOpenCount = 1
+	}
+	return resp.Affordable, resp.CostPerOpen, resp.MaxOpenCount, nil
+}
+
+// growthBuddyOpen spends energy to open buddy boxes (count per call; the
+// 2026-09 shape takes {"count": n, "client_token": ...}).
+func growthBuddyOpen(sa *storedAuth, count int) (json.RawMessage, error) {
+	return growthCall(sa, http.MethodPost, growthBuddyOpenPath,
+		map[string]any{"count": count, "client_token": growthClientToken()})
+}
+
+// growthEnergyBalance reads the energy balance (display-only tail step).
+func growthEnergyBalance(sa *storedAuth) (int64, error) {
+	data, err := growthCall(sa, http.MethodGet, growthEnergyPath, nil)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Balance int64 `json:"balance"`
+	}
+	_ = json.Unmarshal(data, &resp)
+	return resp.Balance, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -391,10 +613,16 @@ func growthTravelClaim(sa *storedAuth, recordID int64) (int64, error) {
 		return 0, err
 	}
 	var resp struct {
+		Credit       int64 `json:"credit"`
 		RewardCredit int64 `json:"reward_credit"`
 	}
 	if len(data) > 0 {
 		_ = json.Unmarshal(data, &resp) // missing reward field is not fatal
+	}
+	// 2026-09 contract: the claim response reads credit (parse_reward);
+	// reward_credit stays as the fallback for the older shape.
+	if resp.Credit != 0 {
+		return resp.Credit, nil
 	}
 	return resp.RewardCredit, nil
 }

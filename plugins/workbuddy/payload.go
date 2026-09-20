@@ -248,17 +248,7 @@ func normalizeToolsInPlace(obj map[string]any) bool {
 //     other values to reasoning_summary="auto" (OmniRoute codebuddy-cn.ts).
 //  3. forceMaxThinking for hy3/hy4-family models.
 func rewriteSystemInPlace(obj map[string]any) bool {
-        messages, _ := obj["messages"].([]any)
-        changed := false
-        for _, m := range messages {
-                msg, ok := m.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if rewriteContentField(msg) {
-                        changed = true
-                }
-        }
+        changed := rewriteSystemMessagesInPlace(obj)
         if mirrorReasoningEffort(obj) {
                 changed = true
         }
@@ -269,6 +259,94 @@ func rewriteSystemInPlace(obj map[string]any) bool {
                 changed = true
         }
         return changed
+}
+
+// rewriteSystemMessagesInPlace applies the content-filter defenses to SYSTEM
+// messages only. v0.9.18 scope fix: the pre-0.9.18 loop fed EVERY message
+// through the wholesale replacement, so any user paste / tool result /
+// assistant history entry over maxSystemPromptBytes (or matching agentPattern)
+// was silently rewritten to neutralPrompt and the upstream model saw a
+// history full of hollow "You are a helpful AI assistant..." messages. Field
+// reports mapping to exactly this: tool output that "looks truncated / stdout
+// empty", conversations that "reset every so often", and the model answering
+// with the neutral prompt itself on interruption. OmniRoute codebuddy-cn.ts
+// (the porting source) gates the replacement on
+// `message.role !== "system" -> return message` verbatim; this restores it.
+func rewriteSystemMessagesInPlace(obj map[string]any) bool {
+        messages, _ := obj["messages"].([]any)
+        changed := false
+        for _, m := range messages {
+                msg, ok := m.(map[string]any)
+                if !ok {
+                        continue
+                }
+                if role, _ := msg["role"].(string); !strings.EqualFold(role, "system") {
+                        continue
+                }
+                if rewriteSystemContentField(msg) {
+                        changed = true
+                }
+        }
+        return changed
+}
+
+// rewriteSystemContentField applies the filter defenses to one SYSTEM
+// message's content. Mirrors OmniRoute codebuddy-cn.ts: a string content is
+// replaced wholesale with neutralPrompt when it exceeds maxSystemPromptBytes
+// or matches agentPattern; an array content is flattened (text parts joined
+// with newlines) for the same decision and, when replaced, collapses into a
+// SINGLE {"type":"text"} part — not one neutralPrompt per part. Short clean
+// content only goes through the single-word template substitutions.
+func rewriteSystemContentField(msg map[string]any) bool {
+        switch c := msg["content"].(type) {
+        case string:
+                if len(c) > maxSystemPromptBytes || agentPattern.MatchString(c) {
+                        msg["content"] = neutralPrompt
+                        return true
+                }
+                if r := sanitizeBlockedTemplates(c); r != c {
+                        msg["content"] = r
+                        return true
+                }
+        case []any:
+                text := flattenSystemParts(c)
+                if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
+                        msg["content"] = []any{map[string]any{"type": "text", "text": neutralPrompt}}
+                        return true
+                }
+                modified := false
+                for _, p := range c {
+                        part, ok := p.(map[string]any)
+                        if !ok {
+                                continue
+                        }
+                        if t, ok := part["text"].(string); ok {
+                                if r := sanitizeBlockedTemplates(t); r != t {
+                                        part["text"] = r
+                                        modified = true
+                                }
+                        }
+                }
+                return modified
+        }
+        return false
+}
+
+// flattenSystemParts mirrors OmniRoute's flatten(): join the text of all
+// {"type":"text","text":...} parts with newlines; non-text parts contribute
+// nothing (an image-only system message stays empty and is never replaced).
+func flattenSystemParts(parts []any) string {
+        texts := make([]string, 0, len(parts))
+        for _, p := range parts {
+                part, ok := p.(map[string]any)
+                if !ok {
+                        continue
+                }
+                if t, ok := part["text"].(string); ok {
+                        texts = append(texts, t)
+                }
+        }
+        return strings.Join(texts, "\n")
 }
 
 // mirrorReasoningEffort implements OmniRoute codebuddy-cn.ts reasoning_effort
@@ -491,17 +569,7 @@ func rewriteSystemForUpstream(payload []byte) []byte {
         if json.Unmarshal(payload, &obj) != nil {
                 return payload
         }
-        messages, _ := obj["messages"].([]any)
-        changed := false
-        for _, m := range messages {
-                msg, ok := m.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if rewriteContentField(msg) {
-                        changed = true
-                }
-        }
+        changed := rewriteSystemMessagesInPlace(obj)
         if forceMaxThinking(obj) {
                 changed = true
         }
@@ -557,50 +625,10 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
         return out
 }
 
-// rewriteContentField sanitizes blocked templates in one message's content,
-// handling both plain-string and OpenAI multimodal (array of parts) shapes.
-//
-// Per OmniRoute codebuddy-cn.ts:
-//   - If content length > maxSystemPromptBytes (2000) OR matches agentPattern,
-//     replace content wholesale with neutralPrompt.
-//   - Otherwise, apply sanitizeBlockedTemplates (single-word substitutions).
-//
-// Returns true if the message was modified.
-func rewriteContentField(msg map[string]any) bool {
-        switch c := msg["content"].(type) {
-        case string:
-                if r := sanitizeContentText(c); r != c {
-                        msg["content"] = r
-                        return true
-                }
-        case []any:
-                modified := false
-                for _, p := range c {
-                        part, ok := p.(map[string]any)
-                        if !ok {
-                                continue
-                        }
-                        if t, ok := part["text"].(string); ok {
-                                if r := sanitizeContentText(t); r != t {
-                                        part["text"] = r
-                                        modified = true
-                                }
-                        }
-                }
-                return modified
-        }
-        return false
-}
-
-// sanitizeContentText decides between wholesale replacement (neutralPrompt)
-// and template-level single-word substitution. Mirrors OmniRoute codebuddy-cn.ts
-// AGENT_PATTERN + length check.
-func sanitizeContentText(text string) string {
-        if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
-                return neutralPrompt
-        }
-        return sanitizeBlockedTemplates(text)
-}
+// (rewriteContentField / sanitizeContentText were removed in v0.9.18: they
+// applied the wholesale neutralPrompt replacement to messages of ANY role.
+// The system-scoped replacements live in rewriteSystemContentField above;
+// non-system messages are never rewritten — see rewriteSystemMessagesInPlace.)
 
 func sanitizeBlockedTemplates(s string) string {
         s = strings.ReplaceAll(s,

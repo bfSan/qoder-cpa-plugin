@@ -13,11 +13,16 @@
 //  1. activity report   → lights streak, unlocks first_buddy (1/day)
 //  2. makeup card       → yesterday missed + card available → repair streak
 //  3. gift/compensation → one-shot bonuses, business-error = silent skip
-//  4. accept pending    → upstream counts progress only for accepted tasks
+//  4. accept pending    → five-state contract, batched, per-task results
 //  5. buddy travel      → adopt if no buddy / depart if idle / claim if arrived
 //  6. streak redeem     → unlocked tiers (7d/14d/28d), 403 = expected skip
-//  7. lottery draw      → spend all chances
-//  8. claim rewards     → every claimable task (progress ≥ target, unclaimed)
+//  7. claim rewards     → every claimable task (completed or progress ≥ target)
+//  8. lottery draw      → spend all chances (after claims: rewards grant chances)
+//  9. buddy box         → energy sink (energy has no other spend outlet)
+//
+// 10. energy balance    → display tail
+// A credential-level 401/403 aborts the remaining steps (tier-locked 403
+// exempt — that one is a normal state, not a dead session).
 //
 // Every step is best-effort: one failing step logs into the summary and the
 // loop continues — a broken lottery endpoint must never block check-in-style
@@ -47,17 +52,19 @@ func tasksAutoEnabled() bool {
 // Pure helpers (unit-tested)
 // -----------------------------------------------------------------------------
 
-// growthAcceptCandidates picks task codes that should be enrolled: not yet
-// accepted, not claimed, not locked. Tasks already accepted/complete are
-// skipped; upstream answers idempotently anyway but we keep the request
-// list short.
+// growthAcceptCandidates picks task codes that should be enrolled. 2026-09
+// five-state contract (Coding2API GrowthTaskItem.needs_accept): only ""
+// (field absent) and "not_accepted" need enrolling — accepted/in_progress/
+// completed/claimed do not. The old three-state guess treated every
+// non-empty status as "already accepted", which is exactly how fresh tasks
+// end up never enrolling and never counting progress.
 func growthAcceptCandidates(tasks []growthTask) []string {
 	var codes []string
 	for _, t := range tasks {
 		if t.Claimed || t.Locked {
 			continue
 		}
-		if t.AcceptStatus == "accepted" || t.AcceptStatus == "completed" {
+		if t.AcceptStatus != "" && t.AcceptStatus != "not_accepted" {
 			continue
 		}
 		if strings.TrimSpace(t.TaskCode) == "" {
@@ -67,6 +74,10 @@ func growthAcceptCandidates(tasks []growthTask) []string {
 	}
 	return codes
 }
+
+// growthAcceptBatchSize caps one accept call's body (Coding2API
+// ACCEPT_BATCH_SIZE: the array grows with the task list — keep bodies small).
+const growthAcceptBatchSize = 20
 
 // growthClaimableTasks lists tasks whose progress reached the target and
 // whose reward has not been collected yet.
@@ -123,117 +134,245 @@ type tasksBonusResult struct {
 // tasksDailyBonus runs the full daily loop for ONE CN account. Never panics
 // upward: upstream failures land in the summary lines, the overall success
 // flag only means "loop completed" (not "every step green").
+// tasksDailyBonus runs the full daily loop for ONE CN account. Never panics
+// upward: upstream failures land in the summary lines, the overall success
+// flag only means "loop completed" (not "every step green").
+//
+// 2026-09 contract alignment (Coding2API f18dc3d + growth_runner):
+//   - accept is batched (growthAcceptBatchSize per call) and its per-task
+//     results are surfaced — silent per-task rejections ("prerequisite not
+//     met") are how five tasks piled up 650 unclaimed credits upstream;
+//   - claims run BEFORE the lottery (task rewards grant lottery chances —
+//     claim first so they are spendable this run, runner ordering);
+//   - a credential-level 401/403 aborts the remaining growth-domain steps
+//     (the runner's session_dead discipline: every further call just gets
+//     rejected again). The 403 "连续登录天数不足" tier-lock is exempt —
+//     it is the normal not-yet-unlocked state, not a dead session;
+//   - the buddy box (the energy sink) and an energy-balance tail are new.
 func tasksDailyBonus(sa *storedAuth) *tasksBonusResult {
 	res := &tasksBonusResult{}
 	add := func(format string, args ...any) {
 		res.Lines = append(res.Lines, fmt.Sprintf(format, args...))
 	}
+	// dead aborts every remaining growth-domain step (session rejected us).
+	dead := false
+	abortDead := func(err error) bool {
+		if !isGrowthSessionDead(err) {
+			return false
+		}
+		dead = true
+		add("登录态已失效（%s）——中止本轮后续步骤", err)
+		return true
+	}
 
 	// 1. Activity report: day-idempotent, unlocks first_buddy adoption.
 	cid := fmt.Sprintf("wb-%d", time.Now().UnixMilli())
 	if err := growthReportActivity(sa, cid, ""); err != nil {
-		add("活跃上报失败: %s", err)
+		if !abortDead(err) {
+			add("活跃上报失败: %s", err)
+		}
 	} else {
 		add("活跃上报 ok（点亮连登/解锁领养）")
 	}
 
 	// 2. Makeup card: only when yesterday is empty and cards exist.
-	if missed, err := growthYesterdayMissed(sa); err == nil && missed {
-		if st, err := growthStreak(sa); err == nil && st.MakeupCards.Balance > 0 {
-			yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-			if err := growthUseMakeupCard(sa, yesterday); err == nil {
-				add("补签 %s ok（保连登）", yesterday)
-			} else {
-				add("补签失败: %s", err)
+	if !dead {
+		if missed, err := growthYesterdayMissed(sa); err == nil && missed {
+			if st, err := growthStreak(sa); err == nil && st.MakeupCards.Balance > 0 {
+				yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+				if err := growthUseMakeupCard(sa, yesterday); err != nil {
+					if !abortDead(err) {
+						add("补签失败: %s", err)
+					}
+				} else {
+					add("补签 %s ok（保连登）", yesterday)
+				}
 			}
 		}
 	}
 
 	// 3. One-shot gifts (business error = already claimed → silent).
-	if credit, err := growthClaimGift(sa); err == nil && credit > 0 {
-		add("新手礼包 +%d", credit)
-	}
-	if credit, err := growthClaimCompensation(sa); err == nil && credit > 0 {
-		add("活动补偿 +%d", credit)
+	if !dead {
+		if credit, err := growthClaimGift(sa); err == nil && credit > 0 {
+			add("新手礼包 +%d", credit)
+		}
+		if credit, err := growthClaimCompensation(sa); err == nil && credit > 0 {
+			add("活动补偿 +%d", credit)
+		}
 	}
 
-	// 4. Accept pending tasks so upstream counts behavior progress.
-	if tasks, err := growthListTasks(sa); err == nil {
-		if codes := growthAcceptCandidates(tasks); len(codes) > 0 {
-			if err := growthAcceptTasks(sa, codes); err != nil {
-				add("接受任务失败(%d 个): %s", len(codes), err)
-			} else {
-				add("接受任务 %d 个", len(codes))
+	// 4. Accept pending tasks (five-state contract: only ""/"not_accepted"
+	// enroll) in batches, surfacing per-task results so rejections stay
+	// visible instead of masquerading as success.
+	if !dead {
+		if tasks, err := growthListTasks(sa); err == nil {
+			titles := map[string]string{}
+			for _, t := range tasks {
+				titles[t.TaskCode] = t.Title
 			}
+			codes := growthAcceptCandidates(tasks)
+			accepted, failed := 0, 0
+			for start := 0; start < len(codes) && !dead; start += growthAcceptBatchSize {
+				end := start + growthAcceptBatchSize
+				if end > len(codes) {
+					end = len(codes)
+				}
+				results, err := growthAcceptTasks(sa, codes[start:end])
+				if err != nil {
+					if abortDead(err) {
+						break
+					}
+					add("接受任务失败(%d 个): %s", len(codes[start:end]), err)
+					break
+				}
+				for _, r := range results {
+					if r.Status == "error" {
+						failed++
+						name := titles[r.TaskCode]
+						if name == "" {
+							name = r.TaskCode
+						}
+						add("接单失败「%s」: %s", name, r.Message)
+						continue
+					}
+					accepted++
+				}
+			}
+			if accepted > 0 || failed > 0 {
+				add("接受任务 %d 个（失败 %d）", accepted, failed)
+			}
+			// Claimables seen right now — re-checked in step 7 after the
+			// loop in case behavior during this run completed something.
+			for _, t := range growthClaimableTasks(tasks) {
+				add("待领取: %s（%d/%d）", t.TaskCode, t.Current, t.Target)
+			}
+		} else if !abortDead(err) {
+			add("任务列表拉取失败: %s", err)
 		}
-		// Pre-collect claimables seen right now — claimed again after the
-		// loop below in case behavior during this run completed something.
-		for _, t := range growthClaimableTasks(tasks) {
-			add("待领取: %s（%d/%d）", t.TaskCode, t.Current, t.Target)
-		}
-	} else {
-		add("任务列表拉取失败: %s", err)
 	}
 
 	// 5. Buddy travel state machine (single pass, no waiting/polling).
-	tasksTravelOnce(sa, add)
-
-	// 6. Streak tier redemption (locked tiers answer 403 → skip quietly).
-	if st, err := growthStreak(sa); err == nil {
-		statuses := map[string]string{
-			"7d":  st.RedemptionStatus.Tier7dStatus,
-			"14d": st.RedemptionStatus.Tier14dStatus,
-			"28d": st.RedemptionStatus.Tier28dStatus,
-		}
-		for _, tier := range st.RedemptionStatus.Tiers {
-			if statuses[tier.Tier] == "locked" || statuses[tier.Tier] == "claimed" {
-				continue
-			}
-			if err := growthRedeemTier(sa, tier.Tier); err != nil {
-				add("兑换 %s 失败: %s", tier.Tier, err)
-				continue
-			}
-			add("兑换 %s 档（+%d 分 +%d 能 卡×%d 抽×%d）",
-				tier.Tier, tier.Credit, tier.Energy, tier.Cards, tier.Chances)
-		}
-		add("连登 %d 天", st.Streak.Days)
-	} else {
-		add("连登状态拉取失败: %s", err)
+	if !dead {
+		tasksTravelOnce(sa, add)
 	}
 
-	// 7. Lottery: spend all chances.
-	if chances, err := growthLotteryChances(sa); err == nil && chances > 0 {
-		drawn := 0
-		for i := 0; i < chances; i++ {
-			prize, err := growthLotteryDraw(sa)
-			if err != nil {
-				add("抽奖失败(第%d次): %s", i+1, err)
-				break
+	// 6. Streak tier redemption (2026-09: tier id form, granted fields,
+	// locked-tier 403 = expected skip, unknown-tier 400 = legacy day retry).
+	if !dead {
+		if st, err := growthStreak(sa); err == nil {
+			statuses := map[string]string{
+				"7d":  st.RedemptionStatus.Tier7dStatus,
+				"14d": st.RedemptionStatus.Tier14dStatus,
+				"28d": st.RedemptionStatus.Tier28dStatus,
 			}
-			drawn++
-			add("抽奖#%d: %s", drawn, compactGrowthJSON(prize))
-		}
-	}
-
-	// 8. Claim rewards for every claimable task (list re-fetched: the loop
-	// above may have pushed progress past the target).
-	if tasks, err := growthListTasks(sa); err == nil {
-		for _, t := range growthClaimableTasks(tasks) {
-			credit, energy, err := growthClaimReward(sa, t.TaskCode)
-			switch {
-			case err != nil:
-				add("领取 %s 失败: %s", t.TaskCode, err)
-			case credit == 0 && energy == 0:
-				add("领取 %s: 已领过", t.TaskCode)
-			default:
-				add("领取 %s: +%d 分 +%d 能", t.TaskCode, credit, energy)
+			for _, tier := range st.RedemptionStatus.Tiers {
+				if statuses[tier.Tier] == "locked" || statuses[tier.Tier] == "claimed" {
+					continue
+				}
+				credit, energy, err := growthRedeemTier(sa, tier.Tier)
+				if err != nil {
+					if abortDead(err) {
+						break
+					}
+					if isGrowthTierLocked(err) {
+						add("兑换 %s 未解锁（连登天数不足）", tier.Tier)
+					} else {
+						add("兑换 %s 失败: %s", tier.Tier, err)
+					}
+					continue
+				}
+				if credit > 0 || energy > 0 {
+					add("兑换 %s 档（+%d 分 +%d 能）", tier.Tier, credit, energy)
+				} else {
+					// granted fields absent on this shape — snapshot values
+					add("兑换 %s 档（+%d 分 +%d 能 卡×%d 抽×%d）",
+						tier.Tier, tier.Credit, tier.Energy, tier.Cards, tier.Chances)
+				}
 			}
+			if !dead {
+				add("连登 %d 天", st.Streak.Days)
+			}
+		} else if !abortDead(err) {
+			add("连登状态拉取失败: %s", err)
 		}
 	}
 
-	// 9. School-season activity (开学季, time-boxed upstream window). Silent
+	// 7. Claim rewards BEFORE the lottery: task rewards often grant lottery
+	// chances — claiming first makes them spendable this run.
+	if !dead {
+		if tasks, err := growthListTasks(sa); err == nil {
+		claimLoop:
+			for _, t := range growthClaimableTasks(tasks) {
+				credit, energy, err := growthClaimReward(sa, t.TaskCode)
+				switch {
+				case err != nil:
+					if abortDead(err) {
+						break claimLoop
+					}
+					add("领取 %s 失败: %s", t.TaskCode, err)
+				case credit == 0 && energy == 0:
+					add("领取 %s: 已领过", t.TaskCode)
+				default:
+					add("领取 %s: +%d 分 +%d 能", t.TaskCode, credit, energy)
+				}
+			}
+		} else if !abortDead(err) {
+			add("任务列表拉取失败: %s", err)
+		}
+	}
+
+	// 8. Lottery: spend all chances.
+	if !dead {
+		if chances, err := growthLotteryChances(sa); err == nil && chances > 0 {
+			drawn := 0
+			for i := 0; i < chances; i++ {
+				prize, err := growthLotteryDraw(sa)
+				if err != nil {
+					if abortDead(err) {
+						break
+					}
+					add("抽奖失败(第%d次): %s", i+1, err)
+					break
+				}
+				drawn++
+				add("抽奖#%d: %s", drawn, compactGrowthJSON(prize))
+			}
+		} else if err != nil && !abortDead(err) {
+			add("抽奖机会查询失败: %s", err)
+		}
+	}
+
+	// 9. Buddy box: the energy sink — energy has no other spend outlet, so
+	// unspent energy just sits there. One open call per run (runner parity:
+	// min(affordable, max_open), the rest waits for the next run).
+	if !dead {
+		if affordable, _, maxOpen, err := growthBuddyQuota(sa); err == nil && affordable > 0 {
+			count := affordable
+			if count > maxOpen {
+				count = maxOpen
+			}
+			if _, err := growthBuddyOpen(sa, count); err != nil {
+				if !abortDead(err) {
+					add("能量盲盒失败: %s", err)
+				}
+			} else {
+				add("能量盲盒 ×%d", count)
+			}
+		}
+	}
+
+	// 10. Energy balance tail (display-only; failures never surface).
+	if !dead {
+		if bal, err := growthEnergyBalance(sa); err == nil && bal > 0 {
+			add("能量余额 %d", bal)
+		}
+	}
+
+	// 11. School-season activity (开学季, time-boxed upstream window). Silent
 	// when the activity is not running — post-window runs are unchanged.
-	tasksSchoolOnce(sa, add)
+	if !dead {
+		tasksSchoolOnce(sa, add)
+	}
 
 	res.Success = true
 	return res
