@@ -259,6 +259,10 @@ func TestDiscoverToInfoIntlAliasAnnotation(t *testing.T) {
 		"auto-chat":      "Auto Chat（上游别名）",
 		"balanced-model": "Balanced Model（上游别名）",
 		"default-model":  "Default Model（上游别名）",
+		// v0.9.25 field report: Intl discovery surfaced three more tier ids.
+		"primary-model": "Primary Model（上游别名）",
+		"deep-model":    "Deep Model（上游别名）",
+		"enhance-1.0":   "Enhance 1.0（上游别名）",
 	} {
 		if got := discoverToInfo(discoveredModel{ID: id}).Name; got != want {
 			t.Errorf("discoverToInfo(%q).Name = %q, want %q", id, got, want)

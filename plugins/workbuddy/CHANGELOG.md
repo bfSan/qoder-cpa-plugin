@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.9.25
+
+### check-in status stability + Intl tier-alias display evidence (repo v0.12.70)
+
+Three field reports from 2026-09-20, all fixed:
+
+**已签到显示未签到 (check-in status flapping).** Credentials that already
+checked in sometimes showed 未签到 in the panel. Root cause:
+`fetchCheckinStatus` took the FIRST endpoint that answered
+(`/v2/billing/meter/checkin-activity-status`), but that payload
+intermittently arrives activity-shaped — `today_checked_in` absent
+entirely — and the parser treated the missing field as `false`, which then
+poisoned the account cache for a full TTL window (45 s) and every panel
+refresh within it. Now a payload without today-evidence (no
+`today_checked_in`-style key AND no calendar) is treated as ambiguous: the
+second endpoint (`checkin-status`) is probed and both views OR-merge —
+`true` can never be downgraded. A payload WITH explicit today evidence
+returns immediately, so the common case stays a single upstream call. As a
+belt-and-braces cross-check, when the payload carries `checkin_dates`,
+today's Asia/Shanghai date in the calendar implies checked-in regardless of
+the boolean field.
+
+**Intl tier-alias display (国际版模型仍然不对).** The user panel now surfaces
+SEVEN opaque codebuddy.ai tier ids: the four known aliases
+(fast-model / auto-chat / balanced-model / default-model) plus
+primary-model / deep-model / enhance-1.0 — all annotated
+"（上游别名）" via `discoverToInfo`; genuine ids (o4-mini) stay untouched.
+Beyond naming, the tier→real-model mapping that 0.9.19 concluded
+"unknowable without upstream publishing it" is now LEARNED FROM EVIDENCE:
+every chat response's `model` echo is captured (SSE collector +
+folded-completion path) and, when the request model is a tier alias and the
+echo names a concrete model, the alias→real pair is recorded
+(`noteLearnedRealModel`), logged, overlaid onto every served model list as
+"Fast Model（上游别名）·实测 glm-x", and exposed through the dashboard
+models diagnostics row (`learned` map). The 0.9.24 growth-task chats seed
+the mapping automatically.
+
+**panel diagnostics.** `realmModelsState` gains `learned` (alias→real map);
+the panel appends "· 实测 fast-model→glm-x" to the model-source row.
+
+### 方言说明
+
+`fetchCheckinStatus` 双端点循环从"首个成功即停"改为"有今日证据才停"；
+`checkinSummary.mergeOR` 单向合并（false 永不覆写 true）。签到日期交叉
+验证用固定 Asia/Shanghai 时区（cstZone），不吃宿主进程时区。
+
 ## 0.9.24
 
 ### real-conversation tasks: the remaining 6 growth tasks automated end-to-end (repo v0.12.69)

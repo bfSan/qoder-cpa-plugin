@@ -297,6 +297,10 @@ function markCheckinDone(btn){
 }
 function fmtRemain(c){if(!c)return "-";const t=(c.total_remain||0)+(c.total_used||0);return c.total_remain+" 余 / "+t+" 总"}
 function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+// asText: render any backend field as displayable text. Backend maps
+// (error/message objects) must never reach "a"+b concatenation — that is
+// exactly how "u345ee231：[object Object]" toasts happened (v0.8.15).
+function asText(v){if(v==null)return "";if(typeof v==="string")return v;if(typeof v==="object"){try{return JSON.stringify(v)}catch(e){return String(v)}}return String(v)}
 function progressHTML(c){
   // total uses size when known; remain = spendable, used = cycle spend.
   // Check-in adds packs → size/remain go UP (grant). Chat spend → used goes UP, remain DOWN.
@@ -654,21 +658,21 @@ async function load(force, btn){
 }
 function checkinResultToast(res, who){
   const name=res.nickname||who||"账号";
-  if(res.error){toast(name+"：签到失败","err",res.error);return}
-  if(res.reason==="global"||(/国际版|不支持/.test(String(res.message||"")))){
-    toast(name+"：国际版无需签到","warn",res.message||"请用领取专家加油包");return;
+  if(res.error){toast(name+"：签到失败","err",asText(res.error));return}
+  if(res.reason==="global"||(/国际版|不支持/.test(asText(res.message)))){
+    toast(name+"：国际版无需签到","warn",asText(res.message)||"请用领取专家加油包");return;
   }
-  if(res.reason==="already"||(res.skipped&&/already|已签|今日/.test(String(res.message||"")))){
-    toast(name+"：今日已签到","ok",res.message||"");return;
+  if(res.reason==="already"||(res.skipped&&/already|已签|今日/.test(asText(res.message)))){
+    toast(name+"：今日已签到","ok",asText(res.message));return;
   }
   if(res.success){toast(name+"：签到成功","ok","+"+(res.credit??res.daily_credit??"")+" 积分 · 连续 "+(res.streak_days??"?")+" 天");return}
-  toast(name+"："+(res.message||"未知结果"),"warn");
+  toast(name+"："+(asText(res.message)||"未知结果"),"warn");
 }
 function isCheckinDoneResult(res){
   if(!res||res.error) return false;
   if(res.reason==="global") return false;
   if(res.success) return true;
-  const msg=String(res.message||"");
+  const msg=asText(res.message);
   // already checked in today (backend) — treat as done, not failure
   if(/already|已签|今日/.test(msg) && !/国际版|不支持/.test(msg)) return true;
   return false;
@@ -703,9 +707,9 @@ async function claimPro(idx, btn){
   try{
     const d=await api("/claim-pro",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
     const name=d.nickname||"账号";
-    if(d.error){toast(name+"：领取失败","err",d.error);busy(btn,false);return}
+    if(d.error){toast(name+"：领取失败","err",asText(d.error));busy(btn,false);return}
     if(d.success){toast(name+"：领取成功","ok","Pro 升级包已领取"+(d.credits?(" · 积分 "+(d.credits.total_remain||0)):""))}
-    else{toast(name+"："+(d.message||"不可领取"),"warn")}
+    else{toast(name+"："+(asText(d.message)||"不可领取"),"warn")}
     await load(true);
   }catch(e){
     toast("领取请求失败","err",e.message);
@@ -786,7 +790,7 @@ async function checkinAll(btn){
     const detail=detailParts.join(" · ");
     if(d.error){toast("批量签到失败","err",d.error)}
     else if(fail){
-      const errDetail=rs.filter(x=>x.error).map(x=>(x.nickname||"")+": "+x.error).join("；");
+      const errDetail=rs.filter(x=>x.error).map(x=>(x.nickname||"")+": "+asText(x.error)).join("；");
       toast("批量签到："+ok+" 成功 / "+fail+" 失败"+(already?" / "+already+" 已签":""),"err",errDetail||detail);
     }else if(ok){
       toast("批量签到："+ok+" 成功"+(already?" / "+already+" 今日已签":""),"ok",detail);

@@ -189,6 +189,14 @@ func extractAccountUID(raw []byte) string {
 // failures — the previously SILENT path that made realms look stuck on a
 // 1-model static catalog — now log a throttled reason line.
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
+	list := fetchDynamicModelsFromStorageInner(storageJSON)
+	// v0.9.25: overlay runtime-learned alias→real display names on every
+	// branch (pin / static / cache-hit / fresh discovery) — a mapping learned
+	// mid-TTL must reach the host without waiting for cache expiry.
+	return applyLearnedAliasNames(list)
+}
+
+func fetchDynamicModelsFromStorageInner(storageJSON []byte) []pluginapi.ModelInfo {
 	accessToken := ""
 	if len(storageJSON) > 0 {
 		if tok, ok := extractAccessToken(storageJSON); ok {
@@ -225,13 +233,17 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 
 // realmModelsState is the dashboard-facing snapshot of one realm's model
 // source — the answer to "why does this realm list these models".
+// v0.9.25: Learned carries the alias→real model ids observed in chat
+// response echoes, so the panel can show which concrete model backs each
+// Intl tier alias.
 type realmModelsState struct {
-	Source     string `json:"source"`
-	Count      int    `json:"count"`
-	FetchedAt  string `json:"fetched_at,omitempty"`
-	AgeSeconds int64  `json:"age_seconds,omitempty"`
-	LastError  string `json:"last_error,omitempty"`
-	LastErrorA string `json:"last_error_at,omitempty"`
+	Source     string            `json:"source"`
+	Count      int               `json:"count"`
+	FetchedAt  string            `json:"fetched_at,omitempty"`
+	AgeSeconds int64             `json:"age_seconds,omitempty"`
+	LastError  string            `json:"last_error,omitempty"`
+	LastErrorA string            `json:"last_error_at,omitempty"`
+	Learned    map[string]string `json:"learned,omitempty"`
 }
 
 // noteRealmSource records that realm's advertised list came from a non-
@@ -284,6 +296,7 @@ func realmModelStateFor(realm string) *realmModelsState {
 		Source:    entry.source,
 		Count:     len(entry.models),
 		LastError: entry.lastErr,
+		Learned:   learnedRealSnapshot(),
 	}
 	if st.Count == 0 {
 		st.Count = entry.srcCount
@@ -874,14 +887,96 @@ func modelsFromDiscovery(dataModels []discoveredModel, cliModelIDs []string) []p
 // but it is a product-tier label, not a model-family name, and upstream does
 // not publish which real model backs each tier (the limited-free "deepseek
 // flash" of 2026-09, if exposed on Intl, hides behind one of these).
-// Field report 2026-09-20: fast-model / auto-chat / balanced-model /
-// default-model all surface as bare ids; o4-mini is a genuine model id and
-// stays untouched.
+// Field report 2026-09-20 (initial): fast-model / auto-chat /
+// balanced-model / default-model all surface as bare ids; o4-mini is a
+// genuine model id and stays untouched.
+// Field report 2026-09-20 (v0.9.25 user panel): the Intl discovery now also
+// returns primary-model / deep-model / enhance-1.0 — same opaque tier-alias
+// family, same annotation treatment. Any id NOT in this map is assumed real
+// and never annotated.
 var intlAliasDisplayNames = map[string]string{
 	"fast-model":     "Fast Model（上游别名）",
 	"auto-chat":      "Auto Chat（上游别名）",
 	"balanced-model": "Balanced Model（上游别名）",
 	"default-model":  "Default Model（上游别名）",
+	"primary-model":  "Primary Model（上游别名）",
+	"deep-model":     "Deep Model（上游别名）",
+	"enhance-1.0":    "Enhance 1.0（上游别名）",
+}
+
+// intlLearnedReal maps an Intl tier alias to the REAL upstream model id
+// observed in chat-completion responses (the `model` echo field). The alias
+// is what upstream routable-wise accepts, but the response echo names the
+// concrete model that actually served the request — evidence no static table
+// could ever have (v0.9.19 concluded "upstream does not publish which real
+// model backs each tier"; learning it from live traffic closes that gap).
+// Populated by noteLearnedRealModel from the executor's response paths.
+var intlLearnedReal sync.Map // alias (lowercase) -> string real model id
+
+// noteLearnedRealModel records alias→real evidence from one completed chat
+// response. Guards: only tier aliases participate; a missing/self/alias
+// echo carries no information. Safe for concurrent executor calls.
+func noteLearnedRealModel(requestedModel, respModel string) {
+	alias := strings.ToLower(strings.TrimSpace(requestedModel))
+	real := strings.TrimSpace(respModel)
+	if _, ok := intlAliasDisplayNames[alias]; !ok {
+		return // not a tier alias — nothing to learn
+	}
+	if real == "" || strings.EqualFold(real, alias) {
+		return // echo missing or self-referential
+	}
+	if _, ok := intlAliasDisplayNames[strings.ToLower(real)]; ok {
+		return // alias echoing another alias — still no real id
+	}
+	if prev, ok := intlLearnedReal.Load(alias); ok && prev.(string) == real {
+		return // already learned
+	}
+	intlLearnedReal.Store(alias, real)
+	log.Printf("models: intl alias %q served by upstream model %q (learned from chat response echo)", alias, real)
+}
+
+// learnedRealModel returns the real model id learned for an alias, or "".
+func learnedRealModel(alias string) string {
+	if v, ok := intlLearnedReal.Load(strings.ToLower(strings.TrimSpace(alias))); ok {
+		return v.(string)
+	}
+	return ""
+}
+
+// learnedRealSnapshot copies the learned alias→real map (diagnostics only).
+func learnedRealSnapshot() map[string]string {
+	out := map[string]string{}
+	intlLearnedReal.Range(func(k, v any) bool {
+		out[k.(string)] = v.(string)
+		return true
+	})
+	return out
+}
+
+// applyLearnedAliasNames overlays runtime-learned real model ids onto a
+// model list's display names: "Fast Model（上游别名）" becomes
+// "Fast Model（上游别名·实测 glm-x）" once a response echo proved the backing
+// model. Always copies — callers pass cache-owned slices. Applied to every
+// list the plugin serves (pin/static/discovery/cache-hit) so a learned
+// mapping survives the discovery cache TTL.
+func applyLearnedAliasNames(in []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]pluginapi.ModelInfo, len(in))
+	for i, m := range in {
+		if real := learnedRealModel(m.ID); real != "" {
+			base := m.Name
+			if base == "" || base == m.ID {
+				base = m.ID
+			}
+			if !strings.Contains(base, "实测 ") {
+				m.Name = base + "·实测 " + real
+			}
+		}
+		out[i] = m
+	}
+	return out
 }
 
 func discoverToInfo(m discoveredModel) pluginapi.ModelInfo {

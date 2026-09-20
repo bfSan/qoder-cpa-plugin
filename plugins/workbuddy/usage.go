@@ -221,10 +221,26 @@ func usageDetailFromCompletion(payload []byte) usage.Detail {
 	return usageDetailFromMap(m)
 }
 
+// modelFromCompletionPayload extracts the echoed "model" field from a folded
+// chat.completion payload (empty when absent). Feeds noteLearnedRealModel —
+// the concrete upstream model that served a tier-alias request.
+func modelFromCompletionPayload(payload []byte) string {
+	var obj map[string]any
+	if json.Unmarshal(payload, &obj) != nil {
+		return ""
+	}
+	s, _ := obj["model"].(string)
+	return s
+}
+
 // sseUsageCollector scans upstream SSE chunks and keeps the last "usage"
 // object seen (CodeBuddy emits it on the terminal chunk).
+// v0.9.25: also keeps the last non-empty "model" echo — the concrete upstream
+// model that served the request — so tier aliases can learn their real
+// backing model (noteLearnedRealModel, see models.go).
 type sseUsageCollector struct {
-	last map[string]any
+	last      map[string]any
+	respModel string
 }
 
 func (c *sseUsageCollector) feed(rawJSON string) {
@@ -234,6 +250,9 @@ func (c *sseUsageCollector) feed(rawJSON string) {
 	}
 	if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
 		c.last = u
+	}
+	if v, ok := chunk["model"].(string); ok && v != "" {
+		c.respModel = v
 	}
 }
 

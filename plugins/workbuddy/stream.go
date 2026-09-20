@@ -130,6 +130,9 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
+	// v0.9.25: learn the real model behind a tier alias from the response
+	// echo (Intl only — no-op for every other id).
+	noteLearnedRealModel(upstreamModel, collector.respModel)
 	invalidateAccountCredits(authID, authUID)
 }
 

@@ -276,26 +276,22 @@ func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, er
 	return env.Data, nil
 }
 
-func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
-	var data json.RawMessage
-	var lastErr error
-	for _, path := range []string{"/v2/billing/meter/checkin-activity-status", "/v2/billing/meter/checkin-status"} {
-		d, err := billingCall(sa, path, nil)
-		if err == nil {
-			data = d
-			lastErr = nil
-			break
-		}
-		lastErr = err
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
+// cstZone is China Standard Time. Check-in calendars the upstream reports are
+// CN-local calendar days, so "does checkin_dates contain today" must be
+// evaluated in Asia/Shanghai — not in the host process's timezone.
+var cstZone = time.FixedZone("CST", 8*60*60)
+
+// parseCheckinStatusPayload decodes one check-in status body. hasTodayKey
+// reports whether the payload explicitly carried a today_checked_in-style
+// field — activity-shaped payloads (checkin-activity-status) intermittently
+// omit it entirely, and a missing field must never be mistaken for "not
+// checked in" (that conflation was the 2026-09-20 "已签到显示未签到" bug).
+func parseCheckinStatusPayload(data json.RawMessage) (sum *checkinSummary, hasTodayKey bool, err error) {
 	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
+	if err = json.Unmarshal(data, &m); err != nil {
+		return nil, false, err
 	}
-	sum := &checkinSummary{
+	sum = &checkinSummary{
 		Active:          jsonBool(m, "active", "Active"),
 		TodayCheckedIn:  jsonBool(m, "today_checked_in", "todayCheckedIn"),
 		StreakDays:      jsonI64(m, "streak_days", "streakDays"),
@@ -319,7 +315,98 @@ func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 			}
 		}
 	}
-	return sum, nil
+	_, hasTodayKey = m["today_checked_in"]
+	if !hasTodayKey {
+		_, hasTodayKey = m["todayCheckedIn"]
+	}
+	// Cross-check: when the payload carries the check-in calendar, "today is
+	// in it" outranks an absent/false today_checked_in field.
+	today := time.Now().In(cstZone).Format("2006-01-02")
+	for _, d := range sum.CheckinDates {
+		if strings.HasPrefix(d, today) {
+			sum.TodayCheckedIn = true
+			break
+		}
+	}
+	return sum, hasTodayKey, nil
+}
+
+// mergeOR folds a second endpoint's view into the receiver. Booleans OR —
+// the failure mode under fix is a false "not checked in", never a false
+// "already" — while scalar/summary fields fill only when the receiver has
+// nothing (first endpoint's richer view wins).
+func (s *checkinSummary) mergeOR(other *checkinSummary) {
+	if s == nil || other == nil {
+		return
+	}
+	if other.TodayCheckedIn {
+		s.TodayCheckedIn = true
+	}
+	if other.Active {
+		s.Active = true
+	}
+	if s.StreakDays == 0 {
+		s.StreakDays = other.StreakDays
+	}
+	if s.DailyCredit == 0 {
+		s.DailyCredit = other.DailyCredit
+	}
+	if s.TodayCredit == 0 {
+		s.TodayCredit = other.TodayCredit
+	}
+	if s.TotalCredits == 0 {
+		s.TotalCredits = other.TotalCredits
+	}
+	if s.WeekCheckinDays == 0 {
+		s.WeekCheckinDays = other.WeekCheckinDays
+	}
+	if s.ActivityName == "" {
+		s.ActivityName = other.ActivityName
+	}
+	if s.Season == 0 {
+		s.Season = other.Season
+	}
+	if len(s.CheckinDates) == 0 {
+		s.CheckinDates = other.CheckinDates
+	}
+}
+
+// fetchCheckinStatus resolves today's check-in state. 2026-09-20 field
+// report: credentials that already checked in sometimes showed 未签到 in the
+// panel. Root cause: the first endpoint's payload intermittently lacks
+// today_checked_in (activity-shaped object); a missing field parsed as
+// false, and that false poisoned the cache for a full TTL window. Now: a
+// payload WITHOUT today evidence is treated as ambiguous — the second
+// endpoint is consulted and both views OR-merge; a payload WITH evidence
+// returns immediately (single upstream call in the common case, unchanged).
+func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
+	var best *checkinSummary
+	var lastErr error
+	for _, path := range []string{"/v2/billing/meter/checkin-activity-status", "/v2/billing/meter/checkin-status"} {
+		data, err := billingCall(sa, path, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		sum, hasTodayKey, perr := parseCheckinStatusPayload(data)
+		if perr != nil {
+			lastErr = perr
+			continue
+		}
+		if best == nil {
+			best = sum
+		} else {
+			best.mergeOR(sum)
+		}
+		if hasTodayKey || sum.TodayCheckedIn {
+			return best, nil // authoritative today evidence — stop probing
+		}
+		// Ambiguous payload: probe the other endpoint before answering.
+	}
+	if best != nil {
+		return best, nil
+	}
+	return nil, lastErr
 }
 
 // packageRemainUsed picks current-cycle remain/used/size for one package.

@@ -471,6 +471,11 @@ function modelsHTML(m){
   else if(src.startsWith("pin")) txt=`配置钉住 ${m.count||0} 个模型（models_cn/models_global/models_intl）`;
   else if(src.startsWith("static")) txt=`静态兜底 ${m.count||0} 个模型${m.last_error?` · 发现失败: ${m.last_error}`:""}`;
   else txt="等待首次模型查询";
+  // v0.9.25: runtime-learned alias→real model ids (Intl tier aliases) — the
+  // answer to "which concrete model hides behind fast-model" etc.
+  const learned=m.learned||null;
+  const learnedKeys=learned?Object.keys(learned):[];
+  if(learnedKeys.length) txt+=` · 实测 `+learnedKeys.sort().map(k=>`${k}→${learned[k]}`).join(", ");
   const errTip=m.last_error?` title="${esc(String(m.last_error))}"`:"";
   return `<div class="row"><span class="k">模型</span><span class="v${m.last_error?" err":""}"${errTip}>${esc(txt)}</span></div>`;
 }

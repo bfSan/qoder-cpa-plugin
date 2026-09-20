@@ -341,7 +341,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.24"
+var version = "0.9.25"
 
 func wbRegistration() registration {
 	return registration{
@@ -804,6 +804,8 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
+	// v0.9.25: learn the real model behind a tier alias from the response echo.
+	noteLearnedRealModel(upstreamModel, modelFromCompletionPayload(completion))
 	invalidateAccountCredits(req.AuthID, authUID)
 	return okEnvelope(pluginapi.ExecutorResponse{Payload: completion})
 }
@@ -850,6 +852,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 			return nil, errCollect
 		}
 		publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), false, 0, "")
+		noteLearnedRealModel(upstreamModel, collector.respModel)
 		invalidateAccountCredits(req.AuthID, authUID)
 		return okEnvelope(streamResponse{Headers: headers, Chunks: chunks})
 	}
