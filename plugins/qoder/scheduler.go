@@ -1,8 +1,8 @@
-// scheduler.go implements the CPA scheduler.pick capability for qoderwork.
+// scheduler.go implements the CPA scheduler.pick capability for qoder.
 //
 // Routing uses the panel-selected active account (region from that card's
 // domain). When the selection is exhausted/disabled/missing, randomly switch
-// to another non-exhausted qoderwork candidate. Non-qoderwork candidates are
+// to another non-exhausted qoder candidate. Non-qoder candidates are
 // always deferred so the built-in scheduler handles them.
 package main
 
@@ -50,8 +50,11 @@ func loadedSchedulerMode() string {
 // (Handled: false) so the built-in scheduler handles them.
 //
 // scheduler_mode:
-//   - "off"     → plugin does NOT handle routing; defer everything to built-in.
-//   - "credits" → plugin picks via panel-selected active account (sticky, with
+//   - "off"     -> defer normal routing to built-in. The plugin still handles
+//     one narrow case: a qoder auth is cooling for the requested model and
+//     another qoder auth is available. This keeps model-scoped cooldowns
+//     effective without taking over provider selection.
+//   - "credits" -> plugin picks via panel-selected active account (sticky, with
 //     fallback when that account becomes exhausted/disabled).
 //
 // Default is off (see schedulerMode init). Users opting into the plugin's
@@ -60,12 +63,6 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	var req pluginapi.SchedulerPickRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
-	}
-
-	// v0.6.31: actually honor the scheduler_mode toggle. Previously the config
-	// was parsed but never read here, so "off" silently behaved like "credits".
-	if loadedSchedulerMode() != schedulerModeCredits {
-		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
 	// Collect qoderwork candidates only.
@@ -82,6 +79,39 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	if len(wbCandidates) == 0 {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
+
+	// Per-(auth, model) cooldown. Qoder failures are frequently model-scoped:
+	// one auth's qwen model can fail while the same auth's other models are
+	// healthy. Filter only the cooling pair and leave the routing policy
+	// otherwise untouched.
+	reqModel := requestModelForCooldown(req.Model, req.Options.Metadata)
+	var availabilityCandidates []pluginapi.SchedulerAuthCandidate
+	var coolingCandidates []pluginapi.SchedulerAuthCandidate
+	for _, c := range wbCandidates {
+		if reqModel != "" && modelIsCooling(c.ID, reqModel) {
+			coolingCandidates = append(coolingCandidates, c)
+			continue
+		}
+		availabilityCandidates = append(availabilityCandidates, c)
+	}
+	if len(coolingCandidates) > 0 && loadedSchedulerMode() != schedulerModeCredits {
+		// In off mode the host normally owns routing. Intervene only for a
+		// single-provider qoder route where filtering a cooling pair leaves a
+		// healthy qoder candidate. If every qoder candidate is cooling, defer
+		// so the host produces its normal model_cooldown response.
+		if !strings.EqualFold(strings.TrimSpace(req.Provider), providerName) ||
+			len(availabilityCandidates) == 0 {
+			return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+		}
+	}
+	if loadedSchedulerMode() == schedulerModeCredits &&
+		len(availabilityCandidates) == 0 && len(coolingCandidates) > 0 {
+		// credits mode is explicitly plugin-owned. Keep the previous
+		// fail-open behavior so a stale cooldown cannot brick all routing;
+		// the failure path refreshes the entry if the upstream is still down.
+		availabilityCandidates = coolingCandidates
+	}
+	wbCandidates = availabilityCandidates
 
 	// Build thin view for active-auth picker.
 	cands := make([]activeAuthCandidate, 0, len(wbCandidates))

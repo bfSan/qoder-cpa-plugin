@@ -74,7 +74,7 @@ func streamHeaders() http.Header {
 // the outbound call and host transport policy applies. The host bridge emits
 // arbitrary 32KB chunks, so we adapt to io.Reader and keep the bufio.Scanner
 // SSE line framing unchanged.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string) {
+func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -100,6 +100,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
+		recordUpstreamFailure(authID, cooldownModel, statusCode, string(errPayload))
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, string(errPayload))
 		}
@@ -107,6 +108,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		return
 	}
 	collector := &sseUsageCollector{}
+	emitted := false
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -139,12 +141,21 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
 			return
 		}
+		emitted = true
 	}
 	// A mid-stream read failure means the client received a truncated stream:
 	// surface it as an error frame and record the attempt as failed.
 	if err := scanner.Err(); err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
+		recordUpstreamFailure(authID, cooldownModel, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		return
+	}
+	if !emitted {
+		errEmpty := fmt.Errorf("empty_stream: upstream stream closed before first payload")
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, errEmpty.Error())
+		recordUpstreamFailure(authID, cooldownModel, 0, errEmpty.Error())
+		streamEmitError(streamID, errEmpty.Error())
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -205,6 +216,9 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 	}
 	if err := scanner.Err(); err != nil {
 		return chunks, 0, fmt.Errorf("upstream stream read error: %w", err)
+	}
+	if len(chunks) == 0 {
+		return nil, 0, fmt.Errorf("empty_stream: upstream stream closed before first payload")
 	}
 	return chunks, 0, nil
 }

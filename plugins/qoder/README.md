@@ -6,17 +6,16 @@
 
 ## 功能
 
-## 功能
-
 | 能力 | 说明 |
 |---|---|
-| **双登录方式** | ① OAuth 设备授权（PKCE，浏览器授权，dt- 30 天 + drt- 1 年自动旋转）② PAT 导入（pt-，长期有效兜底）——两家族可共存于同一 auth 文件 |
+| **双区域 + 双登录方式** | OAuth 面板可分别登录 CN（qoder.com.cn）与 Intl（qoder.com）；也支持 PAT 导入（pt-，长期有效兜底）。每个账号按 auth 文件内的 `region` 独立路由 |
 | **登录自动领包** | OAuth 登录成功后自动判断并领取一次性 Pro 升级包（eligibility → claim） |
 | **COSY 推理** | RSA 包 AES 会话密钥 + MD5 请求签名，按账号区域对接 gateway.qoder.com.cn（CN）/ api3.qoder.sh（Intl）SSE 流式 |
 | **动态模型** | COSY 拉取 `/algo/api/v2/model/list`（chat scene），10 静态模型兜底 |
 | **大上下文** | 客户端自带 system 时自动模板瘦身（省 ~10K token/请求）+ 消息逐字透传（tool_calls/多模态 content 保真）+ 客户端 tools 直通；上游判输入过大（413/过长文案）时给出明确指引，与账号积分问题严格区分 |
 | **每日签到** | 面板手动签到（单账号/批量）+ 09:00/21:00 定时自动签到，签到后返回最新积分快照 |
-| **积分面板** | 账号卡片：昵称/积分/计划/签到状态/操作（签到/刷新/选用） |
+| **积分面板** | 账号卡片：昵称/积分/计划/签到状态/操作（签到/刷新/选用），并展示每个 `(账号, 模型)` 的冷却状态 |
+| **模型级冷却** | 上游 429 或空流失败只冷却失败的 `(auth, model)`，同账号的其他模型继续可用；面板可单独解除 |
 | **token 保活** | 22:00 定时刷新；按 token 前缀路由（drt- → deviceToken/refresh，jrt- → jobToken/refresh），PAT 永不劫持 OAuth 刷新 |
 | **auth 隔离** | 文件名前缀 `qoder-` 过滤（含收养的 `qoder-cn-`/`qoder-intl-` 旧文件），与 workbuddy 等其他插件互不干扰 |
 

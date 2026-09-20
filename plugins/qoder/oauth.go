@@ -261,16 +261,183 @@ func makePKCE() (string, string) {
 
 // handleStartLogin implements AuthProvider.StartLogin: build the device
 // authorization URL and stash the PKCE verifier under the returned state.
+//
+// The effective region is, in order:
+//  1. an explicit region=cn|intl query parameter supplied by the caller,
+//  2. the plugin's login_region configuration,
+//  3. cn.
+//
+// The host forwards the query string of /v0/management/qoder-auth-url as
+// request metadata, which is how the Qoder panel exposes separate CN and Intl
+// login actions without forking the plugin into two OAuth entries.
 func handleStartLogin(raw []byte) ([]byte, error) {
-	return startLoginWithRegion(raw, loadedLoginRegion())
+	region := loadedLoginRegion()
+	var req pluginapi.AuthLoginStartRequest
+	if err := json.Unmarshal(raw, &req); err == nil {
+		if requested := requestedLoginRegion(req.Metadata); requested != "" {
+			region = requested
+		}
+	}
+	return startLoginWithRegion(raw, region)
 }
 
-// startLoginWithRegion starts a device-flow login pinned to region. The host
-// RPC entry (handleStartLogin) passes the configured login_region — the
-// OAuth entry point stays single per plugin; which realm it targets is
-// chosen in the plugin config (login_region dropdown) and is STICKY
-// (v0.12.10).
+// handleManagementOAuthStart starts a device-flow login for the panel without
+// going through the host's generic /v0/management/qoder-auth-url route.
+//
+// The host's ServePluginAuthURL does not forward the HTTP query string into
+// StartLogin's Metadata, so a caller cannot reliably select CN vs Intl there.
+// The panel therefore calls this management route, which reads region from the
+// request body/query and stores it in the plugin-side login state.
+func handleManagementOAuthStart(req pluginapi.ManagementRequest) map[string]any {
+	region := regionCN
+	if raw := strings.TrimSpace(req.Query.Get("region")); raw != "" {
+		region = normalizeRegion(raw)
+	}
+	if len(req.Body) > 0 {
+		var body struct {
+			Region string `json:"region"`
+		}
+		if err := json.Unmarshal(req.Body, &body); err == nil && strings.TrimSpace(body.Region) != "" {
+			region = normalizeRegion(body.Region)
+		}
+	}
+	raw, err := startLoginWithRegion(nil, region)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		msg := "failed to start login"
+		if env.Error != nil && env.Error.Message != "" {
+			msg = env.Error.Message
+		}
+		return map[string]any{"error": msg}
+	}
+	var start pluginapi.AuthLoginStartResponse
+	if err := json.Unmarshal(env.Result, &start); err != nil {
+		return map[string]any{"error": "failed to decode login response"}
+	}
+	loginURL, err := url.Parse(start.URL)
+	if err != nil {
+		return map[string]any{"error": "failed to parse login URL"}
+	}
+	params := make(map[string]string, len(loginURL.Query()))
+	for key, values := range loginURL.Query() {
+		if len(values) > 0 {
+			params[key] = values[0]
+		}
+	}
+	urlBase := *loginURL
+	urlBase.RawQuery = ""
+	urlBase.Fragment = ""
+	return map[string]any{
+		"url":        start.URL,
+		"url_base":   urlBase.String(),
+		"query":      params,
+		"state":      start.State,
+		"region":     region,
+		"expires_at": start.ExpiresAt,
+	}
+}
+
+// handleManagementOAuthPoll polls one plugin-owned device login and persists
+// the credential through host.auth.save when the browser grant lands.
+func handleManagementOAuthPoll(req pluginapi.ManagementRequest) map[string]any {
+	state := strings.TrimSpace(req.Query.Get("state"))
+	if state == "" && len(req.Body) > 0 {
+		var body struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(req.Body, &body); err == nil {
+			state = strings.TrimSpace(body.State)
+		}
+	}
+	if state == "" {
+		return map[string]any{"status": "error", "error": "state is required"}
+	}
+	v, ok := loginStates.Load(state)
+	if !ok {
+		return map[string]any{"status": "error", "error": "unknown or expired login state"}
+	}
+	lc, ok := v.(*loginCtx)
+	if !ok || lc == nil {
+		loginStates.Delete(state)
+		return map[string]any{"status": "error", "error": "invalid login state"}
+	}
+	if time.Now().After(lc.expires) {
+		loginStates.Delete(state)
+		return map[string]any{"status": "error", "error": "login expired"}
+	}
+
+	tok, pending, err := pollDeviceToken(lc.nonce, lc.verifier, lc.region)
+	if err != nil {
+		return map[string]any{"status": "error", "error": err.Error()}
+	}
+	if pending || tok == nil {
+		return map[string]any{"status": "wait", "region": lc.region}
+	}
+
+	sa := buildStoredAuthFromDeviceToken(tok, nil, lc.region)
+	fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), nil)
+	if err != nil {
+		return map[string]any{"status": "error", "error": err.Error()}
+	}
+	if err := hostAuthSaveJSON(authFileNameFor(sa), fileJSON); err != nil {
+		return map[string]any{"status": "error", "error": err.Error()}
+	}
+	loginStates.Delete(state)
+	return map[string]any{
+		"status":   "ok",
+		"region":   lc.region,
+		"uid":      sa.Account.UID,
+		"nickname": sa.Account.Nickname,
+		"file":     authFileNameFor(sa),
+	}
+}
+
+// requestedLoginRegion extracts region=cn|intl from login metadata. It accepts
+// string and []string values because the host may preserve repeated query
+// parameters. An unknown or empty value is ignored so login_region remains
+// the compatibility default.
+func requestedLoginRegion(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	raw, ok := metadata["region"]
+	if !ok {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return explicitLoginRegion(v)
+	case []string:
+		if len(v) > 0 {
+			return explicitLoginRegion(v[0])
+		}
+	case []any:
+		if len(v) > 0 {
+			if s, ok := v[0].(string); ok {
+				return explicitLoginRegion(s)
+			}
+		}
+	}
+	return ""
+}
+
+func explicitLoginRegion(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case regionIntl, "global":
+		return regionIntl
+	case regionCN:
+		return regionCN
+	default:
+		return ""
+	}
+}
+
+// startLoginWithRegion starts a device-flow login pinned to region.
 func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
+	region = normalizeRegion(region)
 	verifier, challenge := makePKCE()
 	// nonce: intl protocol (cockpit-tools v1.3.36, aligned 2026-09-02)
 	// uses 32-hex uuid-simple; CN (cpa-plugin qoderwork reference) keeps
@@ -308,7 +475,8 @@ func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
 			"logo":   pluginLogoURL,
-			"prompt": "在打开的页面中登录并授权 QoderWork（设备授权，无需 PAT）。完成后此窗口会自动关闭。",
+			"region": region,
+			"prompt": "在打开的页面中登录并授权 Qoder（设备授权，无需 PAT）。完成后此窗口会自动关闭。",
 		},
 	})
 }

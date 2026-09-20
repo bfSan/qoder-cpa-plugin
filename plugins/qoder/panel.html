@@ -62,6 +62,11 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .badge.cn{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
 .badge.global{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)}
 .badge.disabled{background:var(--mut-soft);color:var(--mut);border:1px solid var(--mut-border)}
+.badge.cooling{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)}
+.cooldown-list{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.cooldown-row{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px}
+.cooldown-row .cd-model{font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
+.cooldown-row .cd-left{color:var(--warn);font-variant-numeric:tabular-nums;flex:0 0 auto}
 .filter-bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
 .ftag{background:var(--surface);border:1px solid var(--border);color:var(--mut);border-radius:99px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:600}
 .ftag.active{background:var(--acc);color:var(--on-acc);border-color:var(--acc)}
@@ -181,7 +186,9 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     </div>
   </div>
   <div class="bar">
-    <button class="sec" id="importBtn" onclick="openImportModal()">导入 QoderWork 凭证</button>
+    <button class="sec" id="oauthBtn" onclick="openOAuthModal('cn')">登录 CN 账号</button>
+    <button class="sec" id="importIntlBtn" onclick="openOAuthModal('intl')">登录 Intl 账号</button>
+    <button class="sec" id="importBtn" onclick="openImportModal()">导入 PAT 凭证</button>
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     
@@ -191,11 +198,31 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
   <div class="filter-bar" id="filterBar">
     <button type="button" class="ftag active" data-region="all" onclick="filterRegion('all',this)">全部 <span class="cnt" id="cntAll">0</span></button>
     <button type="button" class="ftag" data-region="cn" onclick="filterRegion('cn',this)">CN <span class="cnt" id="cntCn">0</span></button>
+    <button type="button" class="ftag" data-region="intl" onclick="filterRegion('intl',this)">Intl <span class="cnt" id="cntIntl">0</span></button>
     
     <button type="button" class="ftag" data-region="exhausted" onclick="filterRegion('exhausted',this)">耗尽 <span class="cnt" id="cntExhausted">0</span></button>
   </div>
   <div class="summary card" id="summaryBox" style="display:none"></div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
+</div>
+<div class="modal-mask" id="oauthModal" onclick="onOAuthMaskClick(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="oauthModalTitle">
+    <div class="modal-hd">
+      <h2 id="oauthModalTitle">OAuth 登录</h2>
+      <button type="button" class="modal-x" onclick="closeOAuthModal()" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-bd">
+      <p class="hint">选择区域后会用系统浏览器打开官方设备授权页。完成授权后，插件会自动轮询并保存对应区域的账号，无需手动复制 token。</p>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button type="button" class="sec" onclick="startOAuth('cn',this)">登录 CN（qoder.com.cn）</button>
+        <button type="button" class="sec" onclick="startOAuth('intl',this)">登录 Intl（qoder.com）</button>
+      </div>
+      <p class="hint" style="margin-top:12px">如果你已经有 Personal Access Token，也可以用“导入 PAT 凭证”。</p>
+    </div>
+    <div class="modal-ft">
+      <button type="button" class="sec" onclick="closeOAuthModal()">关闭</button>
+    </div>
+  </div>
 </div>
 <div class="modal-mask" id="importModal" onclick="onImportMaskClick(event)">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
@@ -324,6 +351,7 @@ function bindCardActions(root){
       else if(act==="select") selectAuth(idx, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
       else if(act==="claim-pro") claimPro(idx, ev.currentTarget);
+      else if(act==="cooldown-clear") clearCooldown(ev.currentTarget.getAttribute("data-auth-id")||idx, ev.currentTarget.getAttribute("data-model"), ev.currentTarget);
     });
   });
 }
@@ -352,13 +380,22 @@ function card(a){
     ? `<button class="done" disabled="disabled">使用中</button>`
     : (disabled?``:`<button class="sec" data-action="select" data-auth-index="${esc(a.auth_index)}">选用</button>`);
   const refreshBtn=`<button class="sec" data-action="refresh" data-auth-index="${esc(a.auth_index)}" title="刷新积分">刷新</button>`;
+  const cooling=Array.isArray(a.cooling)?a.cooling.filter(c=>Number(c&&c.seconds)>0):[];
+  const coolingBadge=cooling.length?`<span class="badge cooling" title="按模型维度的临时冷却">冷却 ${cooling.length}</span>`:"";
   const badges=(selected?`<span class="badge" style="background:var(--acc-ring);color:var(--acc);border-color:var(--acc)">使用中</span>`:"")+(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${esc(plan)}">${esc(a.plan||"-")}</span>`;
+  const coolingHTML=cooling.length?`<div class="cooldown-list">`+cooling.map(c=>{
+    const model=asText(c.model);
+    const left=Number(c.seconds)||0;
+    const leftText=left>=60?Math.ceil(left/60)+" 分钟":left+" 秒";
+    return `<div class="cooldown-row"><span class="cd-model">${esc(model)}</span><span class="cd-left">${leftText}</span><button type="button" class="ftag" data-action="cooldown-clear" data-auth-index="${esc(a.auth_index)}" data-auth-id="${esc(a.auth_id||a.auth_index)}" data-model="${esc(model)}" aria-label="解除 ${esc(model)} 的冷却">解除</button></div>`;
+  }).join("")+`</div>`:"";
   const display=(a.nickname||a.label||a.name||"").replace(/^qoderwork-?/i,"");
   const nick=display||("u"+(a.uid||"").slice(-8));
   return `<div class="card${selected?" selected":""}" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(nick)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${progressHTML(cr)}
+  ${coolingHTML}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
   </div>`;
@@ -464,16 +501,18 @@ function filterRegion(region, btn){
   renderSummary(lastAccounts);
 }
 function updateFilterCounts(accounts){
-  let cn=0, ex=0;
+  let cn=0, intl=0, ex=0;
   (accounts||[]).forEach(a=>{
-    cn++;
+    if((a.region||"cn")==="intl") intl++; else cn++;
     if(a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length)))) ex++;
   });
   const elAll=document.getElementById("cntAll");
   const elCn=document.getElementById("cntCn");
+  const elIntl=document.getElementById("cntIntl");
   const elEx=document.getElementById("cntExhausted");
   if(elAll) elAll.textContent=String((accounts||[]).length);
   if(elCn) elCn.textContent=String(cn);
+  if(elIntl) elIntl.textContent=String(intl);
   if(elEx) elEx.textContent=String(ex);
 }
 function accountsForFilter(accounts){
@@ -727,7 +766,7 @@ async function selectAuth(idx, btn){
     }
     activeAuthId=d.active_auth||idx;
     const who=d.nickname||idx;
-    const region="CN";
+    const region=(d.region||"").toUpperCase()||(lastAccounts.find(a=>a.auth_index===activeAuthId)?.region==="intl"?"Intl":"CN");
     toast("已选用","ok",who+" · "+region);
     // Re-render from local state for instant feedback, then soft reload
     (lastAccounts||[]).forEach(a=>{a.selected=(a.auth_index===activeAuthId);});
@@ -829,6 +868,83 @@ function openImportModal(){
 function closeImportModal(){
   document.getElementById("importModal").classList.remove("show");
 }
+function openOAuthModal(){
+  document.getElementById("oauthModal").classList.add("show");
+}
+function closeOAuthModal(){
+  document.getElementById("oauthModal").classList.remove("show");
+}
+function onOAuthMaskClick(e){
+  if(e.target===document.getElementById("oauthModal")) closeOAuthModal();
+}
+async function startOAuth(region, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/oauth/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({region})});
+    const loginURL=buildLoginURL(d);
+    if(loginURL){
+      window.open(loginURL,"_blank","noopener");
+      const who=region==="intl"?"Intl":"CN";
+      toast("已打开 "+who+" 登录页","ok","完成授权后会自动写回账号，无需关闭此设置页");
+      closeOAuthModal();
+      pollOAuth(region,d.state,0);
+    }else{
+      throw new Error(d.error||"未返回登录链接");
+    }
+  }catch(e){
+    toast("启动 OAuth 失败","err",e.message||String(e));
+  }finally{
+    busy(btn,false);
+  }
+}
+function buildLoginURL(d){
+  if(!d)return "";
+  if(d.url_base&&d.query){
+    try{
+      const u=new URL(d.url_base);
+      Object.entries(d.query).forEach(([k,v])=>{
+        if(Array.isArray(v)) v.forEach(x=>u.searchParams.append(k,String(x)));
+        else u.searchParams.set(k,String(v));
+      });
+      return u.toString();
+    }catch(_){}
+  }
+  return String(d.url||"").replace(/&amp;/g,"&");
+}
+async function pollOAuth(region, state, tries){
+  if(!state||tries>120) return;
+  const wait=()=>new Promise(r=>setTimeout(r,3000));
+  await wait();
+  try{
+    const d=await api("/oauth/poll",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({state})});
+    if(d&&d.status==="ok"){
+      toast("OAuth 登录成功","ok",(region==="intl"?"Intl":"CN")+" 账号已写入");
+      await load(true);
+      return;
+    }
+    if(d&&d.status==="error"){
+      toast("OAuth 登录失败","err",d.error||"unknown");
+      return;
+    }
+  }catch(_){}
+  pollOAuth(region, state, tries+1);
+}
+async function clearCooldown(authId, model, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/cooldowns/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_id:authId,model})});
+    if(d.success){
+      toast("已解除冷却","ok",model?("模型 "+model):"该账号全部模型");
+      await load(false);
+    }else{
+      toast("解除失败","err",d.error||"unknown");
+    }
+  }catch(e){
+    toast("解除失败","err",e.message||String(e));
+  }finally{
+    busy(btn,false);
+  }
+}
 function onImportMaskClick(e){
   if(e.target===document.getElementById("importModal")) closeImportModal();
 }
@@ -851,6 +967,7 @@ async function importAuth(btn){
 document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
 document.addEventListener("keydown",e=>{
   if(e.key=="Escape"&&document.getElementById("importModal").classList.contains("show")) closeImportModal();
+  if(e.key=="Escape"&&document.getElementById("oauthModal").classList.contains("show")) closeOAuthModal();
 });
 /* Start theme sync watcher (parent MutationObserver + standalone prefers-color-scheme listener). */
 if(window.__wbThemeSync)window.__wbThemeSync();
