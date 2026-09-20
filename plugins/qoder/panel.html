@@ -128,6 +128,13 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 .modal-ft{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--border);background:var(--surface);border-radius:0 0 var(--radius-lg) var(--radius-lg)}
 .modal-ft button.sec{background:var(--btn-sec);color:var(--fg)}
 .modal-ft button.sec:hover{background:var(--btn-sec-hover)}
+.mut{color:var(--mut)}
+.model-rows{display:flex;flex-direction:column;gap:4px;max-height:420px;overflow:auto}
+.model-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.model-id{font-family:ui-monospace,monospace;font-size:12px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
+.model-name{font-size:12px;flex:0 0 auto;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-actions{display:flex;gap:6px;flex:0 0 auto}
+.model-tags{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 </style>
 <script>
 /* Early theme sync (before body paint): mirror CPA parent data-theme when
@@ -177,7 +184,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 <body>
 <div class="wrap">
   <h1>QoderWork 账号面板</h1>
-  <div class="sub">积分余额 · CN 每日签到（09:00/21:00）· 耗尽自动关</div>
+  <div class="sub">积分余额 · 每日签到（CN daily / Intl campaign，09:00 与 21:00）· 耗尽自动关</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
     <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。错误密钥请勿连点，避免 IP 封禁。</div>
     <div style="display:flex;gap:8px">
@@ -192,7 +199,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     
-    <label class="toggle" title="仅 CN 账号 09:00 / 21:00"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到(CN)</label>
+    <label class="toggle" title="所有账号 09:00 / 21:00"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
     <span class="toggle" id="svtime"></span>
   </div>
   <div class="filter-bar" id="filterBar">
@@ -204,6 +211,18 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
   </div>
   <div class="summary card" id="summaryBox" style="display:none"></div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
+  <div class="card" id="modelBox" style="margin-top:16px">
+    <h2>模型列表 <span style="display:flex;gap:6px;align-items:center">
+      <span class="badge" id="modelSource" title="当前模型目录的来源">—</span>
+      <button type="button" class="ftag" onclick="loadModels(true)">刷新</button>
+    </span></h2>
+    <p class="mut" id="modelHint" style="margin:6px 0 10px;font-size:12px"></p>
+    <div id="modelList"><div class="loading">加载中…</div></div>
+    <div id="modelAddRow" style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+      <input id="modelAddInput" class="field-input" type="text" placeholder="添加自定义模型 ID" aria-label="添加自定义模型 ID">
+      <button type="button" class="ftag" onclick="addModel()">添加</button>
+    </div>
+  </div>
 </div>
 <div class="modal-mask" id="oauthModal" onclick="onOAuthMaskClick(event)">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="oauthModalTitle">
@@ -365,17 +384,19 @@ function card(a){
   const selected=!!a.selected;
   const isIntl=(a.region||"cn")==="intl";
   const regionBadge=`<span class="badge ${isIntl?"global":"cn"}">${isIntl?"Intl":"CN"}</span>`;
-  // CN: 签到 button + 领取Pro button
-  // active=false means the upstream check-in activity is not enabled for
-  // this account (e.g. Community plan). Show disabled button with '?'.
-  let actionHTML;
+  // Both regions have a check-in: CN uses daily-check-in, Intl uses the
+  // campaign benefit contract. Pro upgrade remains CN-only.
   const checked=ci.today_checked_in;
   const ciActive=ci.active!==false; // absent=true (default active)
   const btnClass=checked?"done":(ciActive?"sec":"done");
   const btnText=checked?"已签到":(ciActive?"签到":"不可签");
   const btnDisabled=(checked||!ciActive)?" disabled=\"disabled\"":"";
-  actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${esc(a.auth_index)}"${btnDisabled}>${btnText}</button>`+
-    `<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`;
+  let actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${esc(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
+  if(isIntl){
+    actionHTML+=`<button class="done" disabled="disabled" title="Intl 不支持 Pro 升级包">不支持Pro</button>`;
+  }else{
+    actionHTML+=`<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`;
+  }
   const selectBtn=selected
     ? `<button class="done" disabled="disabled">使用中</button>`
     : (disabled?``:`<button class="sec" data-action="select" data-auth-index="${esc(a.auth_index)}">选用</button>`);
@@ -634,6 +655,13 @@ async function api(path, opts={}){
   authFailCount=0;
   return r.json();
 }
+async function managementAPI(path, opts={}){
+  const k=getKey();
+  if(!k) throw new Error("需要管理密钥");
+  const r=await fetch("/v0/management"+path,{...opts,credentials:'omit',headers:{...(opts.headers||{}),...authHeaders(k)}});
+  if(!r.ok) throw new Error("管理接口请求失败 ("+r.status+")");
+  return r.json();
+}
 async function load(force, btn){
   const g=document.getElementById("grid");
   if(!getKey()){
@@ -676,6 +704,7 @@ async function load(force, btn){
     renderSummary(accounts);
     // Lazy-load credits for cards that don't have them yet.
     lazyLoadCredits(accounts);
+    loadModels(false);
     if(force){
       const errN=accounts.filter(a=>a.error).length;
       const life=(d.lifecycle||[]).length;
@@ -695,12 +724,93 @@ async function load(force, btn){
     if(force) busy(btn, false);
   }
 }
+const MODEL_SOURCE_LABEL={dynamic:"上游实时",config:"配置覆盖",cache:"缓存",none:"未知"};
+let lastModels=[];
+async function loadModels(toastOnError){
+  const box=document.getElementById("modelList");
+  const srcEl=document.getElementById("modelSource");
+  const hintEl=document.getElementById("modelHint");
+  if(!box||!srcEl||!hintEl) return;
+  try{
+    const d=await api("/models");
+    lastModels=Array.isArray(d.models)?d.models:[];
+    const src=d.source||"none";
+    srcEl.textContent=MODEL_SOURCE_LABEL[src]||src;
+    const parts=[`共 ${lastModels.length} 个模型`];
+    if(d.persistent) parts.push("隐藏列表保存在插件配置中");
+    const overlay=d.overlay||{};
+    if((Array.isArray(overlay.order)&&overlay.order.length)||(Array.isArray(overlay.add)&&overlay.add.length)){
+      parts.push("排序和自定义模型仅保存在内存中");
+    }
+    hintEl.textContent=parts.join(" · ");
+    renderModels();
+  }catch(e){
+    box.innerHTML=`<div class="mut">加载失败：${esc(String(e&&e.message||e))}</div>`;
+    srcEl.textContent="—";
+    if(toastOnError) toast("模型加载失败","err",String(e&&e.message||e));
+  }
+}
+function renderModels(){
+  const box=document.getElementById("modelList");
+  if(!lastModels.length){box.innerHTML=`<div class="mut">暂无模型</div>`;return}
+  box.innerHTML=`<div class="model-rows">`+lastModels.map((m,i)=>{
+    const id=String(m.id||"");
+    const name=m.displayName||m.name||"";
+    const escId=esc(id);
+    const tags=[];
+    if(m.custom) tags.push(`<span class="badge">自定义</span>`);
+    if(Number(m.coolingAccounts)>0) tags.push(`<span class="badge cooling">冷却 ${Number(m.coolingAccounts)}</span>`);
+    return `<div class="model-row">
+      <span class="model-id" title="${escId}">${escId}</span>
+      <span class="model-name mut">${esc(name)}</span>
+      <span class="model-actions">
+        ${m.hidden?"":`
+          <button type="button" class="ftag" onclick="moveModel('${escId}',-1)" aria-label="上移 ${escId}"${i===0?" disabled":""}>↑</button>
+          <button type="button" class="ftag" onclick="moveModel('${escId}',1)" aria-label="下移 ${escId}"${i===lastModels.length-1?" disabled":""}>↓</button>
+        `}
+        ${m.hidden
+          ? `<button type="button" class="ftag" onclick="restoreModel('${escId}')">恢复</button>`
+          : `<button type="button" class="ftag" onclick="toggleModel('${escId}')">${m.custom?"移除":"隐藏"}</button>`}
+      </span>
+      ${m.hidden?`<span class="model-tags"><span class="badge disabled">已隐藏</span></span>`:""}
+      ${tags.length?`<span class="model-tags">${tags.join("")}</span>`:""}
+    </div>`;
+  }).join("")+`</div>`;
+}
+async function modelAction(action,id,extra){
+  try{
+    const d=await api("/models/action",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(Object.assign({action:action,id:id},extra||{}))});
+    if(action==="hide"||action==="restore"){
+      const overlay=d&&d.overlay?d.overlay:{};
+      const hidden=Array.isArray(overlay.hide)?overlay.hide:[];
+      await managementAPI("/plugins/qoder/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({hidden_models:hidden})});
+    }else if(action==="move"||action==="add"){
+      toast("排序和自定义模型目前仅保存在内存中，CPA 重启后恢复","warn");
+    }
+    await loadModels(false);
+  }catch(e){
+    toast("模型操作失败","err",String(e&&e.message||e));
+  }
+}
+function moveModel(id,offset){modelAction("move",id,{offset:offset})}
+function toggleModel(id){
+  const m=lastModels.find(x=>String(x.id)===String(id));
+  if(m&&m.custom){modelAction("hide",id);return}
+  modelAction("hide",id);
+}
+function restoreModel(id){modelAction("restore",id)}
+async function addModel(){
+  const input=document.getElementById("modelAddInput");
+  const id=String(input.value||"").trim();
+  if(!id){toast("请输入模型 ID","warn");return}
+  input.value="";
+  await modelAction("add",id);
+}
 function checkinResultToast(res, who){
   const name=res.nickname||who||"账号";
   if(res.error){toast(name+"：签到失败","err",asText(res.error));return}
-  if(res.reason==="global"||(/国际版|不支持/.test(asText(res.message)))){
-    toast(name+"：国际版无需签到","warn",asText(res.message)||"请用领取专家加油包");return;
-  }
   if(res.reason==="already"||(res.skipped&&/already|已签|今日/.test(asText(res.message)))){
     toast(name+"：今日已签到","ok",asText(res.message));return;
   }
@@ -709,11 +819,10 @@ function checkinResultToast(res, who){
 }
 function isCheckinDoneResult(res){
   if(!res||res.error) return false;
-  if(res.reason==="global") return false;
   if(res.success) return true;
   const msg=asText(res.message);
   // already checked in today (backend) — treat as done, not failure
-  if(/already|已签|今日/.test(msg) && !/国际版|不支持/.test(msg)) return true;
+  if(/already|已签|今日|已领取/.test(msg)) return true;
   return false;
 }
 async function checkin(idx, btn){
@@ -813,7 +922,7 @@ async function refreshCredits(idx, btn){
 async function checkinAll(btn){
   busy(btn,true);
   try{
-    // Backend prefilters: already-checked skipped; only CN-need-checkin run.
+    // Backend prefilters: already-checked skipped; only need-checkin accounts run.
     const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     const rs=d.results||[];
     const s=d.summary||{};
@@ -834,19 +943,17 @@ async function checkinAll(btn){
     }else if(ok){
       toast("批量签到："+ok+" 成功"+(already?" / "+already+" 今日已签":""),"ok",detail);
     }else if(already||skippedCN){
-      toast("无需签到","ok",detail||"CN 今日已签");
+      toast("无需签到","ok",detail||"今日已签");
     }else if(!rs.length && !eligible){
-      toast("没有需要签到的 CN 账号","warn",detail||"");
+      toast("没有需要签到的账号","warn",detail||"");
     }else{
       toast("没有需要签到的账号","warn",detail);
     }
-    // Mark CN check-in buttons done immediately when any success/already
+    // Mark check-in buttons done immediately when any success/already
     if(ok||already){
       document.querySelectorAll("#grid .card").forEach(c=>{
-        if((c.dataset.region||"cn")==="cn"){
-          const b=c.querySelector('[data-action="checkin"]');
-          if(b && /签到|处理中/.test(b.textContent||"")) markCheckinDone(b);
-        }
+        const b=c.querySelector('[data-action="checkin"]');
+        if(b && /签到|处理中/.test(b.textContent||"")) markCheckinDone(b);
       });
     }
     await load(true);

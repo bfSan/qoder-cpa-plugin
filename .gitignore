@@ -4,23 +4,22 @@
 *.dylib
 *.exe
 
-# Go build artifacts
+# Build output
+dist/
 plugins/*/bin/
 plugins/*/dist/
+plugins/*/qoder
 
 # Test artifacts
 *.test
 *.out
 coverage.txt
+coverage.html
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
-
-# OS
 .DS_Store
 Thumbs.db
 
@@ -31,21 +30,3 @@ Thumbs.db
 *.pem
 auths/
 data/
-
-# Compiled plugin binaries (go build output in plugin dirs)
-plugins/workbuddy/workbuddy
-plugins/codebuddy-intl/codebuddy-intl
-plugins/trae-cn/trae-cn
-plugins/trae-solo-cn/trae-solo-cn
-plugins/trae-intl/trae-intl
-plugins/qoder-cn/qoder-cn
-plugins/qoder-intl/qoder-intl
-
-# go build ./... stray binaries
-plugins/qoder/qoder
-plugins/trae/trae
-plugins/workbuddy/workbuddy
-
-# Local probe tools (kept out of the repo by convention — dev-only helpers)
-plugins/trae/modelsprobe
-plugins/trae/tools/

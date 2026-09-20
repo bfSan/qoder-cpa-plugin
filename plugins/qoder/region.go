@@ -61,12 +61,46 @@ func domainForRegion(region string) string {
 	return domainCN
 }
 
+// testUpstreamBaseOverride lets unit tests route an entire region at an
+// httptest server. Empty values mean "use the production default".
+var (
+	testUpstreamBaseMu       sync.RWMutex
+	testUpstreamBaseOverride = map[string]string{}
+)
+
+func setUpstreamBaseForTest(region, base string) func() {
+	region = normalizeRegion(region)
+	testUpstreamBaseMu.Lock()
+	prev, had := testUpstreamBaseOverride[region]
+	if base == "" {
+		delete(testUpstreamBaseOverride, region)
+	} else {
+		testUpstreamBaseOverride[region] = base
+	}
+	testUpstreamBaseMu.Unlock()
+	return func() {
+		testUpstreamBaseMu.Lock()
+		if had {
+			testUpstreamBaseOverride[region] = prev
+		} else {
+			delete(testUpstreamBaseOverride, region)
+		}
+		testUpstreamBaseMu.Unlock()
+	}
+}
+
 // upstreamBaseForRegion / gatewayBaseForRegion route by login/account region.
 func upstreamBaseForRegion(region string) string {
-	if region == regionIntl {
-		return upstreamBaseIntl
+	testUpstreamBaseMu.RLock()
+	override := testUpstreamBaseOverride[normalizeRegion(region)]
+	testUpstreamBaseMu.RUnlock()
+	if override != "" {
+		return override
 	}
-	return upstreamBaseCN
+	if region == regionIntl {
+		return defaultUpstreamBaseIntl
+	}
+	return defaultUpstreamBaseCN
 }
 
 func gatewayBaseForRegion(region string) string {

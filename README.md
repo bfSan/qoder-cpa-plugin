@@ -1,278 +1,96 @@
-# cpa-multi-plugins
+# qoder-cpa-plugin
 
-> CPA (CLIProxyAPI) 动态库插件集合：CodeBuddy / WorkBuddy / Trae / Qoder 的 CN + Intl 版本
->
-> 7 个插件覆盖 4 个平台 × 2 个版本（CodeBuddy CN 与 WorkBuddy 已合并），让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。
+[CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder 插件。CN 与 Intl 合并为一个 provider，一个 `/v1/chat/completions` 接口即可调用 Qoder 全量模型。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)]()
-[![Release](https://img.shields.io/badge/release-v0.2.0-blue)](../../releases)
-[![Build](https://img.shields.io/badge/build-passing-brightgreen)](../../actions)
 
-## 项目目标
+## 功能
 
-为 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 提供完整的国内 AI IDE 平台 provider 插件，让 CPA 一个 `/v1/chat/completions` 接口就能调用所有模型。
-
-## 插件清单
-
-| 插件 | 平台 | 协议 | 签到 | 配额 | 状态 |
-|---|---|---|---|---|---|
-| `workbuddy` | CodeBuddy / WorkBuddy 三区合并（CN + Global + Intl） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
-| `trae` | Trae 三变体合并（Code CN + SOLO CN + Intl） | llm_utils_chat / Web SOLO | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
-| `qoder` | Qoder 双区合并（CN + Intl） | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
-
-
-## 功能对标
-
-基于 cockpit-tools / 9router / OmniRoute / traework2api / Sliverkiss/cpa-plugin 五个项目的最新实现，完整对标以下功能：
-
-### ✅ OAuth 完整流程
-- `GetLoginGuidance` → 浏览器登录 → `authCode` → `ExchangeToken` → `GetUserInfo`
-- 本地 callback listener（随机端口，5 分钟 TTL，async poll 模型）
-- 多账号同时登录（按 uid 区分）
-
-### ✅ Token 自动刷新
-- `RefreshTokenIfNeeded`（24h skew，提前刷新避免过期）
-- 每天 03:00 全量刷新（防 Keycloak offline-session expiry）
-- 原子写回 auth 文件（`tmp + rename`，0600 权限）
-
-### ✅ 多账号 pool
-- credit-aware scheduler（积分降序挑选）
-- 4 档 cooldown 状态机：
-  - `CoolPlan` 12h（1005 plan 权益不足）
-  - `CoolSoft` 60s（429/404 软限流）
-  - `CoolErr` 10m（连续 3 次错误）
-  - `Disable`（401 session 失效，需人工重登）
-- `NoteSuccess` / `NoteError` 跟踪
-
-### ✅ 每日签到（CN 平台）
-- 每天 09:00 自动触发
-- Trae: `api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}`
-- CodeBuddy CN: `codebuddy.cn/v2/billing/meter/{checkin-activity-status,daily-checkin}`
-- QoderWork CN: `openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/{status,claim}`
-- **9074 限流识别**（Trae 业务码，三家参考项目都没做，cpa-multi-plugins 独有）
-
-### ✅ 积分/配额查询
-- Trae v2 积分制完整解析（对齐 cockpit-tools `apply_usage_response`）：
-  - 过滤废弃 pack（`product_type == 3` PROMO_CODE）
-  - 过滤隐藏/已取消 pack（`is_hide || status == 3`）
-  - CN pack 优先级：`CNExpress(100) > Ultra(6) > Pro+CN(5) > Pro+(4) > Pro(1/9) > Lite(8) > Free(0)`
-  - Intl pack 优先级：`Ultra(6) > Pro+(4) > Pro(1/9) > Lite(8) > Free(0)`
-  - `fastRequestAvailable` / `fastRequestPerMonth` 字段（来自选中 pack）
-
-### ✅ CodeBuddy content filter 规避（对齐 OmniRoute codebuddy-cn.ts）
-- AGENT_PATTERN 正则匹配（Claude Code / Cursor / Windsurf / Cline / Aider / Copilot / Cody 身份行）→ 替换中性 prompt
-- 长度兜底（system prompt > 2000 bytes → 替换）
-- `reasoning_effort` 镜像（非 none → `reasoning_summary: "auto"`）
-- 大工具描述压缩（tools JSON ≥ 64KB → 删 `tool.function.description`）
-- 强制 `stream=true`（腾讯后端拒非流，code 11101）
-- `forceMaxThinking` for hy3-family models
-
-### ✅ Executor（execute + execute_stream）
-- 非流式：上游 SSE 聚合 → 单个 `chat.completion` 对象
-- 流式：实时转发 OpenAI SSE chunks（`plan_item` → `delta.content`，`token_usage` → `usage`）
-
-## 为什么是 8 个独立插件而不是合并？
-
-CPA 的插件架构基于 `auth.identifier` + `executor.identifier`——**每个 `.so` 只能注册一个 provider name**。CPA 的 `HasAuthProvider(provider)` 按 identifier 精确匹配，所以合并家族后统一使用单一 provider key（`workbuddy` / `qoder` / `trae`），区域内差异（CN/Intl/SOLO 等）通过账号文件内的字段路由，旧插件名的账号文件启动时自动收养。
-
-### 如果你想减少插件数量
-
-**方案 1：用 `openai-compatibility` 配置替代插件**（推荐给 OpenAI 兼容协议的平台）
-
-CodeBuddy（CN/Intl）和 Trae Intl 走 OpenAI 兼容协议，可以不装插件，直接在 CPA `config.yaml` 配置：
-
-```yaml
-openai-compatibility:
-  - name: "workbuddy"
-    base-url: "https://copilot.tencent.com/v2"
-    api-key-entries:
-      - api-key: "<你的 CodeBuddy/WorkBuddy access_token>"
-    models:
-      - name: "hy3"
-      - name: "glm-5.2"
-```
-
-**代价**：失去 OAuth 自动登录、token 自动刷新、签到、content filter 规避、多账号 pool 等插件功能。适合"只用一个账号、手动管理 token"的场景。
-
-**方案 2：只装你需要的插件**
-
-3 个插件互相独立，不需要全装。每个插件内部支持区域/变体选择（配置或自动收养）：
-
-| 你的需求 | 装哪些插件 |
-|---|---|
-| Trae Code CN | `trae`（login_variant: "cn"，默认） |
-| Trae Work CN（薅羊毛） | `trae`（login_variant: "solo"，自动收养 trae-solo-cn 账号文件） |
-| Trae Intl | `trae`（login_variant: "intl"，自动收养 trae-intl 账号文件） |
-| CodeBuddy CN / WorkBuddy | `workbuddy`（login_platform: CLI 或 ide；v0.9.0 起合并） |
-| CodeBuddy Intl | `workbuddy`（login_region: "intl"；自动收养 codebuddy-intl 账号文件） |
-| QoderWork CN | `qoder`（login_region: "cn"，默认） |
-| Qoder Intl | `qoder`（login_region: "intl"，自动收养 qoder-intl 账号文件） |
-| 全都要 | 全部 3 个 |
-
-**方案 3：等 CPA 上游支持多 provider 插件**
-
-如果 CPA 未来支持单插件多 provider（`auth.identifier` 返回数组），可以合并。目前上游无此计划。
+- **双区 OAuth / PAT 登录** — CN（`qoder.com.cn`）与 Intl（`qoder.com`）都支持设备码登录，也支持导入 PAT。一个账号一份 `qoder-<region>-<uid>.json` 认证文件，支持多账号并存。
+- **模型目录** — 从 Qoder 网关实时拉取模型列表，插件面板可隐藏 / 恢复 / 排序 / 新增模型；隐藏列表持久化在 `hidden_models`，并在 CPA 返回模型列表前生效。
+- **签到** — CN 走 `daily-check-in`，Intl 走 campaign 权益领取（`GET /me/campaigns` + `/{campaignId}/claim`），每天 09:00 / 21:00 自动执行，也可在面板手动签到。
+- **额度与生命周期** — 面板展示积分、套餐、签到状态；积分耗尽自动禁用 CN 账号，签到补回后自动恢复。
+- **按模型冷却** — 单个模型触发限流时只冷却该 (账号, 模型) 组合，不冻结整个账号；面板可手动解除。
+- **Token keepalive** — 定时刷新 access token，避免 Keycloak / device token 会话过期。
+- **流式与工具调用** — COSY 签名的 OpenAI 兼容执行器，支持 SSE 流式输出与 tool calling。
 
 ## 安装
 
-### 1. 下载 release
-
-从 [Releases](../../releases) 下载对应平台的 zip：
-- `cpa-multi-plugins-linux-amd64.zip` — Linux x86_64
-- `cpa-multi-plugins-linux-arm64.zip` — Linux ARM64
-- `cpa-multi-plugins-darwin-arm64.zip` — macOS Apple Silicon
-- `cpa-multi-plugins-windows-amd64.zip` — Windows x86_64
-
-### 2. 解压并放到 CPA plugins 目录
-
-```bash
-unzip cpa-multi-plugins-linux-amd64.zip -d /path/to/cpa/plugins/
-```
-
-### 3. 启用插件
-
-CPA 的 `config.yaml`:
+把编译好的 `qoder.so` 放进 CPA 的插件目录，然后在 `config.yaml` 启用：
 
 ```yaml
 plugins:
   enabled: true
-  dir: "./plugins"
+  dir: plugins
   configs:
-    workbuddy: { enabled: true, login_platform: "CLI", login_region: "cn" }  # CLI/ide；region: cn|intl（v0.11.0 起三区合一）
-    trae: { enabled: true, login_variant: "cn" }  # cn|solo|intl（v0.12.0 起三合一）
-    qoder: { enabled: true, login_region: "cn" }  # cn|intl（v0.10.0 起二合一）
+    qoder:
+      enabled: true
 ```
 
-### 4. 重启 CPA，登录账号
+多平台部署时按 CPA 的平台子目录约定放置：
 
-每个插件保持**单一 OAuth 入口**（v0.12.10 起）：OAuth 登录菜单中的 Trae / WorkBuddy / Qoder 条目按插件配置的 `login_variant`（Trae: cn|solo|intl）/ `login_region`（WorkBuddy、Qoder: cn|intl）发起登录。要切换登录指向哪个区域，在管理 UI 的插件配置里改这个下拉并保存即可，下一次点 OAuth 登录就走新区域——入口只有一个，指向由配置决定。
-
-区域登录产生的凭证落盘到 auth-dir 并被对应插件自动收养；已有账号不受登录区域影响（登录变体不劫持现有账号的分发）。
+```
+plugins/
+  linux/amd64/qoder.so
+  linux/arm64/qoder.so
+  darwin/arm64/qoder.so
+```
 
 ## 构建
 
 ```bash
-# 编译所有插件（当前平台）
-make all  # 或 ./scripts/build.sh
+# 当前平台
+make -C plugins/qoder build
 
-# 跨平台编译
+# 指定平台
 ./scripts/build.sh linux amd64
-./scripts/build.sh darwin arm64
-./scripts/build.sh windows amd64
-
-# 单个插件
-cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 ```
 
-**要求**：Go 1.23+（自动下载 1.26 toolchain）、CGO 启用、C 编译器（gcc/clang/mingw）。
+## 配置
 
-## 借鉴来源（Protocol Sources）
+全部字段可选，位于 `plugins.configs.qoder`：
 
-本项目的协议层基于以下开源项目的代码事实实现。**每个插件都明确标注了协议来源文件路径**，便于溯源和后续协议变更时跟进。
+```yaml
+plugins:
+  configs:
+    qoder:
+      enabled: true
 
-### 主要协议来源
+      # 新增登录使用的区域：cn（默认）或 intl。已有账号保留各自区域。
+      login_region: cn
 
-| 项目 | 语言 | 协议贡献 | 用在哪些插件 |
-|---|---|---|---|
-| **[Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api)** | Go | Trae SOLO CN 协议层（auth/upstream/pool/scheduler） | trae-cn, trae-solo-cn |
-| **[Sliverkiss/cpa-plugin](https://github.com/Sliverkiss/cpa-plugin)** | Go | WorkBuddy + QoderWork 完整 CPA 插件（v0.8.5 / v0.2.6） | workbuddy, codebuddy-cn, codebuddy-intl, qoder-cn, qoder-intl |
-| **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** | TypeScript | Trae Intl Web SOLO remote 协议（trae.ts）<br>CodeBuddy CN content filter 规避（codebuddy-cn.ts）<br>CodeBuddy CN/intl executor | trae-intl, workbuddy, codebuddy-cn, codebuddy-intl |
-| **[9router](https://github.com/decolua/9router)** | JavaScript | Trae 三区域切换（regions: cn/sg/us）<br>Trae Intl chat_sessions/events SSE | trae-intl |
-| **[cockpit-tools](https://github.com/jlcodes99/cockpit-tools)** | Rust | Trae v2 积分制 pack 优先级（apply_usage_response）<br>Trae 4 变体差异（TraePlatformKind）<br>CodeBuddy CN 签到状态机（workbuddy_auto_checkin.rs）<br>CodeBuddy CN 签到字段解析（codebuddy_cn_oauth.rs）<br>Trae 签到 API headers（x-app-type, Origin, Referer） | trae-cn, trae-solo-cn, workbuddy, codebuddy-cn |
-| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 7 个插件 |
+      # 签到开关与调度（默认 true，09:00 / 21:00）
+      checkin_auto: true
 
-### 各插件的具体借鉴文件
+      # 积分耗尽自动禁用 / 恢复 CN 账号
+      lifecycle_auto: true
 
-#### `plugins/workbuddy` (fork from Sliverkiss/cpa-plugin/workbuddy v0.8.5)
-- **协议层**：`Sliverkiss/cpa-plugin/workbuddy/` 全部 30+ Go 文件（MIT）
-- **content filter 规避**：`OmniRoute/open-sse/executors/codebuddy-cn.ts` line 149-202（AGENT_PATTERN + 长度兜底 + reasoning_summary 镜像 + 大工具描述压缩）
-- **签到状态机**：`cockpit-tools/src-tauri/src/modules/workbuddy_auto_checkin.rs` line 33-64, 406-754（WorkbuddyAutoCheckinConfig + 指数退避调度器）
-- **签到字段解析**：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs` line 1208-1258, 1285-1394, 1423-1587（CheckinStatusResponse 完整字段 + fallback 路径）
+      # 定时刷新 token
+      token_keepalive: true
 
-#### `plugins/codebuddy-cn` 已并入 `plugins/workbuddy`（v0.9.0）
-- 两者后端、额度池完全相同（copilot.tencent.com），仅登录 platform（CLI/ide）与 X-IDE-* 请求头不同
-- 合并后通过 `login_platform` 配置选择新登录方式（CLI 默认 / ide）
-- 旧 `codebuddy-cn-<uid>.json` 账号文件在插件启动时自动收养为 `workbuddy-<uid>.json`（loginPlatform=ide）
-- 参考：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs:8` 的 platform 参数
+      # 插件维度的模型隐藏列表
+      hidden_models:
+        - some-model-id
+```
 
-> ℹ️ v0.10.0–v0.12.0 起家族合并：codebuddy-intl 并入 workbuddy、qoder-cn/qoder-intl 并入 qoder、trae-cn/trae-solo-cn/trae-intl 并入 trae。以下为历史来源说明。
+## 面板
 
-#### `plugins/codebuddy-intl` (adapted from workbuddy — merged into workbuddy)
-- 全部同 workbuddy
-- **Global host**：`www.codebuddy.ai`（vs CN 的 `www.codebuddy.cn` / `copilot.tencent.com`）
-- 参考：`OmniRoute/open-sse/config/providers/registry/codebuddy-intl/`（如果存在）
+登录后打开 CPA 侧边栏的 Qoder 面板：
 
-#### `plugins/trae-cn` (based on traework2api + cockpit-tools)
-- **协议层**：`Sliverkiss/traework2api/internal/{auth,upstream,pool,scheduler}/` 全部 Go 文件（MIT）
-- **client_id**：`ono9krqynydwx5`（non-solo，对齐 cockpit-tools `trae_account_platform_storage.rs:185`）
-- **function**：`inline_chat`（对齐 cockpit-tools `trae_account_platform_storage.rs`）
-- **签到 headers**：`cockpit-tools/src-tauri/src/modules/trae_account_token_injection.rs:2761,2859`（x-app-type: trae, Origin: https://www.trae.cn, Referer: https://www.trae.cn/）
-- **v2 积分 pack 优先级**：`cockpit-tools/src-tauri/src/modules/trae_account_token_injection.rs:1807-1866`（apply_usage_response）
-- **pack product_type 映射**：`cockpit-tools/src/types/trae.ts:174-189`（TRAE_PRODUCT_TYPE）
+- 登录 / 导入账号，查看每个账号的区域、积分、套餐、签到状态
+- 手动签到、领取 Pro 升级包
+- 查看与解除模型维度的冷却
+- 管理模型目录：隐藏 / 恢复 / 排序 / 新增
 
-#### `plugins/trae-solo-cn` (based on traework2api)
-- 全部同 trae-cn
-- **client_id**：`en1oxy7wnw8j9n`（SOLO stable，对齐 traework2api + cockpit-tools）
-- **function**：`solo_work_lite`（对齐 traework2api `internal/upstream/constants.go`）
+## 目录结构
 
-#### `plugins/trae-intl` (based on OmniRoute + 9router)
-- **协议层**：`OmniRoute/open-sse/executors/trae.ts`（482 行 TS → Go 翻译）
-- **三区域配置**：`9router/open-sse/providers/registry/trae.js`（regions: {cn, sg, us}, defaultRegion: "cn"）
-- **Web SOLO remote 协议**：`core-normal.trae.ai/api/remote/v1/chat_sessions` + `events` SSE
-- **mode/strategy 解析**：`OmniRoute/open-sse/executors/trae.ts` resolveMode（"work"/"auto"/具体 model name）
-- **plan_item 累积文本**：`OmniRoute/open-sse/executors/trae.ts` renderNewText（cumulative, longest-wins per plan_item.id）
-- **OAuth**：`api.marscode.com/cloudide/api/v3/trae/` + `ExchangeToken`
-- **v1 pay 接口**：`grow-normal.trae.ai/trae/api/v1/pay/ide_user_*`（CN 用 v2，Intl 用 v1）
-
-#### `plugins/qoder-cn` (fork from Sliverkiss/cpa-plugin/qoderwork v0.2.6)
-- **协议层**：`Sliverkiss/cpa-plugin/qoderwork/` 全部 28 Go 文件（MIT）
-- **COSY 签名**：`qoderwork/sign.go`（220 行）+ `encoding.go`（53 行）
-- **签到**：`qoderwork/checkin.go`（`openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/{status,claim}`）
-- **PAT 导入**：`qoderwork/oauth.go`（`openapi.qoder.com.cn/api/v1/jobToken/exchange`）
-
-#### `plugins/qoder-intl` (adapted from qoderwork)
-- 全部同 qoder-cn
-- **host**：`openapi.qoder.sh` / `api3.qoder.sh`（vs CN 的 `openapi.qoder.com.cn` / `gateway.qoder.com.cn`）
-- **client_id**：`e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb`（vs CN 的 `1c5e33e1-...`）
-- **redirect_uri**：`qoder://aicoding.aicoding-agent/login-success`（vs CN 的 `qoder-work-cn://`）
-- **无签到**（Intl 平台无签到机制）
-
-### 协议事实文档
-
-完整的协议事实清单见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（含 API endpoint、headers、body 格式、字段解析、状态机）。
+| 路径 | 说明 |
+|---|---|
+| `plugins/qoder/` | 插件源码与嵌入式面板 |
+| `scripts/build.sh` | 跨平台构建脚本 |
+| `registry.json` | 插件注册元数据 |
 
 ## License
 
-MIT — 详见 [LICENSE](LICENSE)
-
-## 致谢
-
-本项目站在以下项目的肩膀上，按贡献度排序：
-
-- **Sliverkiss** — traework2api + cpa-plugin（WorkBuddy + QoderWork）作者，提供了 Trae SOLO CN 协议层 + CodeBuddy/Qoder 完整 CPA 插件基础
-- **diegosouzapw** — OmniRoute 作者，提供了 Trae Intl Web SOLO remote 协议 + CodeBuddy CN content filter 规避
-- **decolua** — 9router 作者，提供了 Trae 三区域配置 + 多平台反代参考
-- **jlcodes99** — cockpit-tools 作者，提供了 Trae v2 积分制 pack 优先级 + 16 平台账号管理协议事实
-- **router-for-me** — CLIProxyAPI 作者，提供了 CPA 插件 SDK + C ABI 接口规范
-- **lovingfish** — workbuddy-cliproxy 作者，提供了 workbuddy 单文件 clean-room 重写参考
-
-## 协议变更跟踪
-
-Trae / CodeBuddy / Qoder 平台会不定期更新协议。本项目通过以下方式跟踪：
-
-1. **协议层独立**：所有协议常量集中在 `upstream/constants.go`，变更时只改一处
-2. **pack 优先级可配置**：`SelectActivePack` 支持新增 product_type
-3. **content filter 正则可扩展**：`agentPattern` 在 `payload.go` 顶部，新身份行直接加
-4. **参考项目监控**：定期 sync 上游 5 个参考项目的最新 commit
-
-如发现协议变更，请提 [Issue](../../issues) 报告。
-
-## Status
-
-✅ **8/8 plugins fully functional** — v0.2.0 released
-- 5 functional plugins forked from Sliverkiss/cpa-plugin (workbuddy, codebuddy-cn, codebuddy-intl, qoder-cn, qoder-intl)
-- 3 Trae plugins fully implemented (trae-cn, trae-solo-cn, trae-intl)
-- All plugins compile to .so/.dll/.dylib on 5 platforms (linux amd64/arm64, darwin amd64/arm64, windows amd64)
-- GitHub Actions release workflow: multi-platform build + auto release on tag push
+[MIT](LICENSE)

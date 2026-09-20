@@ -1,4 +1,4 @@
-name: Build & Release Plugins
+name: Build & Release
 
 on:
   push:
@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   build:
@@ -22,7 +21,6 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      max-parallel: 5
       matrix:
         include:
           - os: linux
@@ -39,20 +37,6 @@ jobs:
             goarch: arm64
             cc: gcc
             ext: so
-          # NOTE: darwin-amd64 used to ride the retired macos-13 Intel hosted
-          # runners (they queued forever and blocked the release job via
-          # needs: build). issue #7 brings the asset back as a CROSS build on
-          # the arm64 runner: Apple's clang accepts -arch x86_64 on Apple
-          # Silicon and the Go cgo toolchain drives it via CC. optional:true
-          # keeps a toolchain regression from blocking the other four assets.
-          - os: darwin
-            arch: amd64
-            runner: macos-14
-            goos: darwin
-            goarch: amd64
-            cc: "clang -arch x86_64"
-            ext: dylib
-            optional: true
           - os: darwin
             arch: arm64
             runner: macos-14
@@ -65,16 +49,13 @@ jobs:
             runner: windows-latest
             goos: windows
             goarch: amd64
-            cc: mingw-w64-x86_64-gcc
+            cc: gcc
             ext: dll
-    continue-on-error: ${{ matrix.optional || false }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
           cache: false
@@ -88,158 +69,80 @@ jobs:
           update: false
           path-type: inherit
 
-      - name: Build all plugins (Windows)
-        if: matrix.os == 'windows'
+      - name: Test
+        working-directory: plugins/qoder
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
-          CC: gcc
-        run: |
-          which gcc 2>&1 || echo "which gcc failed"
-          gcc --version 2>&1 | head -1 || echo "gcc invocation failed"
-          mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy qoder trae"
-          for plugin in $PLUGINS; do
-            echo "=== Building $plugin ==="
-            cd plugins/$plugin
-            go mod download
-            OUTPUT="../../dist/${{ matrix.os }}-${{ matrix.arch }}/${plugin}.${{ matrix.ext }}"
-            go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "$OUTPUT" .
-            if [ $? -eq 0 ]; then
-              echo "  ✅ $plugin built"
-            else
-              echo "  ❌ $plugin failed"
-              exit 1
-            fi
-            cd ../..
-          done
-        shell: msys2 {0}
+          CGO_LDFLAGS: ${{ matrix.os == 'darwin' && '-Wl,-undefined,dynamic_lookup' || '' }}
+        run: go test -count=1 ./...
 
-      - name: Build all plugins (non-Windows)
-        if: matrix.os != 'windows'
+      - name: Build
+        working-directory: plugins/qoder
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
           CC: ${{ matrix.cc }}
-        run: |
-          mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy qoder trae"
-          for plugin in $PLUGINS; do
-            echo "=== Building $plugin ==="
-            cd plugins/$plugin
-            go mod download
-            OUTPUT="../../dist/${{ matrix.os }}-${{ matrix.arch }}/${plugin}.${{ matrix.ext }}"
-            go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "$OUTPUT" .
-            if [ $? -eq 0 ]; then
-              echo "  ✅ $plugin built"
-            else
-              echo "  ❌ $plugin failed"
-              exit 1
-            fi
-            cd ../..
-          done
-        shell: bash
+          CGO_LDFLAGS: ${{ matrix.os == 'darwin' && '-Wl,-undefined,dynamic_lookup' || '' }}
+        run: go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o qoder.${{ matrix.ext }} .
 
-      - name: Package artifacts (Windows)
+      - name: Package (Windows)
         if: matrix.os == 'windows'
         shell: powershell
-        run: |
-          Get-ChildItem dist/${{ matrix.os }}-${{ matrix.arch }} -Filter *.dll | ForEach-Object { Write-Host "  $($_.Name)" }
-          Compress-Archive -Path "dist/${{ matrix.os }}-${{ matrix.arch }}/*.dll" -DestinationPath "cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip" -Force
-          Write-Host "Created zip:"
-          Get-Item "cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip" | Select-Object Name, Length
+        run: Compress-Archive -Path "plugins/qoder/qoder.dll" -DestinationPath "qoder-cpa-plugin-${{ matrix.os }}-${{ matrix.arch }}.zip" -Force
 
-      - name: Package artifacts (non-Windows)
+      - name: Package (non-Windows)
         if: matrix.os != 'windows'
-        run: |
-          cd dist/${{ matrix.os }}-${{ matrix.arch }}
-          rm -f *.h
-          zip -r ../../cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip .
-          cd ../..
-          ls -lh cpa-multi-plugins-*.zip
-        shell: bash
+        run: zip -j "qoder-cpa-plugin-${{ matrix.os }}-${{ matrix.arch }}.zip" "plugins/qoder/qoder.${{ matrix.ext }}"
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}
-          path: cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip
+          name: qoder-cpa-plugin-${{ matrix.os }}-${{ matrix.arch }}
+          path: qoder-cpa-plugin-${{ matrix.os }}-${{ matrix.arch }}.zip
           retention-days: 30
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: always() && !cancelled()
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: false
-
-      - name: Flatten artifacts
-        run: |
-          mkdir -p release
-          find artifacts -name "*.zip" -exec cp {} release/ \;
-          ls -lh release/
+          merge-multiple: true
 
       - name: Determine version
         id: version
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           fi
-        shell: bash
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          name: cpa-multi-plugins ${{ steps.version.outputs.version }}
+          name: qoder-cpa-plugin ${{ steps.version.outputs.version }}
+          files: artifacts/*.zip
           body: |
-            # cpa-multi-plugins ${{ steps.version.outputs.version }}
+            # qoder-cpa-plugin ${{ steps.version.outputs.version }}
 
-            3 unified CPA plugins: **CodeBuddy/WorkBuddy**, **Qoder**, **Trae** — each merges the former CN/Intl/solo variants with automatic legacy auth-file adoption.
+            Qoder plugin for CLIProxyAPI: CN + Intl in one provider.
 
             ## Downloads
-            - `cpa-multi-plugins-linux-amd64.zip` — Linux x86_64
-            - `cpa-multi-plugins-linux-arm64.zip` — Linux ARM64
-            - `cpa-multi-plugins-darwin-arm64.zip` — macOS Apple Silicon
-            - `cpa-multi-plugins-darwin-amd64.zip` — macOS Intel (cross-built on an arm64 runner)
-            - `cpa-multi-plugins-windows-amd64.zip` — Windows x86_64
+            - `qoder-cpa-plugin-linux-amd64.zip`
+            - `qoder-cpa-plugin-linux-arm64.zip`
+            - `qoder-cpa-plugin-darwin-arm64.zip`
+            - `qoder-cpa-plugin-windows-amd64.zip`
 
-            ## Installation (verified against real CLIProxyAPI host)
-            1. Download and unzip the archive for your platform.
-            2. Copy the `.so`/`.dylib`/`.dll` files to your CPA plugins directory (e.g. `plugins/linux/amd64/`).
-            3. **Each plugin must be explicitly enabled** in `config.yaml` (per-plugin default is disabled):
-               ```yaml
-               plugins:
-                 enabled: true
-                 dir: "plugins"
-                 configs:
-                   workbuddy: { enabled: true }
-                   qoder: { enabled: true }
-                   trae: { enabled: true }
-               ```
-            4. Restart CPA and check logs for `pluginhost: plugin registered plugin_id=workbuddy/qoder/trae`.
-            5. Login accounts via the management panel or Management API. Legacy `codebuddy-cn-/codebuddy-intl-/qoder-cn-/qoder-intl-/trae-cn-/trae-solo-cn-/trae-intl-` auth files are adopted automatically.
+            ## Install
+            Put `qoder.so` into CPA's plugin directory and enable it in `config.yaml`:
 
-            ## Plugins
-            | Plugin | Covers | Realms | Login options |
-            |---|---|---|---|
-            | workbuddy | CodeBuddy + WorkBuddy + codebuddy-cn + codebuddy-intl | CN (copilot.tencent.com) / Global (workbuddy.ai) / Intl (codebuddy.ai) | CLI + IDE, per-account region |
-            | qoder | Qoder + qoder-cn + qoder-intl | CN (qoder.com.cn) / Intl (qoder.com) | Device flow + PAT, per-account region |
-            | trae | Trae CN + Trae SOLO CN + Trae Intl | CN (api.trae.cn) / SOLO / Intl (marscode) | Per-variant device flow |
-
-            See [README](https://github.com/mmqz/cpa-multi-plugins#readme) for details.
-          files: release/*.zip
-          draft: false
-          prerelease: false
+            ```yaml
+            plugins:
+              enabled: true
+              dir: plugins
+              configs:
+                qoder:
+                  enabled: true
+            ```

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // check-in schedule: 10:00 and 21:00 local time.
@@ -48,6 +50,10 @@ var (
 	managementAPIKeyMu sync.RWMutex
 )
 
+type qoderConfigYAML struct {
+	HiddenModels yaml.Node `yaml:"hidden_models"`
+}
+
 // Default URL tries localhost first (works for both bare-metal and Docker
 // host-network), falls back to Docker compose service name. The probe runs
 // once at configure() time; a reachable endpoint wins.
@@ -69,6 +75,7 @@ func configure(raw []byte) {
 	nextMgmtKey := ""
 
 	cfgURL, cfgKey := "", ""
+	var nextHiddenModels []string
 	if len(raw) > 0 {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
@@ -115,6 +122,13 @@ func configure(raw []byte) {
 					nextLoginRegion = normalizeRegion(v)
 				}
 			}
+			var configDoc qoderConfigYAML
+			if err := yaml.Unmarshal(req.ConfigYAML, &configDoc); err == nil {
+				hidden, hiddenErr := normalizedConfiguredModelIDs(configDoc.HiddenModels)
+				if hiddenErr == nil {
+					nextHiddenModels = hidden
+				}
+			}
 		}
 	}
 
@@ -148,8 +162,29 @@ func configure(raw []byte) {
 	managementAPIKey = nextMgmtKey
 	managementAPIKeyMu.Unlock()
 
+	syncOverlayHiddenModels(nextHiddenModels)
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+}
+
+func normalizedConfiguredModelIDs(node yaml.Node) ([]string, error) {
+	if node.Kind == 0 {
+		return nil, nil
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!null" {
+		return nil, nil
+	}
+	if node.Kind != yaml.SequenceNode || node.Tag != "!!seq" {
+		return nil, &modelConfigError{field: "hidden_models", msg: "must be an array of strings"}
+	}
+	values := make([]string, len(node.Content))
+	for i, entry := range node.Content {
+		if entry.Kind != yaml.ScalarNode || entry.Tag != "!!str" {
+			return nil, &modelConfigError{field: "hidden_models", msg: "entries must be strings"}
+		}
+		values[i] = entry.Value
+	}
+	return normalizeModelIDList(values, "hidden_models")
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.

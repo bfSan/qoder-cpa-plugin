@@ -118,6 +118,12 @@ func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
 		if err != nil {
 			return
 		}
+		if !supportsCheckin(sa) {
+			if lifecycleEnabled() {
+				_, _ = reconcileOneAccount(f.AuthIndex, f.ID, true)
+			}
+			return
+		}
 		// CN: daily check-in when enabled.
 		ci, err := fetchCheckinStatus(sa)
 		if err == nil && ci != nil && ci.Active && !ci.TodayCheckedIn {
@@ -222,10 +228,14 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	for r := range outCh {
 		results[r.idx] = r.out
 	}
-	successN, alreadyN, failN := 0, 0, 0
+	successN, alreadyN, unsupportedN, failN := 0, 0, 0, 0
 	for _, r := range results {
 		if r["error"] != nil {
 			failN++
+			continue
+		}
+		if r["reason"] == "unsupported" {
+			unsupportedN++
 			continue
 		}
 		if r["skipped"] == true {
@@ -241,11 +251,12 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	return map[string]any{
 		"results": results,
 		"summary": map[string]any{
-			"total":      len(targets),
-			"success":    successN,
-			"already":    alreadyN,
-			"fail":       failN,
-			"elapsed_ms": time.Since(t0).Milliseconds(),
+			"total":       len(targets),
+			"success":     successN,
+			"already":     alreadyN,
+			"unsupported": unsupportedN,
+			"fail":        failN,
+			"elapsed_ms":  time.Since(t0).Milliseconds(),
 		},
 	}
 }
@@ -267,6 +278,13 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		return out
 	}
 	out["nickname"] = sa.Account.Nickname
+	if !supportsCheckin(sa) {
+		out["success"] = false
+		out["skipped"] = true
+		out["reason"] = "unsupported"
+		out["message"] = "Intl 账号不支持每日签到"
+		return out
+	}
 
 	// Step 1: GET status (5s budget).
 	ci, err := fetchCheckinStatus(sa)
@@ -433,6 +451,9 @@ func checkinLockFor(authIndex string) *sync.Mutex {
 // checkProUpgradeEligibility returns whether the account can still claim the
 // one-time Pro Upgrade pack (+1800).
 func checkProUpgradeEligibility(sa *storedAuth) (bool, error) {
+	if !supportsProUpgrade(sa) {
+		return false, &unsupportedCheckinError{Region: authRegion(sa)}
+	}
 	req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/sash/api/v1/me/pro-upgrade/eligibility", nil)
 	if err != nil {
 		return false, err
@@ -520,6 +541,13 @@ func handleClaimPro(req pluginapi.ManagementRequest) map[string]any {
 	out := map[string]any{
 		"auth_index": authIndex,
 		"nickname":   sa.Account.Nickname,
+	}
+	if !supportsProUpgrade(sa) {
+		out["success"] = false
+		out["skipped"] = true
+		out["reason"] = "unsupported"
+		out["message"] = "Intl 账号不支持 Pro 升级包领取"
+		return out
 	}
 	eligible, err := checkProUpgradeEligibility(sa)
 	if err != nil {

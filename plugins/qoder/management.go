@@ -129,6 +129,9 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
 			{Method: http.MethodGet, Path: base + "/cooldowns", Description: "List active per-(account, model) cooldown entries."},
 			{Method: http.MethodPost, Path: base + "/cooldowns/clear", Description: "Clear cooldown for one account (auth_id) or one pair (auth_id + model)."},
+			{Method: http.MethodGet, Path: base + "/models", Description: "List the effective model catalog plus plugin-owned overlay state."},
+			{Method: http.MethodPut, Path: base + "/models", Description: "Replace the plugin-owned model overlay."},
+			{Method: http.MethodPost, Path: base + "/models/action", Description: "Apply one model action: hide, restore, move or add."},
 			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start a CN or Intl Qoder device-authorization login (body: {region})."},
 			{Method: http.MethodPost, Path: base + "/oauth/poll", Description: "Poll a plugin-owned Qoder device-authorization login (body: {state})."},
 		},
@@ -196,6 +199,12 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownList(req)))
 	case req.Method == http.MethodPost && path == base+"/cooldowns/clear":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownClear(req)))
+	case req.Method == http.MethodGet && path == base+"/models":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildModelListQuery()))
+	case req.Method == http.MethodPut && path == base+"/models":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelOverlayWrite(req)))
+	case req.Method == http.MethodPost && path == base+"/models/action":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelOverlayAction(req)))
 	case req.Method == http.MethodPost && path == base+"/oauth/start":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManagementOAuthStart(req)))
 	case req.Method == http.MethodPost && path == base+"/oauth/poll":
@@ -331,6 +340,8 @@ func mutatingManagementPath(path string) bool {
 		base + "/keepalive",
 		base + "/claim-pro",
 		base + "/cooldowns/clear",
+		base + "/models",
+		base + "/models/action",
 		base + "/oauth/start",
 		base + "/oauth/poll":
 		return true
