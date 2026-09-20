@@ -220,10 +220,16 @@ func fetchDynamicModelsFromStorageInner(storageJSON []byte) []pluginapi.ModelInf
 	dyn, err := discoverModelsFn(accessToken, realm, uid)
 	if err != nil {
 		noteRealmError(realm, err.Error())
+		if stale, ok := cachedDynamicModelsStale(realm); ok {
+			return stale
+		}
 		return staticModelsForRealm(realm)
 	}
 	if len(dyn) == 0 {
 		noteRealmError(realm, "discovery payload had no user-facing models")
+		if stale, ok := cachedDynamicModelsStale(realm); ok {
+			return stale
+		}
 		return staticModelsForRealm(realm)
 	}
 	storeDynamicModels(realm, dyn)
@@ -261,16 +267,28 @@ func noteRealmSource(realm, source string, count int) {
 // per-realm throttle: immediately on a NEW message, otherwise at most once a
 // minute (model.for_auth can fire per models query, and silent failure is
 // exactly what made thin/stale model lists undiagnosable).
+//
+// v0.12.71 (adapted from PR #6 / ab64e63): a transient failure must NOT wipe
+// the last successful discovery. The host re-runs model.for_auth per auth
+// over time; blanking models here makes different auths register different
+// lists at different instants, which the host then turns into a shrunken
+// candidate pool for routing. The stale list stays cached (see
+// cachedDynamicModelsStale) until the next successful discovery replaces it.
 func noteRealmError(realm, msg string) {
 	now := time.Now()
 	dynamicModelsCache.Lock()
 	entry := dynamicModelsCache.realms[realm]
 	fallback := staticModelsForRealm(realm)
-	entry.models = nil
-	entry.source = "static (discovery failed)"
-	entry.srcCount = len(fallback)
 	entry.lastErr = msg
 	entry.lastErrAt = now
+	if len(entry.models) > 0 {
+		// Keep the previous discovery answer as the served list.
+		entry.source = "last discovery (transient failure)"
+		entry.srcCount = len(entry.models)
+	} else {
+		entry.source = "static (discovery failed)"
+		entry.srcCount = len(fallback)
+	}
 	shouldLog := entry.lastLogAt.IsZero() || now.Sub(entry.lastLogAt) >= time.Minute
 	if shouldLog {
 		entry.lastLogAt = now
@@ -278,7 +296,11 @@ func noteRealmError(realm, msg string) {
 	dynamicModelsCache.realms[realm] = entry
 	dynamicModelsCache.Unlock()
 	if shouldLog {
-		log.Printf("models: realm=%s discovery failed (%s) — serving static catalog (%d model(s)) until next successful discovery", realm, msg, len(fallback))
+		if len(entry.models) > 0 {
+			log.Printf("models: realm=%s discovery failed (%s) — serving last successful discovery (%d model(s)) until next success", realm, msg, len(entry.models))
+		} else {
+			log.Printf("models: realm=%s discovery failed (%s) — serving static catalog (%d model(s)) until next successful discovery", realm, msg, len(fallback))
+		}
 	}
 }
 
@@ -324,6 +346,23 @@ func cachedDynamicModels(realm string) ([]pluginapi.ModelInfo, bool) {
 	defer dynamicModelsCache.RUnlock()
 	entry, ok := dynamicModelsCache.realms[realm]
 	if !ok || len(entry.models) == 0 || time.Since(entry.fetched) >= dynamicModelsCacheTTL {
+		return nil, false
+	}
+	return entry.models, true
+}
+
+// cachedDynamicModelsStale returns the realm's last successful discovery
+// result regardless of TTL (v0.12.71, adapted from PR #6 / ab64e63): on a
+// transient discovery failure the previously discovered list is still the
+// best-known answer for that realm — better than the static catalog, which
+// may be a subset or carry retired entries. Only the fresh-TTL path
+// (cachedDynamicModels) short-circuits discovery; this one is consulted
+// exclusively from the failure fallback.
+func cachedDynamicModelsStale(realm string) ([]pluginapi.ModelInfo, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	entry, ok := dynamicModelsCache.realms[realm]
+	if !ok || len(entry.models) == 0 {
 		return nil, false
 	}
 	return entry.models, true

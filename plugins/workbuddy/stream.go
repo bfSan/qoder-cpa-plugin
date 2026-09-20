@@ -229,6 +229,14 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 // content:"" is a valid delta (pure tool-call chunk) and the role-only first
 // chunk must survive so clients can establish the message role.
 func cleanChunkJSON(s string) string {
+	// SSE comment frames (": keep-alive" / ": heartbeat") are legal upstream
+	// keep-alives but must never be re-emitted as "data: ..." events: strict
+	// clients JSON-parse every data: line and "data: : heartbeat" crashes them
+	// with "Unexpected token ':'" (adapted from PR #6 / a19bb56). They carry no
+	// payload, so dropping them here is lossless for every consumer.
+	if strings.HasPrefix(s, ":") {
+		return ""
+	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(s), &obj) != nil {
 		return s
