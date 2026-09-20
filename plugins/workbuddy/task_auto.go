@@ -9,8 +9,10 @@
 // 完成的任务发射对应指纹的判据事件链，回读进度（上游异步计分，有界轮询），
 // 达标即自动领奖。所有动作幂等：已 claimed/已达标任务自动跳过。
 //
-// 真实对话类任务（Model_chat_GLM5.2 / skill_1 / expert 系 / black_cat）需服务端
-// requestId 的真实会话，不在本轮范围（后续版本接入聊天通道实现）。
+// 真实对话类任务（Model_chat_GLM5.2 / skill_1 / expert_5 / Expert_team_use_3 /
+// Expert_lighthouse / black_cat）由 task_chat.go 承接：桌面指纹 SSE 真实对话取
+// 服务端 requestId + 模型对齐上报。black_cat 另有每日 23 点补跑位
+// （growthNightTaskTick，窗口外行为不计分）。
 package main
 
 import (
@@ -50,6 +52,13 @@ var growthAutoActions = []growthAutoAction{
 	{Code: "Hp_Appearance", Desc: "主题设置+皮肤事件", run: runAutoAppearance},
 	{Code: "school_season", Desc: "校园日（mp 口径）", run: runAutoSchoolSeason, mp: true},
 	{Code: "Sequential_Tasks_1", Desc: "小程序首对话（mp 口径）", run: runAutoSequentialChat, mp: true},
+	// 真实对话类（task_chat.go）：消耗极短对话额度，幂等差额收口。
+	{Code: "Model_chat_GLM5.2", Desc: "glm-5.2 真实对话+对齐上报", run: runAutoModelChat},
+	{Code: "skill_1", Desc: "真实对话+skill_info JOIN", run: runAutoSkillFresh},
+	{Code: "expert_5", Desc: "专家召唤+真实使用链", run: runAutoExpertUse},
+	{Code: "Expert_team_use_3", Desc: "专家团召唤+真实使用链", run: runAutoExpertTeamUse},
+	{Code: "Expert_lighthouse", Desc: "轻量云专家 LOCAL 链", run: runAutoExpertLighthouse},
+	{Code: "black_cat", Desc: "夜猫子（23-08 窗口）", run: runAutoBlackCat},
 }
 
 // growthMPTaskCodes 小程序口径专属下发的成长任务：默认列表不出现，

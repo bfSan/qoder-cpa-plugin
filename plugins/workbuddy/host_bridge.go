@@ -411,6 +411,13 @@ func (r *hostStreamReader) Read(p []byte) (int, error) {
 	return r.Read(p)
 }
 
+// Close releases the underlying host stream. io.ReadCloser parity for call
+// sites that drain-and-close task-chat SSE streams (task_chat.go).
+func (r *hostStreamReader) Close() error {
+	r.s.Close()
+	return nil
+}
+
 // mustJSON marshals v and panics on error — the wire structs above are always
 // marshalable, so any failure here is a programming bug.
 func mustJSON(v any) []byte {

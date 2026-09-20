@@ -721,11 +721,24 @@ type growthChatEvent struct {
 // the conversationID is caller-generated. Deliberately no retry: the event
 // is day-idempotent upstream and a blind resend would skew counters.
 func growthReportActivity(sa *storedAuth, conversationID, requestID string) error {
+	return growthReportActivityModel(sa, conversationID, requestID, "deepseek-v4-flash", "DeepSeek V4 Flash")
+}
+
+// growthReportActivityModel 同上，但上报可携带指定模型：「体验某模型」类任务
+// （Model_chat_GLM5.2、black_cat）判据对齐 requestModelId 与实际对话一致
+// ——对话用 glm-5.2、上报却带默认 flash 会被判不匹配。
+func growthReportActivityModel(sa *storedAuth, conversationID, requestID, modelID, modelName string) error {
 	if conversationID == "" {
 		conversationID = "wb-" + growthClientToken()
 	}
 	if requestID == "" {
 		requestID = conversationID
+	}
+	if modelID == "" {
+		modelID = "deepseek-v4-flash"
+	}
+	if modelName == "" {
+		modelName = modelID
 	}
 	now := time.Now().UnixMilli()
 	ev := growthChatEvent{
@@ -735,8 +748,8 @@ func growthReportActivity(sa *storedAuth, conversationID, requestID string) erro
 		ConversationID:       conversationID,
 		RequestID:            requestID,
 		InputLength:          12,
-		RequestModelID:       "deepseek-v4-flash",
-		RequestModelName:     "DeepSeek V4 Flash",
+		RequestModelID:       modelID,
+		RequestModelName:     modelName,
 		MentionContexts:      []any{},
 		KnowledgeID:          []any{},
 		KnowledgeName:        []any{},

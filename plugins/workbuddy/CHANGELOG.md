@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.9.24
+
+### real-conversation tasks: the remaining 6 growth tasks automated end-to-end (repo v0.12.69)
+
+User follow-up (2026-09-20): "剩余 6 个任务没法直接做吗" — 0.9.23 automated
+13/19 growth tasks via fingerprint event chains; the remaining real-
+conversation tasks (Model_chat_GLM5.2, skill_1, expert_5, Expert_team_use_3,
+Expert_lighthouse, black_cat) were deferred pending a chat-channel hook.
+
+Answer: they are doable — wb2api's autotask has since shipped verified
+recipes for all six (its package header claiming skill_1 "unbroken" and
+Expert_lighthouse "skipped" is stale; the implementations carry per-task
+multi-account light-up notes dated 2026-09-12). This release ports them:
+
+- task_chat.go (new): the real-conversation layer, mounted as 6 new rows in
+  the growthAutoActions table (13 + 6 = 19 — every growth task except
+  Expert_Philanthropy, which requires a real money donation, is now
+  automatable).
+  - Two judging mechanisms, both requiring an actual chat round-trip with a
+    tiny prompt ("hi，请回复一句话" / "1+1等于几？直接回答。" — negligible
+    quota):
+    1. glm-5.2 tasks (Model_chat_GLM5.2, black_cat): a real chat leaves
+       server-side evidence; the follow-up /v2/report must align
+       requestModelId with the chat model (report glm-5.2 after a glm-5.2
+       chat — the pre-existing flash default reads as a mismatch).
+       growthReportActivityModel adds the model-aligned variant;
+       growthReportActivity delegates unchanged.
+    2. JOIN tasks (skill_1, expert_5, Expert_team_use_3, Expert_lighthouse):
+       a desktop-fingerprint SSE chat yields the SERVER-side requestId
+       (first data.id matching cmb-|32hex — fabricated UUIDs do not count,
+       wb2api Sunny row 2113), which the chat chain + skill_info /
+       expert_actual_use events must JOIN. Expert ids must come from the
+       real market list (POST /portal/operation-platform/market/expert/list).
+  - growthDesktopChatID parses the SSE stream with a watermark scanner
+    (chunk-straddling keys and non-matching leading ids handled; closes the
+    stream once the id is found — JOIN tasks only need the id).
+  - expert batches are deficit-aware (3/5 → exactly 2 rounds), per-expert
+    failure continues, all-fail reports the last error.
+  - black_cat only counts inside the 23:00–08:00 local window; outside it
+    the action is a no-op line that names the window (quota preserved).
+  - Night top-up slot: checkin.go's scheduler gained a 23:00 slot
+    (growthNightTaskHours) running growthNightTaskTick for all CN accounts
+    under the per-account checkin lock — black_cat completes overnight even
+    if the user never runs tasks at night.
+- host_bridge.go: hostStreamReader gained Close() (io.ReadCloser parity for
+  drain-and-close task-chat streams).
+- Tests (task_chat_test.go, 13): night-window boundaries + scheduler slot
+  registration, server-id regex, summon/actual-use/skill_info shapes,
+  SSE id extraction (including non-matching first id and truncated id),
+  model-aligned report, table completeness (19), expert deficit, black_cat
+  window gate + deficit, model-chat and lighthouse end-to-end flows against
+  a scripted SSE upstream. TestNextCheckinTime updated for the new 23:00
+  slot (22:00 → next 23:00 same day; 23:30 → next day 09:00).
+
+- Quota note: a full fresh-account run now spends ~14 tiny real chats
+  (1 glm-5.2 for Model_chat, up to 5+3+1 fast-model for experts/lighthouse,
+  1 fast-model for skill_1, up to 3 glm-5.2 overnight for black_cat) on top
+  of the zero-cost fingerprint events of 0.9.23.
+
 ## 0.9.23
 
 ### auto-light the growth task center (desktop/web/mp fingerprint event chains) + adopt-before-accept ordering (repo v0.12.68)

@@ -295,6 +295,94 @@ func growthDesktopDesignCanvasSequence(conversationID, requestID string) []growt
 	)
 }
 
+// growthDesktopExpertSummonSequence 构造「召唤平台专家」事件组，载荷对齐真实
+// 抓包样本（wb2api Sunny row 2644）：web_element_click(expert_summon_click) →
+// expert_summon_click → expert_summoned。需配合真实对话（服务端 requestId）+
+// expert_actual_use 才计数——编造专家 id 或自造 requestId 均不计数（三账号实测）。
+func growthDesktopExpertSummonSequence(e growthMarketExpert) []growthDesktopEvent {
+	cat := "expert-all"
+	if len(e.Categories) > 0 {
+		if s, ok := e.Categories[0].(string); ok && s != "" {
+			cat = s
+		}
+	}
+	ver := e.Version
+	if ver == "" {
+		ver = "1.0.0"
+	}
+	return []growthDesktopEvent{
+		{
+			"eventCode": "web_element_click", "source": e.ExpertID, "type": cat, "version": ver,
+			"elementId": "expert_summon_click", "elementName": "立即召唤",
+			"pageURL": "/C:/Program%20Files/WorkBuddy/resources/app.asar/renderer/index.html",
+		},
+		{
+			"eventCode": "expert_summon_click", "id": e.ExpertID, "name": e.DisplayNameZH,
+			"expertTitle": e.ProfessionZH, "type": "expert-all", "position": 0,
+			"expertType": e.ExpertType, "version": ver, "mode": "LOCAL",
+		},
+		{
+			"eventCode": "expert_summoned", "id": e.ExpertID, "name": e.DisplayNameZH,
+			"expertTitle": e.ProfessionZH, "type": "expert-all",
+		},
+	}
+}
+
+// growthDesktopExpertActualUseEvent 构造「专家真实使用」事件（expert_5 /
+// Expert_team_use_3 计数）。requestID 必须是真实对话返回的服务端 requestId。
+func growthDesktopExpertActualUseEvent(e growthMarketExpert, conversationID, requestID string) growthDesktopEvent {
+	ev := growthDesktopExpertActualUse(e, conversationID, requestID)
+	ev["mode"] = "craft"
+	return ev
+}
+
+// growthDesktopExpertActualUseLocal mode:"LOCAL" 变体（Expert_lighthouse 判据
+// 要求 LOCAL，对齐真实样本 Sunny row 868：轻量云专家使用时 type 为空、cost=0
+// ——调用方在返回值上覆写这两个键）。
+func growthDesktopExpertActualUseLocal(e growthMarketExpert, conversationID, requestID string) growthDesktopEvent {
+	ev := growthDesktopExpertActualUse(e, conversationID, requestID)
+	ev["mode"] = "LOCAL"
+	return ev
+}
+
+// growthDesktopExpertActualUse expert_actual_use 公共载荷。
+func growthDesktopExpertActualUse(e growthMarketExpert, conversationID, requestID string) growthDesktopEvent {
+	cat := "expert-all"
+	if len(e.Categories) > 0 {
+		if s, ok := e.Categories[0].(string); ok && s != "" {
+			cat = s
+		}
+	}
+	ver := e.Version
+	if ver == "" {
+		ver = "1.0.0"
+	}
+	return growthDesktopEvent{
+		"eventCode": "expert_actual_use",
+		"id":        e.ExpertID, "name": e.DisplayNameZH, "expertTitle": e.ProfessionZH,
+		"type": cat, "expertType": e.ExpertType, "source": "builtin", "version": ver,
+		"cost": 9000, "characterCount": 14,
+		"conversationId": conversationID, "requestId": requestID,
+		"messageId":      "msg-" + requestID[len(requestID)-8:],
+		"requestModelId": "fast-model", "requestModelName": "fast-model",
+	}
+}
+
+// growthDesktopSkillInfoEvent 构造 skill_info 技能加载事件（skill_1 判据，
+// 紫川手动完成抓包 row 209）：真实技能 id + toolStatus=success + JOIN 真实会话
+// （conversationId/requestId 为服务端 id）。此前的 skill_request_send /
+// skill_installed / skill_action 均是错误方向（不计数）。
+func growthDesktopSkillInfoEvent(skillID, skillName, conversationID, requestID, messageID string) growthDesktopEvent {
+	return growthDesktopEvent{
+		"eventCode": "skill_info",
+		"id":        skillName, "skillId": skillID, "skillVersion": "1.0.0",
+		"toolStatus": "success", "fileCount": 56, "source": "workbuddy-desktop",
+		"conversationId": conversationID, "requestId": requestID, "messageId": messageID,
+		"requestModelId": "fast-model", "requestModelName": "fast-model",
+		"traceId": requestID,
+	}
+}
+
 // growthSetAppearanceTheme 应用外观主题（chat 域 /v2/user-asset/appearance/set，
 // {kind:"theme",resource_key}）。Hp_Appearance 判据 = set API 留痕 + 随后的
 // appearance_skin_apply 事件（只 set 不发事件不计分——wb2api 实测修正）。

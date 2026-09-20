@@ -81,9 +81,18 @@ func TestNextCheckinTime(t *testing.T) {
 	if got.Hour() != 21 {
 		t.Fatalf("want 21, got %v", got.Hour())
 	}
-	// 22:00 → next day 09:00
+	// 22:00 → next 23:00 (v0.9.24 night-task slot for black_cat, same day)
 	late := time.Date(2026, 7, 24, 22, 0, 0, 0, time.UTC)
 	got = nextCheckinTime(late)
+	if got.Hour() != 23 {
+		t.Fatalf("want 23 (night slot), got %v", got.Hour())
+	}
+	if got.Day() != 24 {
+		t.Fatalf("want same day, got %v", got.Day())
+	}
+	// 23:30 → next day 09:00 (night slot passed; nothing before morning)
+	after := time.Date(2026, 7, 24, 23, 30, 0, 0, time.UTC)
+	got = nextCheckinTime(after)
 	if got.Hour() != 9 {
 		t.Fatalf("want 9, got %v", got.Hour())
 	}

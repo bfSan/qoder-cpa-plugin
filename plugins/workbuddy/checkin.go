@@ -41,6 +41,9 @@ func nextCheckinTime(now time.Time) time.Time {
 	// then 22:00 keepalive fires on the next tick).
 	hours := append([]int{}, checkinHours...)
 	hours = append(hours, keepaliveHours...)
+	// Night-task slot (23:00): black_cat only scores inside the 23-08 window,
+	// so the scheduler tops it up after the evening checkin (v0.9.24).
+	hours = append(hours, growthNightTaskHours...)
 	for _, h := range hours {
 		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
 		if !t.After(now) {
@@ -68,6 +71,11 @@ func schedulerLoop(stop chan struct{}) {
 			// the previous checkin tick was 21:00).
 			if shouldRunKeepaliveNow(time.Now()) {
 				runTokenKeepalive()
+			}
+			// Night-task slot (23:00): top up black_cat while the 23-08 window
+			// is open; a no-op (window check) if the tick drifted past 08:00.
+			if shouldRunNightTaskNow(time.Now()) {
+				growthNightTaskTick()
 			}
 		}
 	}
