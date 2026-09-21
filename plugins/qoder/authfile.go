@@ -200,6 +200,7 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
 		"provider": providerName,
 		"logo":     pluginLogoURL,
 		"disabled": disabled,
+		"label":    labelForAuth(sa),
 		"note":     note,
 		"auth":     nested["auth"],
 		"account":  nested["account"],

@@ -62,6 +62,71 @@ func TestSyncAuthNoteWritesFreshCredits(t *testing.T) {
 	}
 }
 
+// TestBuildAuthFileJSONPersistsHostLabel guards the auth-page regression: CPA's
+// file store builds its label from the top-level metadata map, so the host label
+// must be written to disk rather than only returned from AuthParse.
+func TestBuildAuthFileJSONPersistsHostLabel(t *testing.T) {
+	sa := testStoredAuthCNAccount()
+	raw, err := buildAuthFileJSON(sa, false, "CN · 余1 已用2", nil)
+	if err != nil {
+		t.Fatalf("buildAuthFileJSON: %v", err)
+	}
+	var parsed struct {
+		Label string `json:"label"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal auth file: %v", err)
+	}
+	if want := labelForAuth(sa); parsed.Label != want {
+		t.Fatalf("label = %q, want %q", parsed.Label, want)
+	}
+}
+
+func TestAccountRenameSyncsHostLabel(t *testing.T) {
+	oldGet := hostAuthGetPhysicalFn
+	oldSave := hostAuthPersistMigrateFn
+	var saved []byte
+	hostAuthGetPhysicalFn = func(authIndex string) (*hostAuthPhysical, error) {
+		raw, _ := json.Marshal(map[string]any{
+			"type":    providerName,
+			"account": map[string]any{"uid": "uid-rename", "nickname": "old"},
+			"auth":    map[string]any{"accessToken": "tok", "region": regionCN},
+			"note":    "CN · 余1 已用2",
+		})
+		return &hostAuthPhysical{AuthIndex: authIndex, Name: "qoder-cn-uid-rename.json", JSON: raw}, nil
+	}
+	hostAuthPersistMigrateFn = func(name, path, legacyPath string, raw []byte) error {
+		saved = append([]byte(nil), raw...)
+		return nil
+	}
+	t.Cleanup(func() {
+		hostAuthGetPhysicalFn = oldGet
+		hostAuthPersistMigrateFn = oldSave
+	})
+
+	resp := handleAccountRename(pluginapi.ManagementRequest{
+		Body: []byte(`{"auth_index":"idx-rename","name":"新名字"}`),
+	})
+	if errValue, ok := resp["error"]; ok {
+		t.Fatalf("rename error: %v", errValue)
+	}
+	var parsed struct {
+		Label   string `json:"label"`
+		Account struct {
+			Nickname string `json:"nickname"`
+		} `json:"account"`
+	}
+	if err := json.Unmarshal(saved, &parsed); err != nil {
+		t.Fatalf("unmarshal saved auth: %v", err)
+	}
+	if parsed.Account.Nickname != "新名字" {
+		t.Fatalf("nickname = %q", parsed.Account.Nickname)
+	}
+	if want := "新名字 [CN]"; parsed.Label != want {
+		t.Fatalf("label = %q, want %q", parsed.Label, want)
+	}
+}
+
 // TestSyncAuthNoteKeepsKnownCreditsOnFailure guards the other half: a transient
 // credits-query failure must not overwrite a good note with "积分未知".
 func TestSyncAuthNoteKeepsKnownCreditsOnFailure(t *testing.T) {

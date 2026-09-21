@@ -164,7 +164,7 @@ func handleAccountRename(req pluginapi.ManagementRequest) map[string]any {
 	if authIndex == "" {
 		return map[string]any{"error": "auth_index is required"}
 	}
-	phys, err := hostAuthGetPhysical(authIndex)
+	phys, err := hostAuthGetPhysicalFn(authIndex)
 	if err != nil || phys == nil {
 		return map[string]any{"error": "account not found"}
 	}
