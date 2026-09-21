@@ -1,7 +1,8 @@
-// checkin.go implements daily check-in for CN accounts: the manual
-// handleManualCheckin endpoint, the 09:00 / 21:00 auto timer, and the
-// per-account mutex that prevents duplicate check-ins from racing browser
-// tabs. CN accounts are excluded — they use one-shot trial claims instead.
+// checkin.go implements the daily benefit check-in for CN and Intl accounts:
+// the manual handleManualCheckin endpoint, the 10:00 / 21:00 auto timer, and
+// the per-account mutex that prevents duplicate check-ins from racing browser
+// tabs. Both regions use the campaign contract (see campaign.go); CN keeps the
+// legacy daily-check-in endpoint as a fallback.
 package main
 
 import (
@@ -74,9 +75,10 @@ func checkinLoop(stop chan struct{}) {
 	}
 }
 
-// runAutoCheckin is the scheduled lifecycle tick (09:00 / 21:00).
-// CN: optional daily check-in, then reconcile (disable exhausted / reenable after credits).
-// CN: no auto trial (one-shot claim is manual only); reconcile may delete exhausted auths.
+// runAutoCheckin is the scheduled lifecycle tick (10:00 / 21:00).
+// It runs the optional daily check-in, then reconciles credit state
+// (disable exhausted / reenable after credits). The one-shot Pro upgrade
+// claim remains manual.
 //
 // v0.6.31: per-account work runs concurrently (sem=4) — was serial, so N accounts
 // meant 3N serial HTTP round-trips on the billing API. Matches the pattern used
@@ -124,7 +126,7 @@ func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
 			}
 			return
 		}
-		// CN: daily check-in when enabled.
+		// Daily benefit check-in when enabled.
 		ci, err := fetchCheckinStatus(sa)
 		if err == nil && ci != nil && ci.Active && !ci.TodayCheckedIn {
 			if _, callErr := performCheckinCall(sa); callErr == nil {
@@ -282,7 +284,7 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		out["success"] = false
 		out["skipped"] = true
 		out["reason"] = "unsupported"
-		out["message"] = "Intl 账号不支持每日签到"
+		out["message"] = "当前区域不支持每日签到"
 		return out
 	}
 

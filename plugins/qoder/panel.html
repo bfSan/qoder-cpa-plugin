@@ -400,8 +400,8 @@ function card(a){
   const disabled=!!a.disabled;
   const isIntl=(a.region||"cn")==="intl";
   const regionBadge=`<span class="badge ${isIntl?"global":"cn"}">${isIntl?"Intl":"CN"}</span>`;
-  // Both regions have a check-in: CN uses daily-check-in, Intl uses the
-  // campaign benefit contract. Pro upgrade remains CN-only.
+  // Both regions use the campaign benefit contract. CN's legacy daily-check-in
+  // endpoint only serves as a fallback. Pro upgrade remains CN-only.
   const checked=ci.today_checked_in;
   const ciActive=ci.active!==false; // absent=true (default active)
   const btnClass=checked?"done":(ciActive?"sec":"done");

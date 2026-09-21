@@ -1,10 +1,11 @@
-// campaign.go implements the Intl check-in contract.
+// campaign.go implements the daily-benefit contract shared by CN and Intl.
 //
-// Qoder Intl does not expose the CN daily-check-in endpoints. Its daily
-// benefit is delivered as a marketing campaign: GET /sash/api/v1/me/campaigns
-// returns claimable campaigns, and POST /sash/api/v1/me/campaigns/{id}/claim
-// claims one. The web activity page (g.alicdn.com growth-page) uses exactly
-// these two calls, and the desktop client polls the same status endpoint.
+//	GET  /sash/api/v1/me/campaigns
+//	POST /sash/api/v1/me/campaigns/{campaignId}/claim
+//
+// The desktop client polls the same status endpoint and opens the activity
+// page, which performs the claim through these two calls. CN moved from its
+// legacy /me/daily-check-in pair to this contract on 2026-09-21.
 package main
 
 import (
@@ -105,17 +106,18 @@ func fetchCampaignCheckinSummary(sa *storedAuth) (*checkinSummary, error) {
 
 func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
 	sum := &checkinSummary{
-		Active:       status != nil && (status.ShowCampaign || status.Claimable),
 		ActivityName: "权益活动",
 	}
 	if status == nil {
 		return sum
 	}
 	if c := claimableCampaign(status); c != nil {
+		sum.Active = true
 		sum.DailyCredit = campaignCredit(c)
 		return sum
 	}
 	if c := claimedCampaign(status); c != nil {
+		sum.Active = true
 		sum.TodayCheckedIn = true
 		sum.DailyCredit = campaignCredit(c)
 		sum.TodayCredit = campaignCredit(c)
@@ -171,6 +173,13 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 	}
 	if statusValue, _ := body["status"].(string); !strings.EqualFold(statusValue, "CLAIMED") {
 		return map[string]any{"success": false, "upstream": m}, nil
+	}
+	if replayed, _ := body["replayed"].(bool); replayed {
+		return map[string]any{
+			"success":       false,
+			"result":        "ALREADY_CLAIMED",
+			"rewardCredits": float64(campaignCredit(c)),
+		}, nil
 	}
 	return map[string]any{
 		"success":        true,

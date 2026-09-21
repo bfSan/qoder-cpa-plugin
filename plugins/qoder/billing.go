@@ -13,6 +13,16 @@ import (
 	"time"
 )
 
+// billingClientType is the desktop client's Cosy-ClientType. Qoder's billing
+// surface gates the campaign response on this header: the same credential
+// that returns showCampaign:false to a bare request returns the live daily
+// "100 Credits" campaign once Cosy-ClientType is present. Verified live
+// 2026-09-21 against openapi.qoder.com.cn and openapi.qoder.sh.
+const (
+	billingClientType = "10"
+	billingClientVer  = "0.3.4"
+)
+
 func billingHeaders(req *http.Request, sa *storedAuth) {
 	// QoderWork billing endpoints authenticate with the active token as a
 	// plain Bearer — jobToken (jt-) or device token (dt-), both accepted
@@ -20,6 +30,9 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Qoder")
+	req.Header.Set("Cosy-ClientType", billingClientType)
+	req.Header.Set("Cosy-Version", billingClientVer)
 	// 2026-09-21: the billing surface additionally requires the web session
 	// cookies (acw_tc / qoder_csrf_token) and the mirrored CSRF header. Without
 	// them every /sash and /api/v2 call answers 401 "missing cookie header".
@@ -42,8 +55,27 @@ type checkinStatusResponse struct {
 func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 	switch capabilitiesForRegion(authRegion(sa)).Contract {
 	case checkinContractCampaign:
-		return fetchCampaignCheckinSummary(sa)
+		sum, err := fetchCampaignCheckinSummary(sa)
+		if err == nil {
+			return sum, nil
+		}
+		// Older CN credentials may predate the campaign surface. Fall back to
+		// the legacy daily-check-in endpoint only for CN and only when the
+		// campaign call itself failed (an empty campaign list is a valid
+		// "nothing to claim" answer, not a reason to retry another contract).
+		if authRegion(sa) == regionCN {
+			if legacy, legacyErr := fetchDailyCheckinStatus(sa); legacyErr == nil {
+				return legacy, nil
+			}
+		}
+		return nil, err
 	}
+	return fetchDailyCheckinStatus(sa)
+}
+
+// fetchDailyCheckinStatus is the legacy CN daily-check-in contract, kept as a
+// fallback after CN moved to /me/campaigns (2026-09-21).
+func fetchDailyCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/status", nil)
@@ -182,8 +214,22 @@ func fetchPaymentType(sa *storedAuth) string {
 
 func performCheckinCall(sa *storedAuth) (map[string]any, error) {
 	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
-		return performCampaignCheckin(sa)
+		res, err := performCampaignCheckin(sa)
+		if err == nil {
+			return res, nil
+		}
+		if authRegion(sa) == regionCN {
+			if legacy, legacyErr := performDailyCheckinCall(sa); legacyErr == nil {
+				return legacy, nil
+			}
+		}
+		return nil, err
 	}
+	return performDailyCheckinCall(sa)
+}
+
+// performDailyCheckinCall is the legacy CN claim path, kept as a fallback.
+func performDailyCheckinCall(sa *storedAuth) (map[string]any, error) {
 	req, err := http.NewRequest(http.MethodPost, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/claim", strings.NewReader("{}"))
 	if err != nil {
 		return nil, err

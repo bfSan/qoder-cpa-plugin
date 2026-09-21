@@ -80,10 +80,12 @@ func TestCampaignClaimableSkipsExpired(t *testing.T) {
 }
 
 func TestFetchCampaignCheckinSummaryUsesIntlEndpoint(t *testing.T) {
-	var gotPath, gotAuth string
+	var gotPath, gotAuth, gotClientType, gotUA string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
+		gotClientType = r.Header.Get("Cosy-ClientType")
+		gotUA = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(campaignListJSON))
 	}))
@@ -102,8 +104,31 @@ func TestFetchCampaignCheckinSummaryUsesIntlEndpoint(t *testing.T) {
 	if gotAuth != "Bearer test-token" {
 		t.Fatalf("auth = %q", gotAuth)
 	}
+	// Regression guard for the 2026-09-21 CN/Intl check-in report: without
+	// Cosy-ClientType the upstream hides the campaign (showCampaign:false),
+	// so the panel reported "不可签" while the desktop client could claim.
+	if gotClientType != billingClientType {
+		t.Fatalf("Cosy-ClientType = %q, want %q", gotClientType, billingClientType)
+	}
+	if gotUA != "Qoder" {
+		t.Fatalf("User-Agent = %q, want Qoder", gotUA)
+	}
 	if !sum.Active || sum.TodayCheckedIn {
 		t.Fatalf("summary = %#v", sum)
+	}
+}
+
+// A campaign region answers 200 with showCampaign:false when the request
+// lacks the desktop client identity. That is not an auth failure, but it also
+// must not read as an active check-in — the panel shows "none" explicitly.
+func TestCampaignSummaryHiddenCampaignIsNotActive(t *testing.T) {
+	var status campaignStatusResponse
+	if err := json.Unmarshal([]byte(`{"showCampaign":false,"claimable":false,"campaigns":[]}`), &status); err != nil {
+		t.Fatal(err)
+	}
+	sum := campaignCheckinSummary(&status)
+	if sum.Active || sum.TodayCheckedIn {
+		t.Fatalf("summary = %#v, want inactive", sum)
 	}
 }
 

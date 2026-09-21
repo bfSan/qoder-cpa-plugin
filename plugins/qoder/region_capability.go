@@ -1,9 +1,17 @@
 // region_capability.go records which upstream billing contracts exist per
 // region. CN and Intl share the quota/plan/user endpoints and the device-token
-// family. Both regions offer a check-in, but through different contracts:
+// family. Both regions deliver the daily benefit through the campaign
+// contract:
 //
-//   - CN: /sash/api/v1/me/daily-check-in/{status,claim}
-//   - Intl: /sash/api/v1/me/campaigns + /{campaignId}/claim
+//   - /sash/api/v1/me/campaigns
+//   - POST /sash/api/v1/me/campaigns/{campaignId}/claim
+//
+// CN used to expose a dedicated /sash/api/v1/me/daily-check-in/{status,claim}
+// pair. As of 2026-09-21 the CN account answers that endpoint with
+// `{"campaignKey":"cn_daily_check_in_legacy","status":"DISABLED"}`, while the
+// same account reports the live "每天领 100 Credits" activity through
+// /me/campaigns. The desktop client already polls campaigns for CN, so the
+// legacy contract is kept only as a fallback for older credentials.
 //
 // Intl has no Pro-upgrade contract. That absence is a capability fact, not a
 // transient failure: the plugin must skip it instead of retrying a 404.
@@ -17,8 +25,8 @@ import (
 type checkinContract int
 
 const (
-	checkinContractDaily    checkinContract = iota // CN daily check-in
-	checkinContractCampaign                        // Intl campaign claim
+	checkinContractDaily    checkinContract = iota // legacy CN daily check-in
+	checkinContractCampaign                        // campaign claim (CN + Intl)
 )
 
 type regionCapabilities struct {
@@ -48,7 +56,7 @@ func capabilitiesForRegion(region string) regionCapabilities {
 			Quota:      true,
 			Plan:       true,
 			Refresh:    true,
-			Contract:   checkinContractDaily,
+			Contract:   checkinContractCampaign,
 		}
 	}
 }

@@ -16,9 +16,8 @@ import (
 )
 
 // check-in schedule: 10:00 and 21:00 local time.
-// 10 replaces 9: the CN daily check-in activity opens at 10:00 local
-// (hope0719/qoder-check-in README, 2026-09-18~09-30 activity — "每天
-// 10:00 起可领 100 Credits"); a 09:00 tick hits "活动未开始" and fails.
+// The daily benefit campaign resets at 10:00 local (UTC+8), so a 09:00 tick
+// hits "活动未开始" and fails.
 // 21 stays as the evening retry/keepalive companion.
 var checkinHours = []int{10, 21}
 

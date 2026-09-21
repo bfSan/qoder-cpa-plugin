@@ -9,7 +9,7 @@
 
 - **双区 OAuth / PAT 登录** — CN（`qoder.com.cn`）与 Intl（`qoder.com`）都支持设备码登录，也支持导入 PAT。一个账号一份 `qoder-<region>-<uid>.json` 认证文件，支持多账号并存。
 - **模型目录** — 从 Qoder 网关实时拉取模型列表，插件面板可隐藏 / 恢复 / 排序 / 新增模型；隐藏列表持久化在 `hidden_models`，并在 CPA 返回模型列表前生效。
-- **签到** — CN 走 `daily-check-in`，Intl 走 campaign 权益领取（`GET /me/campaigns` + `/{campaignId}/claim`），每天 09:00 / 21:00 自动执行，也可在面板手动签到。
+- **签到** — CN 与 Intl 都走 campaign 权益领取（`GET /me/campaigns` + `/{campaignId}/claim`）；CN 的旧 `daily-check-in` 只作兼容兜底。每天 10:00 / 21:00 自动执行，也可在面板手动签到。
 - **额度与生命周期** — 面板展示积分、套餐、签到状态；积分耗尽自动禁用 CN 账号，签到补回后自动恢复。
 - **按模型冷却** — 单个模型触发限流时只冷却该 (账号, 模型) 组合，不冻结整个账号；面板可手动解除。
 - **Token keepalive** — 定时刷新 access token，避免 Keycloak / device token 会话过期。
