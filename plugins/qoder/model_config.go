@@ -291,7 +291,7 @@ func buildModelListQuery() map[string]any {
 	items := make([]map[string]any, 0, len(models))
 	for i, m := range models {
 		id := strings.TrimSpace(m.ID)
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"id":              id,
 			"name":            m.Name,
 			"displayName":     m.DisplayName,
@@ -299,7 +299,11 @@ func buildModelListQuery() map[string]any {
 			"hidden":          overlayHidden(overlay, id),
 			"custom":          overlayAdded(overlay, id),
 			"coolingAccounts": cooldownModelCount(id),
-		})
+		}
+		if factor, ok := priceFactorForModel(id); ok {
+			item["priceFactor"] = factor
+		}
+		items = append(items, item)
 	}
 	return map[string]any{
 		"models":           items,

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -58,6 +59,54 @@ func storeDynamicModels(models []pluginapi.ModelInfo) {
 	dynamicModelsCache.models = models
 	dynamicModelsCache.fetched = time.Now()
 	dynamicModelsCache.Unlock()
+}
+
+// priceFactorCache holds the upstream chat-scene price_factor per model id,
+// refreshed alongside the dynamic model list. pluginapi.ModelInfo has no
+// field for it, so it rides in this sidecar for the panel to display.
+var priceFactorCache struct {
+	sync.RWMutex
+	factors map[string]float64
+}
+
+func storePriceFactors(factors map[string]float64) {
+	priceFactorCache.Lock()
+	priceFactorCache.factors = factors
+	priceFactorCache.Unlock()
+}
+
+// staticPriceFactors mirrors the upstream chat-scene price_factor values
+// observed 2026-09 (auto=0.5, qfmodel=0 i.e. free, kmodel_latest=1.4, ...).
+// Used until a successful dynamic fetch overrides them, so the panel can
+// still show rates when the models API is unreachable.
+var staticPriceFactors = map[string]float64{
+	"auto":          0.5,
+	"qmodel_38max":  0.5,
+	"qfmodel":       0,
+	"qmodel_latest": 0.5,
+	"qmodel":        0.1,
+	"q37fmodel":     0.1,
+	"dmodel":        0.5,
+	"dfmodel":       0.1,
+	"gmodel":        0.8,
+	"gfmodel":       0.1,
+	"gm51model":     0.6,
+	"kmodel_latest": 1.4,
+	"kmodel":        0.8,
+	"mmodel":        0.2,
+}
+
+// priceFactorForModel reports the billing multiplier for a model id.
+// Dynamic values win; static table is the fallback. ok=false means unknown.
+func priceFactorForModel(id string) (factor float64, ok bool) {
+	priceFactorCache.RLock()
+	factor, ok = priceFactorCache.factors[id]
+	priceFactorCache.RUnlock()
+	if ok {
+		return factor, true
+	}
+	factor, ok = staticPriceFactors[id]
+	return factor, ok
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
@@ -166,10 +215,12 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
 	}
 	var out []pluginapi.ModelInfo
+	factors := make(map[string]float64, len(models))
 	for _, m := range models {
 		if !m.Enable {
 			continue
 		}
+		factors[m.Key] = m.PriceFactor
 		ctx2 := int64(180000)
 		if m.MaxInputTokens > 0 {
 			ctx2 = m.MaxInputTokens
@@ -186,6 +237,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no enabled chat models")
 	}
+	storePriceFactors(factors)
 	return out, nil
 }
 

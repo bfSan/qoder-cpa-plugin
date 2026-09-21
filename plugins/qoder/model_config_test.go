@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -99,5 +100,56 @@ func TestBuildModelListQueryReportsOverlayAndCooldowns(t *testing.T) {
 	}
 	if models[0]["coolingAccounts"] != 1 {
 		t.Fatalf("coolingAccounts = %#v, want 1", models[0]["coolingAccounts"])
+	}
+}
+
+func TestBuildModelListQueryReportsPriceFactor(t *testing.T) {
+	defer setModelOverlayForTest(modelOverlay{})()
+	oldModels := dynamicModelsCache.models
+	oldFetched := dynamicModelsCache.fetched
+	oldFactors := priceFactorCache.factors
+	t.Cleanup(func() {
+		dynamicModelsCache.Lock()
+		dynamicModelsCache.models = oldModels
+		dynamicModelsCache.fetched = oldFetched
+		dynamicModelsCache.Unlock()
+		priceFactorCache.Lock()
+		priceFactorCache.factors = oldFactors
+		priceFactorCache.Unlock()
+	})
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.models = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.Unlock()
+	priceFactorCache.Lock()
+	priceFactorCache.factors = nil
+	priceFactorCache.Unlock()
+
+	res := buildModelListQuery()
+	models, _ := res["models"].([]map[string]any)
+	byID := make(map[string]map[string]any, len(models))
+	for _, m := range models {
+		id, _ := m["id"].(string)
+		byID[id] = m
+	}
+	// Static fallback table feeds models that have no dynamic reading yet.
+	if got := byID["auto"]["priceFactor"]; got != 0.5 {
+		t.Fatalf("auto priceFactor = %#v, want 0.5", got)
+	}
+	if got := byID["qfmodel"]["priceFactor"]; got != 0.0 {
+		t.Fatalf("qfmodel priceFactor = %#v, want 0 (free)", got)
+	}
+	if _, ok := byID["ultimate"]["priceFactor"]; ok {
+		t.Fatal("ultimate has no known factor; priceFactor must be omitted")
+	}
+
+	// A dynamic reading overrides the static table.
+	storePriceFactors(map[string]float64{"auto": 0.9})
+	res = buildModelListQuery()
+	models, _ = res["models"].([]map[string]any)
+	for _, m := range models {
+		if m["id"] == "auto" && m["priceFactor"] != 0.9 {
+			t.Fatalf("dynamic auto priceFactor = %#v, want 0.9", m["priceFactor"])
+		}
 	}
 }

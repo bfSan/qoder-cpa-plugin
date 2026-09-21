@@ -751,6 +751,11 @@ function renderModels(){
     const escId=esc(id);
     const tags=[];
     if(m.custom) tags.push(`<span class="badge">自定义</span>`);
+    if(typeof m.priceFactor==="number"){
+      tags.push(m.priceFactor===0
+        ? `<span class="badge">免费</span>`
+        : `<span class="badge disabled" title="上游计费倍率">×${m.priceFactor}</span>`);
+    }
     if(Number(m.coolingAccounts)>0) tags.push(`<span class="badge cooling">冷却 ${Number(m.coolingAccounts)}</span>`);
     return `<div class="model-row">
       <span class="model-id" title="${escId}">${escId}</span>
