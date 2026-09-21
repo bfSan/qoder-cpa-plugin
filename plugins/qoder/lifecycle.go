@@ -584,15 +584,13 @@ func enrichAuthMetadataWithPrev(sa *storedAuth, cr *creditsSummary, disabled boo
 	return meta
 }
 
-// displayEmailForAuth maps the Qoder CN nickname into CPA's email slot.
+// displayEmailForAuth maps the Qoder nickname into CPA's email slot.
 //
 // CPA v7.3.7's native auth card chooses its title from email -> project_id ->
-// filename and ignores AuthData.Label. Qoder CN's userinfo endpoint does not
-// expose an email address, so the nickname is the only usable display identity.
-// Intl is deliberately untouched because its userinfo response already carries
-// a real email field that can be wired in later without overwriting it here.
+// filename and ignores AuthData.Label. Neither Qoder region exposes a usable
+// email in this flow, so the nickname is the only reliable display identity.
 func displayEmailForAuth(sa *storedAuth) string {
-	if sa == nil || authRegion(sa) != regionCN {
+	if sa == nil {
 		return ""
 	}
 	return strings.TrimSpace(sa.Account.Nickname)

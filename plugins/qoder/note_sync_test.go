@@ -90,7 +90,7 @@ func TestBuildAuthFileJSONPersistsHostLabel(t *testing.T) {
 	}
 }
 
-func TestDisplayEmailForAuthUsesNicknameOnlyForCN(t *testing.T) {
+func TestDisplayEmailForAuthUsesNicknameForBothRegions(t *testing.T) {
 	cn := testStoredAuthCNAccount()
 	cn.Account.Nickname = "  薄枫 Cn  "
 	if got := displayEmailForAuth(cn); got != "薄枫 Cn" {
@@ -101,8 +101,21 @@ func TestDisplayEmailForAuthUsesNicknameOnlyForCN(t *testing.T) {
 		Account: storedAccount{Nickname: "薄枫 Intl"},
 		Auth:    storedTokens{Region: regionIntl},
 	}
-	if got := displayEmailForAuth(intl); got != "" {
-		t.Fatalf("Intl email = %q, want internal real-email path preserved", got)
+	if got := displayEmailForAuth(intl); got != "薄枫 Intl" {
+		t.Fatalf("Intl email = %q, want trimmed nickname", got)
+	}
+	raw, err := buildAuthFileJSON(intl, false, "INTL · 余1", nil)
+	if err != nil {
+		t.Fatalf("buildAuthFileJSON(Intl): %v", err)
+	}
+	var parsed struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal Intl auth file: %v", err)
+	}
+	if parsed.Email != "薄枫 Intl" {
+		t.Fatalf("Intl auth file email = %q, want nickname", parsed.Email)
 	}
 
 	empty := &storedAuth{Auth: storedTokens{Region: regionCN}}
