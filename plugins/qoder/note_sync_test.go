@@ -74,12 +74,40 @@ func TestBuildAuthFileJSONPersistsHostLabel(t *testing.T) {
 	}
 	var parsed struct {
 		Label string `json:"label"`
+		Email string `json:"email"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		t.Fatalf("unmarshal auth file: %v", err)
 	}
 	if want := labelForAuth(sa); parsed.Label != want {
 		t.Fatalf("label = %q, want %q", parsed.Label, want)
+	}
+	if want := sa.Account.Nickname; parsed.Email != want {
+		t.Fatalf("email = %q, want Qoder CN nickname %q", parsed.Email, want)
+	}
+	if got, _ := enrichAuthMetadataWithPrev(sa, nil, false, "")["email"].(string); got != sa.Account.Nickname {
+		t.Fatalf("metadata email = %q, want Qoder CN nickname %q", got, sa.Account.Nickname)
+	}
+}
+
+func TestDisplayEmailForAuthUsesNicknameOnlyForCN(t *testing.T) {
+	cn := testStoredAuthCNAccount()
+	cn.Account.Nickname = "  薄枫 Cn  "
+	if got := displayEmailForAuth(cn); got != "薄枫 Cn" {
+		t.Fatalf("CN email = %q, want trimmed nickname", got)
+	}
+
+	intl := &storedAuth{
+		Account: storedAccount{Nickname: "薄枫 Intl"},
+		Auth:    storedTokens{Region: regionIntl},
+	}
+	if got := displayEmailForAuth(intl); got != "" {
+		t.Fatalf("Intl email = %q, want internal real-email path preserved", got)
+	}
+
+	empty := &storedAuth{Auth: storedTokens{Region: regionCN}}
+	if got := displayEmailForAuth(empty); got != "" {
+		t.Fatalf("empty nickname email = %q, want empty", got)
 	}
 }
 

@@ -205,6 +205,9 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
 		"auth":     nested["auth"],
 		"account":  nested["account"],
 	}
+	if email := displayEmailForAuth(sa); email != "" {
+		out["email"] = email
+	}
 	for k, v := range extra {
 		out[k] = v
 	}
