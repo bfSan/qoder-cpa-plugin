@@ -41,7 +41,19 @@ func startAdoption() {
 		}
 		lastAdoptRun = time.Now()
 		adoptMu.Unlock()
-		adoptForeignAuths()
+		// During plugin registration the host auth manager may not be wired
+		// yet. host.auth.list then falls back to the auth directory and returns
+		// entries without auth_index, so host.auth.get cannot resolve them.
+		// Retry until the manager-backed view is available.
+		for attempt := 0; attempt < 10; attempt++ {
+			if attempt > 0 {
+				time.Sleep(2 * time.Second)
+			}
+			if adoptForeignAuths() {
+				return
+			}
+		}
+		log.Printf("adopt: host auth manager did not become ready; will retry on next reload")
 	}()
 }
 
@@ -59,16 +71,24 @@ func legacyQoderRegion(name string) string {
 
 // adoptForeignAuths rewrites every legacy qoder-cn/qoder-intl auth file in
 // place (same filename, updated JSON).
-func adoptForeignAuths() {
+// adoptForeignAuths returns true when every legacy candidate was resolvable
+// (or there were none), and false when the host still needs time to publish
+// auth indexes.
+func adoptForeignAuths() bool {
 	files, err := hostAuthList()
 	if err != nil {
 		log.Printf("adopt: host auth list failed: %v", err)
-		return
+		return false
 	}
 	adopted := 0
+	waitingForHost := false
 	for _, f := range files {
 		region := legacyQoderRegion(f.Name)
 		if region == "" {
+			continue
+		}
+		if strings.TrimSpace(f.AuthIndex) == "" {
+			waitingForHost = true
 			continue
 		}
 		phys, err := hostAuthGetPhysical(f.AuthIndex)
@@ -106,4 +126,5 @@ func adoptForeignAuths() {
 	if adopted > 0 {
 		log.Printf("adopt: done — migrated %d legacy qoder auth file(s)", adopted)
 	}
+	return !waitingForHost
 }
