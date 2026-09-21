@@ -242,10 +242,15 @@ func existingNoteCredits(authIndex string) string {
 	if err != nil || phys == nil {
 		return ""
 	}
+	return noteCreditsFromJSON(phys.JSON)
+}
+
+// noteCreditsFromJSON extracts the credit segment from a raw auth-file body.
+func noteCreditsFromJSON(raw []byte) string {
 	var pjson struct {
 		Note string `json:"note"`
 	}
-	if json.Unmarshal(phys.JSON, &pjson) != nil {
+	if json.Unmarshal(raw, &pjson) != nil {
 		return ""
 	}
 	return creditSegmentFromNote(pjson.Note)
@@ -260,12 +265,10 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 	if sa == nil {
 		return nil
 	}
-	note := displayNote(sa, cr, disabled)
-	if cr == nil {
-		if prev := existingNoteCredits(authIndex); prev != "" {
-			note = notePrefix(sa, disabled) + " · " + prev
-		}
-	}
+	// Read the on-disk credit segment first so a nil cr (lazy refresh, restart,
+	// or a failed billing call) keeps the last known value instead of writing
+	// back the "积分未知" placeholder.
+	note := displayNoteWithPrev(sa, cr, disabled, existingNoteCredits(authIndex))
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
 	}
@@ -280,12 +283,7 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
-		note = displayNote(sa, cr, disabled)
-		if cr == nil {
-			if prev := existingNoteCredits(authIndex); prev != "" {
-				note = notePrefix(sa, disabled) + " · " + prev
-			}
-		}
+		note = displayNoteWithPrev(sa, cr, disabled, noteCreditsFromJSON(phys.JSON))
 	}
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
@@ -565,7 +563,14 @@ func listEntryMatchesUID(f pluginapi.HostAuthFileEntry, uid, wantName string) bo
 
 // enrichAuthMetadata builds Metadata map for AuthData (type/logo/note/disabled).
 func enrichAuthMetadata(sa *storedAuth, cr *creditsSummary, disabled bool) map[string]any {
-	note := displayNote(sa, cr, disabled)
+	return enrichAuthMetadataWithPrev(sa, cr, disabled, "")
+}
+
+// enrichAuthMetadataWithPrev is enrichAuthMetadata plus a previously known
+// credit segment, so callers that can see the on-disk note never degrade a
+// populated card back to the "积分未知" placeholder.
+func enrichAuthMetadataWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prevCredits string) map[string]any {
+	note := displayNoteWithPrev(sa, cr, disabled, prevCredits)
 	return map[string]any{
 		"type":     providerName,
 		"provider": providerName,

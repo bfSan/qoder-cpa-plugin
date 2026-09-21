@@ -147,3 +147,61 @@ func TestCreditsQueryWritesAuthNote(t *testing.T) {
 		t.Fatalf("stored note = %q, want %q", *stored, want)
 	}
 }
+
+// TestAuthParseKeepsKnownCredits pins the reload regression: CPA rebuilds the
+// in-memory auth metadata from AuthParse on every restart/reload, so parsing
+// must reuse the note already stored in the file rather than emitting the
+// cr==nil placeholder (which showed live credits as "积分未知").
+func TestAuthParseKeepsKnownCredits(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"provider": providerName,
+		"type":     providerName,
+		"note":     "CN · 余360 已用40 池400",
+		"account":  map[string]any{"uid": "uid-parse", "nickname": "tester"},
+		"auth":     map[string]any{"region": regionCN, "accessToken": "tok"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req, err := json.Marshal(pluginapi.AuthParseRequest{
+		Provider: providerName,
+		FileName: "qoder-cn-uid-parse.json",
+		RawJSON:  raw,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	body, err := handleParseAuth(req)
+	if err != nil {
+		t.Fatalf("handleParseAuth: %v", err)
+	}
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Handled bool `json:"handled"`
+			Auth    struct {
+				Metadata map[string]any `json:"metadata"`
+			} `json:"auth"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if !env.OK || !env.Result.Handled {
+		t.Fatalf("parse not handled: %s", body)
+	}
+	if got, _ := env.Result.Auth.Metadata["note"].(string); got != "CN · 余360 已用40 池400" {
+		t.Fatalf("note = %q, want the stored credit segment", got)
+	}
+}
+
+// TestDisplayNoteWithPrevFallsBackForGarbage keeps the guard honest: a note
+// carrying only placeholders must still render the unknown state.
+func TestDisplayNoteWithPrevFallsBackForGarbage(t *testing.T) {
+	if got := displayNoteWithPrev(testStoredAuthCNAccount(), nil, false, "CN · 积分未知"); got != "CN · 积分未知" {
+		t.Fatalf("note = %q, want placeholder", got)
+	}
+	if got := displayNoteWithPrev(testStoredAuthCNAccount(), nil, false, "CN · 余9 已用1"); got != "CN · 余9 已用1" {
+		t.Fatalf("note = %q, want preserved credits", got)
+	}
+}

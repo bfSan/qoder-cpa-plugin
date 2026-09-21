@@ -265,11 +265,27 @@ func creditSegmentFromNote(note string) string {
 }
 
 // displayNote builds a one-line note for CPAMP Auth cards.
+//
+// cr == nil means "credits unknown right now" (startup, a lazy panel refresh,
+// or a failed billing call). displayNote falls back to the placeholder because
+// it has no disk access; callers that can read the previous note should prefer
+// displayNoteWithPrev so a restart or transient billing error cannot regress a
+// card that already shows live credits.
 func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
+	return displayNoteWithPrev(sa, cr, disabled, "")
+}
+
+// displayNoteWithPrev is displayNote plus a previously known credit segment.
+// prev is ignored whenever cr carries fresh data or holds no usable value.
+func displayNoteWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prev string) string {
 	parts := []string{notePrefix(sa, disabled)}
 	switch {
 	case cr == nil:
-		parts = append(parts, "积分未知")
+		if prev = creditSegmentFromNote(prev); prev != "" {
+			parts = append(parts, prev)
+		} else {
+			parts = append(parts, "积分未知")
+		}
 	case isCreditsExhausted(cr):
 		parts = append(parts, fmt.Sprintf("耗尽 · 余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
 	default:
