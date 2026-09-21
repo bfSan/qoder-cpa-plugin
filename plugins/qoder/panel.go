@@ -98,6 +98,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 				}
 			}
 			acct.Nickname = sa.Account.Nickname
+			acct.Label = labelForAuth(sa)
 			acct.UID = sa.Account.UID
 			acct.Region = authRegion(sa)
 			acct.Cooling = cooldownSnapshotFor(f.ID)
