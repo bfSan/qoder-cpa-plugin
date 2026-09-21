@@ -20,6 +20,10 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	// 2026-09-21: the billing surface additionally requires the web session
+	// cookies (acw_tc / qoder_csrf_token) and the mirrored CSRF header. Without
+	// them every /sash and /api/v2 call answers 401 "missing cookie header".
+	applyBillingSessionHeaders(req, sa)
 }
 
 // checkinStatusResponse mirrors GET /sash/api/v1/me/daily-check-in/status
@@ -27,12 +31,12 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 type checkinStatusResponse struct {
 	Status             string `json:"status"` // CLAIMABLE | CLAIMED
 	RewardCredits      int64  `json:"rewardCredits"`
-	NextClaimAt        int64  `json:"nextClaimAt"` // s epoch
+	NextClaimAt        int64  `json:"nextClaimAt"` // epoch seconds from upstream
 	CurrentStreakDays  int64  `json:"currentStreakDays"`
 	TotalClaimDays     int64  `json:"totalClaimDays"`
 	TotalRewardCredits int64  `json:"totalRewardCredits"`
-	LastClaimedAt      int64  `json:"lastClaimedAt"`   // s epoch
-	RewardExpiresAt    int64  `json:"rewardExpiresAt"` // s epoch
+	LastClaimedAt      int64  `json:"lastClaimedAt"`   // epoch seconds from upstream
+	RewardExpiresAt    int64  `json:"rewardExpiresAt"` // epoch seconds from upstream
 }
 
 func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {

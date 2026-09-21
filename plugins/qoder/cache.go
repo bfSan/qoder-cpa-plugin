@@ -98,6 +98,17 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		errList = append(errList, msg)
 		errMu.Unlock()
 	}
+	// authRejected records that upstream refused the credential itself. A stale
+	// snapshot must not survive that: carrying over the previous "已签到" state
+	// makes the panel report a check-in that never happened (2026-09-21 field
+	// report — credits never increased while the UI said success).
+	var authRejected bool
+	addAuthReject := func(msg string) {
+		errMu.Lock()
+		errList = append(errList, msg)
+		authRejected = true
+		errMu.Unlock()
+	}
 	wg.Add(2)
 	go func() { defer wg.Done(); plan = fetchPaymentType(sa) }()
 	if supportsCheckin(sa) {
@@ -107,7 +118,11 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 			if c, err := fetchCheckinStatus(sa); err == nil {
 				ci = c
 			} else {
-				addErr("checkin: " + err.Error())
+				if isAuthRejectedError(err) {
+					addAuthReject("checkin: " + err.Error())
+				} else {
+					addErr("checkin: " + err.Error())
+				}
 			}
 		}()
 	}
@@ -116,12 +131,18 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		if r, err := fetchUserResource(sa); err == nil {
 			cr = r
 		} else {
-			addErr("credits: " + err.Error())
+			if isAuthRejectedError(err) {
+				addAuthReject("credits: " + err.Error())
+			} else {
+				addErr("credits: " + err.Error())
+			}
 		}
 	}()
 	wg.Wait()
 	// Stale-while-error: carry over previous values for fields that failed.
-	if prev != nil {
+	// Skipped wholesale when upstream rejected the credential — a stale
+	// "已签到" would be indistinguishable from a real one.
+	if prev != nil && !authRejected {
 		if ci == nil {
 			ci = prev.checkin
 		}

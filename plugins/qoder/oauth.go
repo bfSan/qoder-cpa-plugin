@@ -772,11 +772,15 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 // preserveExpiry reuses the previous token's expiresAt when the refresh
 // response omits expiresIn. Zero would tell the host the credential is
 // permanently expired and trigger a refresh storm on every request.
+// preserveExpiry keeps the previous value when the refresh did not yield a new
+// expiry. Both sides are normalised to seconds: the stored field is seconds by
+// contract, but callers historically produced millisecond values, which read
+// back as 1970 and made every token look long expired.
 func preserveExpiry(newExpiry, oldExpiry int64) int64 {
-	if newExpiry > 0 {
-		return newExpiry
+	if normalized := tokenExpiryUnix(newExpiry); normalized > 0 {
+		return normalized
 	}
-	return oldExpiry
+	return tokenExpiryUnix(oldExpiry)
 }
 
 // toAuthDataForRefresh mirrors the workbuddy helper: blank out FileName and

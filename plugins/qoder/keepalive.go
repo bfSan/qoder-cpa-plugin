@@ -158,7 +158,7 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 	if tok.RefreshToken != "" {
 		sa.Auth.RefreshToken = tok.RefreshToken
 	}
-	sa.Auth.ExpiresAt = preserveExpiry(expiry, sa.Auth.ExpiresAt)
+	sa.Auth.ExpiresAt = preserveExpiry(tokenExpiryUnix(expiry), sa.Auth.ExpiresAt)
 	if err := persistAuthTokens(authIndex, sa); err != nil {
 		return "error", fmt.Errorf("persist: %w", err)
 	}
