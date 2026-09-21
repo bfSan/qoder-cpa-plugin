@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -82,4 +83,61 @@ func hostAuthGetBundle(authIndex string) (*storedAuth, *hostAuthPhysical, error)
 		return nil, phys, err
 	}
 	return sa, phys, nil
+}
+
+// runtimeAuthLabel reads the label CPA currently exposes for one runtime auth
+// record. host.auth.save rebuilds that record from top-level "type"/"email"
+// only, so a freshly saved nickname is not visible until the file watcher
+// re-parses the file through auth.parse. Callers that change a nickname wait
+// on this value so the native auth page cannot keep showing the provider name.
+func runtimeAuthLabel(authIndex string) (string, error) {
+	return runtimeAuthLabelFn(authIndex)
+}
+
+var runtimeAuthLabelFn = runtimeAuthLabelDefault
+
+func runtimeAuthLabelDefault(authIndex string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"auth_index": authIndex})
+	raw, err := hostCall(pluginabi.MethodHostAuthGetRuntime, body)
+	if err != nil {
+		return "", err
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		return "", fmt.Errorf("host.auth.get_runtime: bad envelope")
+	}
+	var resp pluginapi.HostAuthGetRuntimeResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Auth.Label), nil
+}
+
+// waitForRuntimeAuthLabel blocks briefly until CPA exposes want as the runtime
+// label. It tolerates a missing runtime read so a host without the callback
+// still persists the rename; the caller only uses the error to report a
+// delayed sync, not to roll the file back.
+func waitForRuntimeAuthLabel(authIndex, want string, timeout time.Duration) error {
+	want = strings.TrimSpace(want)
+	if authIndex == "" || want == "" {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		label, err := runtimeAuthLabel(authIndex)
+		if err == nil {
+			last = strings.TrimSpace(label)
+			if last == want {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if last == "" {
+				return fmt.Errorf("runtime label did not sync to %q", want)
+			}
+			return fmt.Errorf("runtime label is %q, want %q", last, want)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

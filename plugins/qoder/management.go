@@ -189,6 +189,9 @@ func handleAccountRename(req pluginapi.ManagementRequest) map[string]any {
 		return map[string]any{"error": err.Error()}
 	}
 	accountCache.Delete(authIndex)
+	if err := waitForRuntimeAuthLabel(authIndex, labelForAuth(sa), 3*time.Second); err != nil {
+		return map[string]any{"status": "ok", "auth_index": authIndex, "name": sa.Account.Nickname, "warning": err.Error()}
+	}
 	return map[string]any{"status": "ok", "auth_index": authIndex, "name": sa.Account.Nickname}
 }
 
