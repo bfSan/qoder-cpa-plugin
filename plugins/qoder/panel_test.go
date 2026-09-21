@@ -92,6 +92,23 @@ func TestPanelUsesQoderBrandingAndNoManualSelectionUI(t *testing.T) {
 	}
 }
 
+func TestPanelUsesSharedResponsivePluginLayout(t *testing.T) {
+	html := string(panelHTML)
+	for _, rule := range []string{
+		"html,body{max-width:100%;overflow-x:hidden}",
+		".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:14px}",
+		".card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center;gap:8px}",
+		".actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}",
+		"@media (max-width:640px)",
+		".wrap{padding:18px 12px}",
+		".filter-bar .field-input{flex:1 1 100%;width:100%}",
+	} {
+		if !strings.Contains(html, rule) {
+			t.Fatalf("panel HTML is missing shared layout rule %q", rule)
+		}
+	}
+}
+
 func TestLabelForAuthUsesQoderBrandingAndRegion(t *testing.T) {
 	cn := labelForAuth(&storedAuth{Account: storedAccount{Nickname: "alice"}})
 	if cn != "alice [CN]" {
