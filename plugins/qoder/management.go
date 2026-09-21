@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -133,12 +134,100 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/models/action", Description: "Apply one model action: hide, restore, move or add."},
 			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start a CN or Intl Qoder device-authorization login (body: {region})."},
 			{Method: http.MethodPost, Path: base + "/oauth/poll", Description: "Poll a plugin-owned Qoder device-authorization login (body: {state})."},
+			{Method: http.MethodPost, Path: base + "/accounts/rename", Description: "Set the display name of one account (body: {auth_index, name})."},
+			{Method: http.MethodPost, Path: base + "/accounts/delete", Description: "Delete one account (body: {auth_index})."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "Qoder", Description: "Qoder dashboard (CN + Intl): credits, check-in, plan, import."},
 		},
 	}
 }
+
+// handleAccountRename sets the display name of one credential.
+//
+// The name lives in account.nickname, which labelForAuth already reads when
+// CPA renders the credential card, so the rename shows up in the host auth
+// list without touching the note (the note is rewritten on every credits
+// refresh and would lose a custom label).
+func handleAccountRename(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		AuthIndex string `json:"auth_index"`
+		Name      string `json:"name"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &body)
+	}
+	authIndex := strings.TrimSpace(body.AuthIndex)
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
+	}
+	if authIndex == "" {
+		return map[string]any{"error": "auth_index is required"}
+	}
+	phys, err := hostAuthGetPhysical(authIndex)
+	if err != nil || phys == nil {
+		return map[string]any{"error": "account not found"}
+	}
+	sa, err := parseStored(phys.JSON)
+	if err != nil || sa == nil {
+		return map[string]any{"error": "stored auth is nil"}
+	}
+	sa.Account.Nickname = strings.TrimSpace(body.Name)
+	// Rebuilding the note from the live snapshot keeps credits intact; passing
+	// the previous segment is what stops a transient billing failure from
+	// overwriting it with the "unknown" placeholder.
+	note := displayNoteWithPrev(sa, nil, phys.Disabled, existingNoteCredits(authIndex))
+	raw, err := buildAuthFileJSON(sa, phys.Disabled, note, nil)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	name := phys.Name
+	if name == "" || isLegacyAuthName(name) {
+		name, _, _ = resolveAuthFileTarget(sa, phys)
+	}
+	if err := hostAuthPersistMigrateFn(name, phys.Path, "", raw); err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	accountCache.Delete(authIndex)
+	return map[string]any{"status": "ok", "auth_index": authIndex, "name": sa.Account.Nickname}
+}
+
+// handleAccountDelete removes one credential so it can be re-registered with a
+// fresh login. The plugin SDK has no auth.delete method, so we drop the
+// physical file through the same guarded helper the lifecycle migration uses.
+func handleAccountDelete(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		AuthIndex string `json:"auth_index"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &body)
+	}
+	authIndex := strings.TrimSpace(body.AuthIndex)
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
+	}
+	if authIndex == "" {
+		return map[string]any{"error": "auth_index is required"}
+	}
+	phys, err := hostAuthGetPhysical(authIndex)
+	if err != nil || phys == nil {
+		return map[string]any{"error": "account not found"}
+	}
+	path := strings.TrimSpace(phys.Path)
+	if path == "" {
+		return map[string]any{"error": "auth file path unavailable"}
+	}
+	if err := deleteAuthFileInDir(path, authDirFromPath(path)); err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	accountCache.Delete(authIndex)
+	lifecycleState.Delete(authIndex)
+	return map[string]any{"status": "ok", "auth_index": authIndex, "file": filepath.Base(path)}
+}
+
+// authDirFromPath returns the directory of an auth file so deletes stay
+// confined to the directory the host handed us.
+func authDirFromPath(path string) string { return filepath.Dir(path) }
 
 func handleManagement(raw []byte) ([]byte, error) {
 	var req pluginapi.ManagementRequest
@@ -206,6 +295,10 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManagementOAuthStart(req)))
 	case req.Method == http.MethodPost && path == base+"/oauth/poll":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManagementOAuthPoll(req)))
+	case req.Method == http.MethodPost && path == base+"/accounts/rename":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleAccountRename(req)))
+	case req.Method == http.MethodPost && path == base+"/accounts/delete":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleAccountDelete(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }

@@ -369,8 +369,27 @@ function bindCardActions(root){
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
       else if(act==="claim-pro") claimPro(idx, ev.currentTarget);
       else if(act==="cooldown-clear") clearCooldown(ev.currentTarget.getAttribute("data-auth-id")||idx, ev.currentTarget.getAttribute("data-model"), ev.currentTarget);
+      else if(act==="rename") renameAccount(idx, ev.currentTarget.dataset.nick||"");
+      else if(act==="delete") deleteAccount(idx, ev.currentTarget.dataset.nick||"该账号");
     });
   });
+}
+async function renameAccount(idx,current){
+  const name=(prompt("账号显示名：",current||"")||"").trim();
+  if(name===current) return;
+  try{
+    const r=await api("/accounts/rename",{method:"POST",body:JSON.stringify({auth_index:idx,name})});
+    if(r&&r.error){toast(r.error);return}
+    toast("已重命名");await load(true);
+  }catch(e){toast(e.message||String(e))}
+}
+async function deleteAccount(idx,nick){
+  if(!confirm(`删除账号「${nick}」？凭证会被移除，之后可在面板重新登录。`)) return;
+  try{
+    const r=await api("/accounts/delete",{method:"POST",body:JSON.stringify({auth_index:idx})});
+    if(r&&r.error){toast(r.error);return}
+    toast("已删除，可重新登录");await load(true);
+  }catch(e){toast(e.message||String(e))}
 }
 function card(a){
   const plan=(a.plan||"unknown").toLowerCase();
@@ -406,6 +425,7 @@ function card(a){
   }).join("")+`</div>`:"";
   const display=(a.nickname||a.label||a.name||"").replace(/^qoderwork-?/i,"");
   const nick=display||("u"+(a.uid||"").slice(-8));
+  const manageBtn=`<button class="sec" data-action="rename" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(a.nickname||"")}" title="重命名账号">重命名</button><button class="danger" data-action="delete" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(nick)}" title="删除账号后可重新登录">删除</button>`;
   return `<div class="card" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(nick)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -413,6 +433,7 @@ function card(a){
   ${coolingHTML}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   <div class="actions">${refreshBtn}${actionHTML}</div>
+  <div class="actions">${manageBtn}</div>
   </div>`;
 }
 let currentFilter="all";
