@@ -260,8 +260,10 @@
 
 ## 参考来源
 
-- [Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api) — Trae SOLO CN 协议层（Go）
-- [Sliverkiss/cpa-plugin](https://github.com/Sliverkiss/cpa-plugin) — WorkBuddy + QoderWork 现有 CPA 插件
+- `Sliverkiss/traework2api` — Trae SOLO CN 协议层（Go）。**上游仓库已删除（404）**，此处仅保留署名，
+  本插件不再依赖它。
+- `Sliverkiss/cpa-plugin` — WorkBuddy + QoderWork 现有 CPA 插件，本插件所 fork 的上游。
+  **上游仓库已删除（404）**；署名保留在本仓库 `README.md` 的 Credits 与源码文件头中。
 - [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) — CodeBuddy CN Python 实现
 - [1416277987/proxy-hub](https://github.com/1416277987/proxy-hub) — 多平台反代（含 Trae CN/Work）
 - [jlcodes99/cockpit-tools](https://github.com/jlcodes99/cockpit-tools) — 16 平台账号管理

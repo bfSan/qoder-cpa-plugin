@@ -5,6 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 
+![Qoder 管理面板](docs/images/panel.png)
+
 ## 功能
 
 - **双区 OAuth / PAT 登录** — CN（`qoder.com.cn`）与 Intl（`qoder.com`）都支持设备码登录，也支持导入 PAT。一个账号一份 `qoder-<region>-<uid>.json` 认证文件，支持多账号并存。
@@ -60,7 +62,7 @@ plugins:
       # 新增登录使用的区域：cn（默认）或 intl。已有账号保留各自区域。
       login_region: cn
 
-      # 签到开关与调度（默认 true，09:00 / 21:00）
+      # 签到开关与调度（默认 true，10:00 / 21:00）
       checkin_auto: true
 
       # 积分耗尽自动禁用 / 恢复 CN 账号
@@ -90,7 +92,22 @@ plugins:
 | `plugins/qoder/` | 插件源码与嵌入式面板 |
 | `scripts/build.sh` | 跨平台构建脚本 |
 | `registry.json` | 插件注册元数据 |
+| `docs/PROTOCOL.md` | 各平台协议事实清单（逆向整理） |
+
+## Credits / 来源
+
+本插件是在 [Sliverkiss](https://github.com/Sliverkiss) 的 `cpa-plugin`
+（内含 `qoderwork` provider）基础上继续开发的 fork。插件当前由 **bfSan** 维护，覆盖原本的上游实现。
+
+- **Sliverkiss** — 上游 `cpa-plugin` 的作者，最初把 QoderWork 接入 CPA；本插件的
+  OAuth 流程、COSY 签名与执行器均源自其实现。
+- **lovingfish** — 更早的 `qoderwork` 实现作者，Sliverkiss 的版本基于其工作。
+
+> 说明：上游仓库 `Sliverkiss/cpa-plugin` 目前返回 404（已被作者删除或转为私有），
+> 因此本 README 与插件元数据中的仓库地址均指向本 fork，不再指向已失效的上游链接。
+> 原始署名保留在源码文件头与插件 `Author` 字段中。
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE)，与上游一致。
+
