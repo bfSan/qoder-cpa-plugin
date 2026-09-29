@@ -7,9 +7,10 @@
 //
 // This file is a clean-room reimplementation reconstructed from the public
 // qoderwork.so binary (symbol table, string constants and RPC shape) published
-// by Sliverkiss. Original credit for the qoderwork plugin goes to Sliverkiss;
-// see https://github.com/Sliverkiss/cpa-plugin. Built with -buildmode=c-shared
-// and exports the cliproxy C ABI entry points.
+// by Sliverkiss. Original credit for the qoderwork plugin goes to Sliverkiss,
+// whose upstream cpa-plugin repository is no longer available; see the Credits
+// section of the repository README for the full lineage. Built with
+// -buildmode=c-shared and exports the cliproxy C ABI entry points.
 package main
 
 /*
@@ -78,6 +79,9 @@ const (
 	providerName  = "qoder"
 	authFileName  = "qoder.json"
 	pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/QoderWork.png"
+	// Repository hosting this fork. The upstream cpa-plugin repo this plugin
+	// descends from was removed, so a stale URL there would 404 in the panel.
+	pluginRepoURL = "https://github.com/bfSan/qoder-cpa-plugin"
 	// QoderWork CN: OpenAPI for auth/billing, gateway for COSY-signed inference.
 	// See /root/qoderwork/KNOWLEDGE.md §1-§5.
 	defaultUpstreamBaseCN = "https://openapi.qoder.com.cn"
@@ -345,7 +349,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.2"
+var version = "0.9.4"
 
 func wbRegistration() registration {
 	return registration{
@@ -353,11 +357,11 @@ func wbRegistration() registration {
 		Metadata: pluginapi.Metadata{
 			Name:             providerName,
 			Version:          version,
-			Author:           "Sliverkiss (based on qoderwork by lovingfish)",
-			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
+			Author:           "bfSan (qoderwork originally by Sliverkiss, based on qoderwork by lovingfish)",
+			GitHubRepository: pluginRepoURL,
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time for CN accounts (default true)."},
+				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 10:00 and 21:00 local time for CN accounts (default true)."},
 				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{regionCN, regionIntl}, Description: "Region for NEW logins: cn (qoder.com.cn, default) or intl (qoder.com). Existing accounts keep their own region; legacy qoder-cn-/qoder-intl- auth files are adopted automatically."},
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
