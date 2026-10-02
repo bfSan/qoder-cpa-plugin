@@ -46,15 +46,25 @@ func cpaToUpstreamKey(cpaModel string) string {
 		return "qmodel_latest"
 	case "qwen3.7-plus", "qmodel":
 		return "qmodel"
+	case "qwen3.7-flash", "q37fmodel":
+		return "q37fmodel"
+	// q36fmodel / qwen3.6-flash are genuinely unreachable upstream keys; they
+	// still map to themselves so a stale client gets a clear upstream error
+	// instead of being silently redirected to a different model.
 	case "qwen3.6-flash", "q36fmodel":
 		return "q36fmodel"
 	case "deepseek-v4-pro", "dmodel":
 		return "dmodel"
 	case "deepseek-flash", "deepseek-v4-flash", "dfmodel":
 		return "dfmodel"
-	// GLM-5.3. gm51model (GLM-5.2) was retired upstream.
-	case "glm-5.3", "glm-5.2", "gmodel", "gm51model":
+	// GLM. gm51model (GLM-5.2) is NOT retired: the CN gateway advertises it, so
+	// it must pass through as itself. It used to be folded into gmodel on the
+	// strength of a wrong "retired upstream" note, which made every GLM-5.2
+	// request silently answer with GLM-5.3.
+	case "glm-5.3", "gmodel":
 		return "gmodel"
+	case "glm-5.2", "gm51model":
+		return "gm51model"
 	case "glm-5.3-flash", "gfmodel":
 		return "gfmodel"
 	case "kimi-k3", "kmodel_latest":

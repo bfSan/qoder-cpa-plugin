@@ -349,7 +349,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.4"
+var version = "0.9.5"
 
 func wbRegistration() registration {
 	return registration{
@@ -389,13 +389,10 @@ func wbRegistration() registration {
 // model.static / model.for_auth are re-invoked by CPA on every config reload
 // and on each models query; without caching, every reload fans out to one
 // upstream call per account.
+//
+// The cache itself lives in models.go (keyed per account, because the CN and
+// Intl gateways advertise different chat keys).
 const dynamicModelsCacheTTL = 5 * time.Minute
-
-var dynamicModelsCache struct {
-	sync.RWMutex
-	models  []pluginapi.ModelInfo
-	fetched time.Time
-}
 
 //
 // CPA applies oauth-model-alias to the models this plugin registers, so the

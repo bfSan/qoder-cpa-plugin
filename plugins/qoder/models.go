@@ -16,15 +16,22 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// wbModels is the static fallback model list for QoderWork CN. Kept in sync
-// with the upstream chat scene as of 2026-09 (issue #8: the previous table
-// still advertised three retired keys — qmodel_preview / q36fmodel /
-// gm51model — and missed the ultimate/performance/efficient tiers plus
-// qmodel_38max / kmodel_latest / gmodel / gfmodel, so a discovery failure
-// silently degraded every user to a stale catalog). Dynamic refresh via
-// /algo/api/v2/model/list replaces this at runtime when an account is
-// present. Aliases use the qoder/ prefix in AuthAttributes; bare IDs work
-// too.
+// wbModels is the static fallback model list for QoderWork. Kept in sync with
+// the union of the upstream chat scenes as of 2026-10. Two regions exist and
+// they do NOT serve the same keys: the CN gateway (qoder.com.cn) advertises
+// q37fmodel and gm51model, while the Intl gateway (qoder.com) advertises the
+// ultimate/performance/efficient tiers instead. So a discovery failure falls
+// back to this union rather than to one region's list, and no entry here may be
+// dropped just because the other region lacks it.
+//
+// (History: this comment used to claim qmodel_preview / q36fmodel / gm51model
+// were "retired upstream". That was wrong for gm51model — it is simply CN-only,
+// and deleting it here or its alias in the host config removes a working model.
+// qmodel_preview / q36fmodel are genuinely unreachable keys.)
+//
+// Dynamic refresh via /algo/api/v2/model/list replaces this at runtime when an
+// account is present. Aliases use the qoder/ prefix in AuthAttributes; bare IDs
+// work too.
 func wbModels() []pluginapi.ModelInfo {
 	return []pluginapi.ModelInfo{
 		{ID: "auto", Name: "Auto", ContextLength: 200000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
@@ -35,50 +42,147 @@ func wbModels() []pluginapi.ModelInfo {
 		{ID: "qfmodel", Name: "Qwen3.8-Flash", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "qmodel_latest", Name: "Qwen3.7-Max", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "qmodel", Name: "Qwen3.7-Plus", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "q37fmodel", Name: "Qwen3.7-Flash", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "kmodel_latest", Name: "Kimi-K3", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "kmodel", Name: "Kimi-K2.8-Preview", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "gmodel", Name: "GLM-5.3", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "gfmodel", Name: "GLM-5.3-Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gm51model", Name: "GLM-5.2", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "dmodel", Name: "DeepSeek-V4-Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "dfmodel", Name: "DeepSeek-Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "mmodel", Name: "MiniMax-M3", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
 }
 
-func cachedDynamicModels() ([]pluginapi.ModelInfo, bool) {
-	dynamicModelsCache.RLock()
-	defer dynamicModelsCache.RUnlock()
-	if len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
-		return dynamicModelsCache.models, true
-	}
-	return nil, false
+// dynamicModelEntry is one account's cached discovery result.
+type dynamicModelEntry struct {
+	models  []pluginapi.ModelInfo
+	factors map[string]float64
+	fetched time.Time
 }
 
+// dynamicModelsCache holds discovery results keyed by account.
+//
+// It MUST be keyed per account: the CN and Intl gateways advertise different
+// chat keys (see wbModels), so a single shared slot made whichever account
+// happened to be discovered first answer for every other one. That surfaced as
+// an intermittently "unknown provider for model" on a perfectly valid alias —
+// e.g. gm51model resolved while the CN list was cached, then 400'd once the
+// Intl list replaced it — and it made the panel show one region's catalog for
+// both accounts. The empty key is a synthetic slot used by unit tests and as
+// the last-resort fallback.
+var dynamicModelsCache struct {
+	sync.RWMutex
+	byAccount map[string]dynamicModelEntry
+}
+
+// accountCacheKey identifies the account a discovery result belongs to. The UID
+// is stable across token refreshes; the token prefix only backs up files that
+// predate it. Region is folded in so two files sharing a UID can never collide.
+func accountCacheKey(sa *storedAuth) string {
+	if sa == nil {
+		return ""
+	}
+	key := strings.TrimSpace(sa.Account.UID)
+	if key == "" {
+		n := len(sa.Auth.AccessToken)
+		if n > 16 {
+			n = 16
+		}
+		key = sa.Auth.AccessToken[:n]
+	}
+	if key == "" {
+		return ""
+	}
+	return authRegion(sa) + "\x00" + key
+}
+
+func cachedDynamicModelsFor(key string) ([]pluginapi.ModelInfo, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	e, ok := dynamicModelsCache.byAccount[key]
+	if !ok || len(e.models) == 0 || time.Since(e.fetched) >= dynamicModelsCacheTTL {
+		return nil, false
+	}
+	return e.models, true
+}
+
+// cachedDynamicModelsAll unions every cached account (plus the synthetic slot)
+// into the provider-wide catalog. This is what model.static should report: the
+// panel and the host both need to see every key the provider can serve, not
+// whichever region was pulled last.
+func cachedDynamicModelsAll() ([]pluginapi.ModelInfo, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	seen := make(map[string]struct{})
+	var out []pluginapi.ModelInfo
+	for _, e := range dynamicModelsCache.byAccount {
+		if len(e.models) == 0 || time.Since(e.fetched) >= dynamicModelsCacheTTL {
+			continue
+		}
+		for _, m := range e.models {
+			if _, dup := seen[m.ID]; dup {
+				continue
+			}
+			seen[m.ID] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// storeDynamicModels seeds the synthetic slot, which stands in for "the last
+// account to answer" in unit tests and the provider-wide fallback.
 func storeDynamicModels(models []pluginapi.ModelInfo) {
+	storeDynamicModelsFor("", models, nil)
+}
+
+func storeDynamicModelsFor(key string, models []pluginapi.ModelInfo, factors map[string]float64) {
 	dynamicModelsCache.Lock()
-	dynamicModelsCache.models = models
-	dynamicModelsCache.fetched = time.Now()
+	if dynamicModelsCache.byAccount == nil {
+		dynamicModelsCache.byAccount = make(map[string]dynamicModelEntry)
+	}
+	dynamicModelsCache.byAccount[key] = dynamicModelEntry{models: models, factors: factors, fetched: time.Now()}
 	dynamicModelsCache.Unlock()
 }
 
-// priceFactorCache holds the upstream chat-scene price_factor per model id,
-// refreshed alongside the dynamic model list. pluginapi.ModelInfo has no
-// field for it, so it rides in this sidecar for the panel to display.
-var priceFactorCache struct {
-	sync.RWMutex
-	factors map[string]float64
+// setDynamicModelsCacheForTest replaces the whole cache and returns a restore
+// func, so tests can seed one account without reaching into the map's internals.
+func setDynamicModelsCacheForTest(entries map[string][]pluginapi.ModelInfo) func() {
+	dynamicModelsCache.Lock()
+	prev := dynamicModelsCache.byAccount
+	next := make(map[string]dynamicModelEntry, len(entries))
+	for k, v := range entries {
+		next[k] = dynamicModelEntry{models: v, fetched: time.Now()}
+	}
+	dynamicModelsCache.byAccount = next
+	dynamicModelsCache.Unlock()
+	return func() {
+		dynamicModelsCache.Lock()
+		dynamicModelsCache.byAccount = prev
+		dynamicModelsCache.Unlock()
+	}
 }
 
 func storePriceFactors(factors map[string]float64) {
-	priceFactorCache.Lock()
-	priceFactorCache.factors = factors
-	priceFactorCache.Unlock()
+	dynamicModelsCache.Lock()
+	if dynamicModelsCache.byAccount == nil {
+		dynamicModelsCache.byAccount = make(map[string]dynamicModelEntry)
+	}
+	e := dynamicModelsCache.byAccount[""]
+	e.factors = factors
+	dynamicModelsCache.byAccount[""] = e
+	dynamicModelsCache.Unlock()
 }
 
 // staticPriceFactors mirrors the upstream chat-scene price_factor values
-// observed 2026-09 (auto=0.5, qfmodel=0 i.e. free, kmodel_latest=1.4, ...).
-// Used until a successful dynamic fetch overrides them, so the panel can
-// still show rates when the models API is unreachable.
+// observed 2026-10. Used until a successful dynamic fetch overrides them, so the
+// panel can still show rates when the models API is unreachable. Every key here
+// is live on at least one region (q37fmodel / gm51model are CN-only), so none is
+// dead weight.
 var staticPriceFactors = map[string]float64{
 	"auto":          0.5,
 	"qmodel_38max":  0.5,
@@ -99,64 +203,125 @@ var staticPriceFactors = map[string]float64{
 // priceFactorForModel reports the billing multiplier for a model id.
 // Dynamic values win; static table is the fallback. ok=false means unknown.
 func priceFactorForModel(id string) (factor float64, ok bool) {
-	priceFactorCache.RLock()
-	factor, ok = priceFactorCache.factors[id]
-	priceFactorCache.RUnlock()
-	if ok {
-		return factor, true
+	dynamicModelsCache.RLock()
+	for _, e := range dynamicModelsCache.byAccount {
+		if f, hit := e.factors[id]; hit {
+			dynamicModelsCache.RUnlock()
+			return f, true
+		}
 	}
+	dynamicModelsCache.RUnlock()
 	factor, ok = staticPriceFactors[id]
 	return factor, ok
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
+	models, _ := fetchDynamicModelsForce(false)
+	return models
+}
+
+// fetchDynamicModelsForce pulls every account's upstream model list and returns
+// the union, reporting the last discovery error so a forced refresh can tell the
+// operator the pull failed instead of silently serving the cached list as if it
+// were fresh.
+//
+// force skips the cache read the way an explicit panel refresh wants: without
+// it every call inside the 5 minute TTL answers from memory, so pressing
+// refresh showed the same list no matter what upstream had published.
+//
+// The result is the union across accounts because this backs model.static, which
+// must describe everything the provider can serve. Each account's own result is
+// stored under its own key, so a per-auth query never inherits another region's
+// catalog.
+func fetchDynamicModelsForce(force bool) ([]pluginapi.ModelInfo, error) {
+	if !force {
+		if models, ok := cachedDynamicModelsAll(); ok {
+			return models, nil
+		}
 	}
 	models := wbModels()
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
-		return models
+		return models, err
 	}
 	// Strict filename-prefix match — same filter as host_auth.go hostAuthList.
 	// (Earlier code also matched files containing "codebuddy" anywhere, which
 	// would wrongly include workbuddy-*.json auths here and cause us to call
 	// the qoderwork models API with a workbuddy token.)
 	prefix := providerName + "-"
+	var lastErr error
+	seen := make(map[string]struct{})
+	var out []pluginapi.ModelInfo
+	pulled := false
 	for _, f := range files {
 		if !strings.HasPrefix(strings.ToLower(f.Name), prefix) {
 			continue
 		}
 		raw, err := hostAuthGetByIndex(f.AuthIndex)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		sa, err := parseStored(raw)
 		if err != nil || sa == nil {
+			if err != nil {
+				lastErr = err
+			}
 			continue
 		}
 		dyn, err := callModelsAPI(sa)
-		if err == nil && len(dyn) > 0 {
-			storeDynamicModels(dyn)
-			return dyn
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(dyn) == 0 {
+			continue
+		}
+		// callModelsAPI already stored this account's own entry (models and
+		// price factors) under its key; union it into the provider-wide list.
+		pulled = true
+		for _, m := range dyn {
+			if _, dup := seen[m.ID]; dup {
+				continue
+			}
+			seen[m.ID] = struct{}{}
+			out = append(out, m)
 		}
 	}
-	return models
+	if pulled && len(out) > 0 {
+		return out, nil
+	}
+	return models, lastErr
 }
 
+// fetchDynamicModelsFromStorage answers model.for_auth for one account. It must
+// only ever use that account's own cached catalog: the CN and Intl gateways
+// advertise different keys, so sharing one slot handed the Intl account the CN
+// list and made valid keys 400 as "unknown provider for model".
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
-	}
 	sa, err := parseStored(storageJSON)
 	if err != nil || sa == nil {
 		return fetchDynamicModels()
 	}
+	key := accountCacheKey(sa)
+	if models, ok := cachedDynamicModelsFor(key); ok {
+		return models
+	}
 	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
-		storeDynamicModels(dyn)
 		return dyn
 	}
-	return fetchDynamicModels()
+	// Discovery failed for this account: reuse its stale entry if we have one
+	// rather than another region's list, then fall back to the union.
+	dynamicModelsCache.RLock()
+	stale, ok := dynamicModelsCache.byAccount[key]
+	dynamicModelsCache.RUnlock()
+	if ok && len(stale.models) > 0 {
+		return stale.models
+	}
+	if models, ok := cachedDynamicModelsAll(); ok {
+		return models
+	}
+	return wbModels()
 }
 
 // fetchDynamicModels calls the QoderWork API to get the latest model list.
@@ -237,7 +402,10 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no enabled chat models")
 	}
-	storePriceFactors(factors)
+	// Cache under this account's own key: the CN and Intl gateways advertise
+	// different chat keys, so a shared slot would answer one region with the
+	// other's catalog.
+	storeDynamicModelsFor(accountCacheKey(sa), out, factors)
 	return out, nil
 }
 

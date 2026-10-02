@@ -129,7 +129,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
 			{Method: http.MethodGet, Path: base + "/cooldowns", Description: "List active per-(account, model) cooldown entries."},
 			{Method: http.MethodPost, Path: base + "/cooldowns/clear", Description: "Clear cooldown for one account (auth_id) or one pair (auth_id + model)."},
-			{Method: http.MethodGet, Path: base + "/models", Description: "List the effective model catalog plus plugin-owned overlay state."},
+			{Method: http.MethodGet, Path: base + "/models", Description: "List the effective model catalog plus plugin-owned overlay state. Add ?refresh=1 to re-pull the upstream model list instead of serving the cached one."},
 			{Method: http.MethodPut, Path: base + "/models", Description: "Replace the plugin-owned model overlay."},
 			{Method: http.MethodPost, Path: base + "/models/action", Description: "Apply one model action: hide, restore, move or add."},
 			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start a CN or Intl Qoder device-authorization login (body: {region})."},
@@ -289,7 +289,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 	case req.Method == http.MethodPost && path == base+"/cooldowns/clear":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownClear(req)))
 	case req.Method == http.MethodGet && path == base+"/models":
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildModelListQuery()))
+		// refresh=1 is the panel's refresh button: pull each account from the
+		// upstream model list instead of answering inside the cache TTL.
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildModelListQueryForce(req.Query.Get("refresh") != "")))
 	case req.Method == http.MethodPut && path == base+"/models":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelOverlayWrite(req)))
 	case req.Method == http.MethodPost && path == base+"/models/action":

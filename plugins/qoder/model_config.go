@@ -259,12 +259,26 @@ func baseModelCatalog() []pluginapi.ModelInfo {
 	return cloneModelInfos(models)
 }
 
+// baseModelCatalogForce is baseModelCatalog for the panel's refresh button: it
+// pulls upstream even inside the cache TTL and reports the discovery error, so a
+// failed refresh can be surfaced instead of the operator seeing a cached list
+// and assuming it is current.
+func baseModelCatalogForce(force bool) ([]pluginapi.ModelInfo, error) {
+	models, err := fetchDynamicModelsForce(force)
+	return cloneModelInfos(models), err
+}
+
 func effectiveModelCatalog() []pluginapi.ModelInfo {
 	return applyModelOverlay(baseModelCatalog(), loadedModelOverlayForRead())
 }
 
 func adminModelCatalog() []pluginapi.ModelInfo {
 	return applyModelOverlayForAdmin(baseModelCatalog(), loadedModelOverlayForRead())
+}
+
+func adminModelCatalogForce(force bool) ([]pluginapi.ModelInfo, error) {
+	models, err := baseModelCatalogForce(force)
+	return applyModelOverlayForAdmin(models, loadedModelOverlayForRead()), err
 }
 
 func overlayHidden(o modelOverlay, id string) bool {
@@ -286,7 +300,16 @@ func overlayAdded(o modelOverlay, id string) bool {
 }
 
 func buildModelListQuery() map[string]any {
-	models := sortModelsForCatalog(adminModelCatalog())
+	return buildModelListQueryForce(false)
+}
+
+// buildModelListQueryForce serves the panel's catalog. With force set (the
+// refresh button) it re-pulls every account from upstream instead of answering
+// inside the 5 minute cache TTL, and reports the pull error in the body so a
+// failed refresh is visible rather than looking like an unchanged list.
+func buildModelListQueryForce(force bool) map[string]any {
+	models, refreshErr := adminModelCatalogForce(force)
+	models = sortModelsForCatalog(models)
 	overlay, revision := loadedModelOverlay()
 	items := make([]map[string]any, 0, len(models))
 	for i, m := range models {
@@ -305,7 +328,7 @@ func buildModelListQuery() map[string]any {
 		}
 		items = append(items, item)
 	}
-	return map[string]any{
+	resp := map[string]any{
 		"models":           items,
 		"count":            len(items),
 		"source":           "dynamic",
@@ -314,6 +337,12 @@ func buildModelListQuery() map[string]any {
 		"persistent":       true,
 		"persistentFields": []string{"hide"},
 	}
+	// Without this a failure is indistinguishable from "upstream published
+	// nothing new": the panel would show the cached catalog and report success.
+	if refreshErr != nil {
+		resp["refresh_error"] = refreshErr.Error()
+	}
+	return resp
 }
 
 func handleModelOverlayWrite(req pluginapi.ManagementRequest) map[string]any {

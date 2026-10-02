@@ -224,7 +224,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
   <div class="card" id="modelBox" style="margin-top:16px">
     <h2>模型列表 <span style="display:flex;gap:6px;align-items:center">
       <span class="badge" id="modelSource" title="当前模型目录的来源">—</span>
-      <button type="button" class="ftag" onclick="loadModels(true)">刷新</button>
+      <button type="button" class="ftag" onclick="refreshModels(this)">刷新</button>
     </span></h2>
     <p class="mut" id="modelHint" style="margin:6px 0 10px;font-size:12px"></p>
     <div id="modelList"><div class="loading">加载中…</div></div>
@@ -729,17 +729,41 @@ async function load(force, btn){
 }
 const MODEL_SOURCE_LABEL={dynamic:"上游实时",config:"配置覆盖",cache:"缓存",none:"未知"};
 let lastModels=[];
-async function loadModels(toastOnError){
+// refresh=true asks the plugin to re-pull the upstream model list; without it the
+// plugin answers from its 5 minute cache, so the button did nothing visible even
+// when upstream had published or retired a model. The forced read is the whole
+// purpose of the button, so it must not fail silently: the response carries
+// refresh_error on a failed pull, and the request itself may throw. Both are
+// surfaced, because an unchanged list is otherwise indistinguishable from a
+// refresh that never reached upstream.
+async function fetchModels(refresh){
+  if(!refresh) return await api("/models");
+  const d=await api("/models?refresh=1");
+  if(d&&d.refresh_error) d.refresh_failed=true;
+  return d;
+}
+// refreshModels is the model section's refresh button: a forced upstream pull
+// with a busy state, so the operator can see it is working and gets told when
+// the pull failed instead of guessing from an unchanged list.
+async function refreshModels(btn){
+  busy(btn,true);
+  try{ await loadModels(true,true); } finally { busy(btn,false); }
+}
+async function loadModels(toastOnError,refresh){
   const box=document.getElementById("modelList");
   const srcEl=document.getElementById("modelSource");
   const hintEl=document.getElementById("modelHint");
   if(!box||!srcEl||!hintEl) return;
   try{
-    const d=await api("/models");
+    const d=await fetchModels(refresh);
     lastModels=Array.isArray(d.models)?d.models:[];
-    const src=d.source||"none";
+    // A failed forced refresh serves the cached list, so the badge must not keep
+    // claiming "上游实时" — that would be the exact misreport this refresh
+    // path exists to remove.
+    const src=(d&&d.refresh_failed)?"cache":(d.source||"none");
     srcEl.textContent=MODEL_SOURCE_LABEL[src]||src;
     const parts=[`共 ${lastModels.length} 个模型`];
+    if(d&&d.refresh_failed) parts.push("上游刷新失败，当前为缓存列表");
     if(d.persistent) parts.push("隐藏列表保存在插件配置中");
     const overlay=d.overlay||{};
     if((Array.isArray(overlay.order)&&overlay.order.length)||(Array.isArray(overlay.add)&&overlay.add.length)){
@@ -747,7 +771,17 @@ async function loadModels(toastOnError){
     }
     hintEl.textContent=parts.join(" · ");
     renderModels();
+    if(refresh){
+      if(d&&d.refresh_failed) toast("刷新失败：仍显示缓存列表","err",String(d.refresh_error||"上游拉取失败").slice(0,160));
+      else toast("模型列表已从上游刷新","ok",`共 ${lastModels.length} 个模型`);
+    }
   }catch(e){
+    // A failed forced refresh keeps the previous list rather than blanking the
+    // panel; only a first load writes the error into the body.
+    if(refresh&&lastModels.length){
+      if(toastOnError) toast("刷新失败","err",String(e&&e.message||e));
+      return;
+    }
     box.innerHTML=`<div class="mut">加载失败：${esc(String(e&&e.message||e))}</div>`;
     srcEl.textContent="—";
     if(toastOnError) toast("模型加载失败","err",String(e&&e.message||e));
