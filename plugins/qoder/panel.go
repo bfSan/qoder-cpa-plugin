@@ -219,11 +219,30 @@ func summarizeCredits(accounts []wbAccount) map[string]any {
 			cnSize += cr.TotalSize
 		}
 	}
+	// total is the pool, and the three figures must add up: total = remain+used.
+	//
+	// This used to be a silent `if size > total { total = size }`. qoder's three
+	// figures all come from the same upstream objects (q.UserQuota and
+	// q.AddOnQuota), so they cannot currently disagree — but that is a property
+	// of today's response shape, not a guarantee, and a silent max() would hide
+	// the day it stops holding. The workbuddy plugin had the identical line and
+	// did hide a real accounting bug for as long as it was there.
+	//
+	// A disagreement between two numbers that are supposed to be equal is
+	// reported, not smoothed over.
 	total := remain + used
-	if size > total {
-		total = size
+	inconsistent := int64(0)
+	// size==0 means upstream reported no capacity, which is a real state rather
+	// than a disagreement. Only compare when there is a size to disagree with.
+	if size > 0 && size != remain+used {
+		inconsistent = 1
+		// Fall back to the larger figure so the displayed total still covers the
+		// pool, but only alongside the flag that says it is untrustworthy.
+		if size > total {
+			total = size
+		}
 	}
-	return map[string]any{
+	resp := map[string]any{
 		"account_count":   len(accounts),
 		"known_count":     known,
 		"disabled_count":  disabledN,
@@ -239,7 +258,12 @@ func summarizeCredits(accounts []wbAccount) map[string]any {
 		"global_remain":   glRemain,
 		"global_used":     glUsed,
 		"global_size":     glSize,
+		// inconsistent is 1 when total_size != total_remain+total_used, meaning
+		// the accounting disagrees with itself and the totals should not be
+		// trusted. The panel surfaces this as a warning.
+		"inconsistent": inconsistent,
 	}
+	return resp
 }
 
 // Web panel (self-contained HTML, no external assets)

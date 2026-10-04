@@ -94,6 +94,8 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .pb-track{height:8px;background:var(--surface-muted);border-radius:99px;overflow:hidden}
 .pb-bar{height:100%;background:var(--ok);border-radius:99px;transition:width .6s ease}
 .pb-meta{font-size:11px;color:var(--mut);margin-top:6px}
+.pb-warn{font-size:11px;color:var(--err);background:var(--err-soft);border:1px solid var(--err-border);
+  border-radius:6px;padding:4px 8px;margin-top:6px;line-height:1.5}
 .actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
 .field-input{flex:1;min-width:0;max-width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)}
 /* 右上角滑入通知栈 */
@@ -367,7 +369,12 @@ function progressHTML(c){
   const pct=total>0?Math.round(used/total*100):0;
   let color='var(--ok)'; if(pct>60)color='var(--warn)'; if(pct>85)color='var(--err)';
   const when=c.fetched_at?` · 快照 ${esc(String(c.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
-  return `<div class="pb"><div class="pb-label"><span>可用 ${remain}</span><span>已用 ${used} · ${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 额度池 ${total}${c.pack_count?` · ${c.pack_count} 个包`:''}${when}</div></div>`;
+  // total_size should equal total_remain+total_used. If it does not, the three
+  // figures are counting different things and the percentage is meaningless.
+  // Say so rather than rendering a confident-looking bar over bad numbers.
+  const bad=(c.total_size>0)&&(c.total_size!==remain+used);
+  const warn=bad?`<div class="pb-warn">⚠ 额度数据自相矛盾（余 ${remain} + 已用 ${used} ≠ 池 ${c.total_size}），百分比不可信</div>`:'';
+  return `<div class="pb"><div class="pb-label"><span>可用 ${remain}</span><span>已用 ${used} · ${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${bad?'var(--err)':color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 额度池 ${total}${c.pack_count?` · ${c.pack_count} 个包`:''}${when}</div>${warn}</div>`;
 }
 function bindCardActions(root){
   (root||document).querySelectorAll("[data-action]").forEach(btn=>{
