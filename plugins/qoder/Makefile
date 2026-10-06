@@ -1,7 +1,15 @@
 .PHONY: build test lint clean release
 
 GO ?= go
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Plugin version comes from the VERSION file, not `git describe`.
+#
+# This repository's tags track the *plugin registry* revision (v0.12.x), while
+# the plugin's own released version is the far lower 0.9.x line recorded in
+# VERSION. Using `git describe` therefore stamped builds with an unrelated
+# string ("v0.12.72-23-g919ed72-dirty"), which the host logs at load time and
+# the panel displays as the plugin version. Read the file instead; VERSION=x
+# still overrides it on the command line.
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo "dev")
 LDFLAGS := -X main.version=$(VERSION)
 
 # Default target: build the plugin for the current platform.

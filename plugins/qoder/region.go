@@ -66,6 +66,7 @@ func domainForRegion(region string) string {
 var (
 	testUpstreamBaseMu       sync.RWMutex
 	testUpstreamBaseOverride = map[string]string{}
+	testGatewayBaseOverride  = map[string]string{}
 )
 
 func setUpstreamBaseForTest(region, base string) func() {
@@ -89,6 +90,30 @@ func setUpstreamBaseForTest(region, base string) func() {
 	}
 }
 
+// setGatewayBaseForTest redirects the inference gateway for one region, so
+// tests can exercise the SSE data plane (pump / collect / aggregate) against an
+// httptest server instead of the real gateway.
+func setGatewayBaseForTest(region, base string) func() {
+	region = normalizeRegion(region)
+	testUpstreamBaseMu.Lock()
+	prev, had := testGatewayBaseOverride[region]
+	if base == "" {
+		delete(testGatewayBaseOverride, region)
+	} else {
+		testGatewayBaseOverride[region] = base
+	}
+	testUpstreamBaseMu.Unlock()
+	return func() {
+		testUpstreamBaseMu.Lock()
+		if had {
+			testGatewayBaseOverride[region] = prev
+		} else {
+			delete(testGatewayBaseOverride, region)
+		}
+		testUpstreamBaseMu.Unlock()
+	}
+}
+
 // upstreamBaseForRegion / gatewayBaseForRegion route by login/account region.
 func upstreamBaseForRegion(region string) string {
 	testUpstreamBaseMu.RLock()
@@ -104,6 +129,12 @@ func upstreamBaseForRegion(region string) string {
 }
 
 func gatewayBaseForRegion(region string) string {
+	testUpstreamBaseMu.RLock()
+	override := testGatewayBaseOverride[normalizeRegion(region)]
+	testUpstreamBaseMu.RUnlock()
+	if override != "" {
+		return override
+	}
 	if region == regionIntl {
 		return gatewayBaseIntl
 	}

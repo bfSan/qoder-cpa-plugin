@@ -220,7 +220,10 @@ func cliproxyPluginShutdown() {
 // hostCall invokes a host RPC method via the function-pointer table captured
 // at init. Used to push stream chunks back asynchronously (host.stream.emit /
 // host.stream.close) and to read the host's auth store (host.auth.list/get).
-func hostCall(method string, request []byte) ([]byte, error) {
+//
+// It is a package-level var so tests can substitute a fake host RPC bridge and
+// observe the exact frames the plugin would send (chunk vs terminal error).
+var hostCall = func(method string, request []byte) ([]byte, error) {
 	if hostAPI == nil || hostAPI.call == nil {
 		return nil, fmt.Errorf("host API unavailable")
 	}
@@ -348,8 +351,11 @@ type registrationCapability struct {
 	UsagePlugin           bool                         `json:"usage_plugin"`
 }
 
-// version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.6"
+// version is injected at build time via -ldflags "-X main.version=...", which
+// `make build` feeds from the VERSION file. This literal is the fallback for a
+// bare `go build`; keep it in step with VERSION so a stray build never
+// under-reports the plugin version.
+var version = "0.9.7"
 
 func wbRegistration() registration {
 	return registration{
@@ -731,6 +737,15 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if sa.Account.UID != "" {
 		authUID = sa.Account.UID
 	}
+	// Per-account concurrency gate: the upstream rate-limits per uid once ~15
+	// requests are in flight, so hold one slot for the whole execution instead
+	// of letting a burst push the account into throttling.
+	release, gateErr := acquireUpstreamSlot(req.AuthID, authUID)
+	if gateErr != nil {
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, gateErr.Error())
+		return nil, gateErr
+	}
+	defer release()
 	// Build the QoderWork agent_chat_generation body from the OpenAI request,
 	// then QoderEncoding-encode it. The template embeds a 10657-token system
 	// prompt that the server requires for normal behaviour (KNOWLEDGE §5.2).
@@ -745,41 +760,97 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("body build: %w", err)
 	}
 	encodedBody := qoderEncode(body)
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
+	for attempt := 1; ; attempt++ {
+		// One attempt needs its own request: the host bridge consumes the body.
+		httpReq, cancel, reqErr := buildChatRequest(context.Background(), sa, encodedBody, upstreamModel)
+		if reqErr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, reqErr.Error())
+			return nil, reqErr
+		}
+		// Compliance: route via host.http.do_stream so request-log captures the
+		// outbound call. Read entire body via the bridge, then fold SSE → completion.
+		stream, statusCode, _, streamErr := hostHTTPDoStream(httpReq)
+		if streamErr != nil {
+			if cancel != nil {
+				cancel()
+			}
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, streamErr.Error())
+			return nil, fmt.Errorf("http_error: %w", streamErr)
+		}
+		reader := newHostStreamReader(stream)
+		if statusCode >= 400 {
+			payload, _ := io.ReadAll(reader)
+			stream.Close()
+			if cancel != nil {
+				cancel()
+			}
+			if isSoftRateLimit(statusCode, string(payload)) && attempt < upstreamRetryMaxAttempts {
+				if waitErr := retrySleep(context.Background(), retryBackoffSchedule(attempt)); waitErr == nil {
+					continue
+				}
+			}
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
+			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
+			reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
+			// 0.8.13: account-level statuses ride the error envelope so the host
+			// cooldown layer stops re-picking a drained credential.
+			return nil, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
+		}
+		completion, foldErr := aggregateQoderSSE(reader, req.Model)
+		stream.Close()
+		// The context is released only after the stream is fully consumed, so a
+		// cancel cannot truncate a read that is still in flight.
+		if cancel != nil {
+			cancel()
+		}
+		if foldErr != nil {
+			foldStatus := upstreamStatusFromError(foldErr)
+			// A rate-limited envelope inside an HTTP 200 stream is worth a
+			// backoff retry; anything else is terminal.
+			if foldStatus == http.StatusTooManyRequests && attempt < upstreamRetryMaxAttempts {
+				if waitErr := retrySleep(context.Background(), retryBackoffSchedule(attempt)); waitErr == nil {
+					continue
+				}
+			}
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, foldStatus, foldErr.Error())
+			recordUpstreamFailure(req.AuthID, cooldownModel, foldStatus, foldErr.Error())
+			reconcileAfterExecutorError(req.AuthID, foldStatus, foldErr.Error())
+			return nil, foldErr
+		}
+		publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
+		invalidateAccountCredits(req.AuthID, authUID)
+		return okEnvelope(pluginapi.ExecutorResponse{Payload: completion})
+	}
+}
+
+// buildChatRequest constructs a fresh signed upstream chat request. The host
+// HTTP bridge consumes the request body on every call, so each attempt (and
+// each retry) needs its own request.
+func buildChatRequest(ctx context.Context, sa *storedAuth, encodedBody, modelKey string) (*http.Request, context.CancelFunc, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
 	if err != nil {
-		return nil, err
+		cancel()
+		return nil, nil, err
 	}
-	if err := applyCosyHeaders(httpReq, sa, encodedBody, endpointChatFor(sa), upstreamModel, true); err != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "cosy: "+err.Error())
-		return nil, fmt.Errorf("cosy: %w", err)
+	if err := applyCosyHeaders(httpReq, sa, encodedBody, endpointChatFor(sa), modelKey, true); err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("cosy: %w", err)
 	}
-	// Compliance: route via host.http.do_stream so request-log captures the
-	// outbound call. Read entire body via the bridge, then fold SSE → completion.
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
-	if err != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		return nil, fmt.Errorf("http_error: %w", err)
+	return httpReq, cancel, nil
+}
+
+// upstreamStatusFromError extracts the HTTP status carried by a plugin error,
+// if any (used to decide whether a folded-stream failure is retryable).
+func upstreamStatusFromError(err error) int {
+	var sc interface{ StatusCode() int }
+	if errors.As(err, &sc) && sc != nil {
+		return sc.StatusCode()
 	}
-	defer stream.Close()
-	reader := newHostStreamReader(stream)
-	if statusCode >= 400 {
-		payload, _ := io.ReadAll(reader)
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
-		recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
-		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-		// 0.8.13: account-level statuses ride the error envelope so the host
-		// cooldown layer stops re-picking a drained credential.
-		return nil, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
-	}
-	completion, err := aggregateQoderSSE(reader, req.Model)
-	if err != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		recordUpstreamFailure(req.AuthID, cooldownModel, 0, err.Error())
-		return nil, err
-	}
-	publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
-	invalidateAccountCredits(req.AuthID, authUID)
-	return okEnvelope(pluginapi.ExecutorResponse{Payload: completion})
+	return 0
 }
 
 // stripProviderPrefix removes the leading "qoder/" (or any "<provider>/")
@@ -835,11 +906,24 @@ func handleExecStream(raw []byte) ([]byte, error) {
 
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
+	prepare := func(ctx context.Context) (*http.Request, context.CancelFunc, error) {
+		return buildChatRequest(ctx, sa, encodedBody, upstreamModel)
+	}
+
+	// Per-account concurrency gate. The synchronous path holds the slot for the
+	// whole collection; the async path hands the release to the pump, which
+	// defers it so every exit path (success, error, panic) frees the slot.
+	release, gateErr := acquireUpstreamSlot(req.AuthID, authUID)
+	if gateErr != nil {
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, gateErr.Error())
+		return nil, gateErr
+	}
 
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
+		defer release()
 		collector := &sseUsageCollector{}
-		chunks, statusCode, errCollect := collectUpstreamStreamQoder(encodedBody, sa, upstreamModel, sseFramed, collector)
+		chunks, statusCode, errCollect := collectUpstreamStreamQoder(prepare, sseFramed, collector)
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
 			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errCollect.Error())
@@ -852,24 +936,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 
 	// Async: return immediately with empty chunks. A goroutine pumps the upstream
 	// and emits each chunk via host.stream.emit so the client sees true streaming.
-	// Use context.Background() (not nil) so the request can be cancelled when the
-	// client disconnects — otherwise the pump keeps reading a dead upstream until
-	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
-	ctx, cancel := context.WithCancel(context.Background())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
-	if err != nil {
-		cancel()
-		streamEmitError(req.StreamID, err.Error())
-		streamClose(req.StreamID)
-		return okEnvelope(streamResponse{Headers: headers})
-	}
-	if err := applyCosyHeaders(httpReq, sa, encodedBody, endpointChatFor(sa), upstreamModel, true); err != nil {
-		cancel()
-		streamEmitError(req.StreamID, "cosy: "+err.Error())
-		streamClose(req.StreamID)
-		return okEnvelope(streamResponse{Headers: headers})
-	}
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
+	// The pump owns the retry/prepare loop so it can rebuild a request (and
+	// re-sign it) for every attempt while the client keeps streaming.
+	go pumpUpstreamStream(prepare, release, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 

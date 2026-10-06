@@ -3,6 +3,8 @@
 *.dll
 *.dylib
 *.exe
+# cgo companion header emitted next to the built .so by -buildmode=c-shared.
+*.h
 
 # Build output
 dist/
