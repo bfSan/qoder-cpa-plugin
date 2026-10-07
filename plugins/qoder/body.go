@@ -104,13 +104,28 @@ func (m *openAIMessage) UnmarshalJSON(data []byte) error {
 	if content, ok := fields["content"]; ok {
 		m.contentSet = true
 		var s string
-		// 0.8.12: JSON null round-trips verbatim — unmarshaling null into a
-		// string silently yields "" and would rewrite the member behind the
-		// client's back (assistant messages carrying tool_calls commonly have
-		// content:null; the protocol authority qoderwork2api preserves null
-		// the same way via plain map decode).
+		// ★ JSON null is normalised to "" instead of round-tripping verbatim.
+		//
+		// This reverses the 0.8.12 behaviour, which preserved null to match the
+		// reference proxy's plain map decode. Verbatim was the wrong trade: the
+		// upstream gateway rejects the shape outright. An assistant message
+		// carrying tool_calls with content:null makes every following tool
+		// message look orphaned, and it answers
+		//
+		//   400 provider_error: Messages with role 'tool' must be a response to
+		//   a preceding message
+		//
+		// which blames message ORDER for what is really a content type. Measured
+		// 2026-10-07 against dfmodel through both /v1/responses and a hand-built
+		// /v1/chat/completions body (so no conversion layer was involved):
+		// content:null -> 400, content:"" -> 200, content:"text" -> 200. The
+		// empty string is accepted, so this is a strict widening of what we can
+		// send and cannot lose information: null and "" both mean "no text".
+		//
+		// Codex always emits null for tool-calling turns, so leaving this
+		// verbatim made the model unusable from the client that mattered most.
 		if trimmed := strings.TrimSpace(string(content)); trimmed == "null" {
-			m.rawContent = string(content)
+			m.Content = ""
 		} else if err := json.Unmarshal(content, &s); err == nil {
 			m.Content = s
 		} else {
@@ -134,11 +149,32 @@ func (m openAIMessage) MarshalJSON() ([]byte, error) {
 	case m.rawContent != "":
 		out["content"] = json.RawMessage(m.rawContent)
 	case m.contentSet:
+		// m.Content is "" for a normalised null, so the member is emitted as ""
+		// rather than omitted: the key must stay present, because an assistant
+		// turn with tool_calls is not valid without it.
 		enc, err := json.Marshal(m.Content)
 		if err != nil {
 			return nil, err
 		}
 		out["content"] = enc
+	default:
+		// ★ content was ABSENT in the payload, which is the shape that actually
+		// reaches us: the host's Responses->chat translator builds a tool-call
+		// turn as {"role":"assistant","tool_calls":[...]} with no content member
+		// at all (openai_openai-responses_request.go). Measured 2026-10-07
+		// against dfmodel, all three of these are DIFFERENT to upstream:
+		//
+		//   content absent  -> 400   (what the translator sends)
+		//   content: null   -> 400
+		//   content: ""     -> 200
+		//
+		// so normalising null alone would not have fixed the reported failure.
+		// Supply "" only where upstream demands it -- an assistant turn carrying
+		// tool_calls -- and leave every other message byte-identical, since the
+		// rest of the verbatim-passthrough contract still holds.
+		if _, hasToolCalls := m.raw["tool_calls"]; hasToolCalls {
+			out["content"] = json.RawMessage(`""`)
+		}
 	}
 	enc, err := json.Marshal(m.Role)
 	if err != nil {

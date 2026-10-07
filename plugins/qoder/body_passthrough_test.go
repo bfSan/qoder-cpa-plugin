@@ -41,9 +41,22 @@ func TestOpenAIMessageVerbatimRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOpenAIMessageNullContentRoundTrip(t *testing.T) {
-	// 0.8.12: content:null (the common assistant+tool_calls shape) must
-	// round-trip as null, not collapse to "" (verbatim contract).
+// TestOpenAIMessageNullContentBecomesEmptyString pins the fix for the upstream
+// 400 "Messages with role 'tool' must be a response to a preceding message".
+//
+// That error blames message ORDER, but the real cause is the content TYPE of the
+// preceding assistant turn: with content:null the gateway does not recognise it
+// as the call the tool message answers, so the tool message looks orphaned.
+// Measured 2026-10-07 against dfmodel via both /v1/responses and a hand-built
+// /v1/chat/completions body (no conversion layer involved): null -> 400,
+// "" -> 200, "text" -> 200.
+//
+// This deliberately REVERSES the 0.8.12 verbatim contract. Preserving null kept
+// us byte-identical to the reference proxy and made the model unusable from
+// Codex, which always emits null on tool-calling turns. The member must still be
+// PRESENT -- an assistant turn with tool_calls needs the key -- so the assertion
+// below checks for a present, empty string rather than a missing key.
+func TestOpenAIMessageNullContentBecomesEmptyString(t *testing.T) {
 	raw := `{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}`
 	var m openAIMessage
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
@@ -59,13 +72,21 @@ func TestOpenAIMessageNullContentRoundTrip(t *testing.T) {
 	}
 	v, ok := back["content"]
 	if !ok {
-		t.Fatal("content member dropped")
+		t.Fatal("content member dropped; an assistant turn with tool_calls must keep the key")
 	}
-	if v != nil {
-		t.Errorf("content null drifted to %v", v)
+	if v == nil {
+		t.Error("content is still null -- upstream rejects this shape with 400")
+	}
+	if v != "" {
+		t.Errorf("content = %v, want the empty string", v)
 	}
 	if _, ok := back["tool_calls"]; !ok {
 		t.Error("tool_calls lost in roundtrip")
+	}
+	// The raw wire bytes must not contain a null content either, since that is
+	// exactly what upstream parses.
+	if strings.Contains(string(out), `"content":null`) {
+		t.Errorf("wire body still carries content:null: %s", out)
 	}
 }
 
@@ -257,4 +278,186 @@ func TestRuneSafePrefix(t *testing.T) {
 
 func utf8Count(s string) int {
 	return len([]rune(s))
+}
+
+// TestUpstreamBodyNeverCarriesNullContent is the end-to-end form of the fix: it
+// asserts on the bytes the gateway actually receives, not on the message type in
+// isolation.
+//
+// The unit round-trip above could pass while some other path re-emitted null, so
+// this drives the real builder with the exact shape Codex sends (assistant turn
+// with tool_calls and content:null, followed by its tool results) and inspects
+// the serialised request. A null surviving anywhere in that body reproduces the
+// upstream 400.
+func TestUpstreamBodyNeverCarriesNullContent(t *testing.T) {
+	raw := []byte(`{
+	  "model":"qoder-deepseek-v4.1-flash",
+	  "messages":[
+	    {"role":"developer","content":"<app-context>ctx</app-context>"},
+	    {"role":"user","content":"列出目录"},
+	    {"role":"assistant","content":null,"tool_calls":[{"id":"call_a","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}]},
+	    {"role":"tool","tool_call_id":"call_a","content":"file1.txt"},
+	    {"role":"assistant","content":null,"tool_calls":[{"id":"call_b","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}}]},
+	    {"role":"tool","tool_call_id":"call_b","content":"/tmp"}
+	  ]}`)
+	var req openAIRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if len(req.Messages) != 6 {
+		t.Fatalf("decoded %d messages, want 6", len(req.Messages))
+	}
+
+	body, err := buildQoderBody(&req, "dfmodel", "personal")
+	if err != nil {
+		t.Fatalf("buildQoderBody: %v", err)
+	}
+
+	// The wire body must not contain a null content anywhere.
+	if strings.Contains(string(body), `"content":null`) {
+		t.Errorf("upstream body still carries content:null, which the gateway answers with 400")
+	}
+	// Every assistant turn must still declare a content member, and the tool
+	// results must survive: the fix must not drop the key or the messages.
+	var up struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &up); err != nil {
+		t.Fatalf("decode upstream body: %v", err)
+	}
+	var assistants, tools int
+	for _, m := range up.Messages {
+		var role string
+		if err := json.Unmarshal(m["role"], &role); err != nil {
+			t.Fatalf("decode role: %v", err)
+		}
+		switch role {
+		case "assistant":
+			assistants++
+			if _, ok := m["content"]; !ok {
+				t.Error("an assistant turn lost its content member")
+			}
+			if _, ok := m["tool_calls"]; !ok {
+				t.Error("an assistant turn lost its tool_calls")
+			}
+		case "tool":
+			tools++
+			if _, ok := m["tool_call_id"]; !ok {
+				t.Error("a tool result lost its tool_call_id")
+			}
+		}
+	}
+	if assistants != 2 || tools != 2 {
+		t.Errorf("upstream messages = %d assistant / %d tool, want 2 / 2", assistants, tools)
+	}
+}
+
+// TestAbsentContentIsSuppliedForToolCallTurns covers the shape that actually
+// reaches this plugin, which the null round-trip above does NOT exercise.
+//
+// The host's Responses->chat translator emits a tool-call turn as
+// {"role":"assistant","tool_calls":[...]} with the content member absent
+// entirely, not null (openai_openai-responses_request.go builds exactly that
+// literal). Measured 2026-10-07 against dfmodel, the three shapes differ:
+//
+//	content absent -> 400
+//	content: null  -> 400
+//	content: ""    -> 200
+//
+// so handling null alone would have left the reported failure in place. This
+// test fails if that regression is ever reintroduced.
+func TestAbsentContentIsSuppliedForToolCallTurns(t *testing.T) {
+	raw := `{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{}"}}]}`
+	var m openAIMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.contentSet {
+		t.Fatal("content must read as absent here, or this test covers the wrong branch")
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	v, ok := back["content"]
+	if !ok {
+		t.Fatal("content must be supplied as \"\" for a tool-call turn; upstream answers 400 without it")
+	}
+	if v != "" {
+		t.Errorf("content = %v, want the empty string", v)
+	}
+	if _, ok := back["tool_calls"]; !ok {
+		t.Error("tool_calls lost in roundtrip")
+	}
+
+	// A message that carries no tool_calls keeps its original shape: the
+	// exemption is what keeps this a targeted fix rather than a blanket rewrite
+	// of the verbatim passthrough.
+	plain := `{"role":"user"}`
+	var pm openAIMessage
+	if err := json.Unmarshal([]byte(plain), &pm); err != nil {
+		t.Fatalf("unmarshal plain: %v", err)
+	}
+	pout, err := json.Marshal(pm)
+	if err != nil {
+		t.Fatalf("marshal plain: %v", err)
+	}
+	var pback map[string]any
+	if err := json.Unmarshal(pout, &pback); err != nil {
+		t.Fatalf("roundtrip plain: %v", err)
+	}
+	if _, ok := pback["content"]; ok {
+		t.Error("a message without tool_calls must not silently gain a content member")
+	}
+}
+
+// TestUpstreamBodyTranslatorShapeIsFixed drives the exact message list the host
+// translator produces for Codex: tool-call turns with NO content member.
+func TestUpstreamBodyTranslatorShapeIsFixed(t *testing.T) {
+	raw := []byte(`{
+	  "model":"qoder-deepseek-v4.1-flash",
+	  "messages":[
+	    {"role":"developer","content":"<app-context>ctx</app-context>"},
+	    {"role":"user","content":"列出目录"},
+	    {"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}]},
+	    {"role":"tool","tool_call_id":"call_a","content":"file1.txt"}
+	  ]}`)
+	var req openAIRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	body, err := buildQoderBody(&req, "dfmodel", "personal")
+	if err != nil {
+		t.Fatalf("buildQoderBody: %v", err)
+	}
+	if strings.Contains(string(body), `"content":null`) {
+		t.Error("upstream body carries content:null, which is rejected")
+	}
+	var up struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &up); err != nil {
+		t.Fatalf("decode upstream body: %v", err)
+	}
+	for _, m := range up.Messages {
+		var role string
+		_ = json.Unmarshal(m["role"], &role)
+		if role != "assistant" {
+			continue
+		}
+		if _, hasCalls := m["tool_calls"]; !hasCalls {
+			continue
+		}
+		v, ok := m["content"]
+		if !ok {
+			t.Fatal("a tool-call turn reached upstream without a content member; it will be rejected with 400")
+		}
+		if string(v) != `""` {
+			t.Errorf("tool-call turn content = %s, want \"\"", v)
+		}
+	}
 }
