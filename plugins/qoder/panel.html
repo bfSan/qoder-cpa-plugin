@@ -450,8 +450,7 @@ function card(a){
   ${progressHTML(cr)}
   ${coolingHTML}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
-  <div class="actions">${refreshBtn}${actionHTML}</div>
-  <div class="actions">${manageBtn}</div>
+  <div class="actions">${refreshBtn}${actionHTML}${manageBtn}</div>
   </div>`;
 }
 let currentFilter="all";
