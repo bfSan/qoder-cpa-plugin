@@ -330,6 +330,8 @@ func buildModelListQueryForce(force bool) map[string]any {
 	}
 	resp := map[string]any{
 		"models":           items,
+		"region_models":    buildPanelRegionModels(),
+		"region_status":    buildPanelRegionStatus(),
 		"count":            len(items),
 		"source":           "dynamic",
 		"overlay":          overlay,
@@ -454,6 +456,24 @@ func syncOverlayHiddenModels(hidden []string) {
 	}
 	currentModelOverlayState.Overlay.Hide = append([]string(nil), next...)
 	currentModelOverlayState.Revision++
+}
+
+// syncOverlayModelOrder restores the persisted catalog order on config reload.
+// It touches only Order, so a reload cannot discard the hide list or the
+// synthetic additions that live in the same overlay.
+func syncOverlayModelOrder(order []string) {
+	next, err := normalizeModelIDList(order, "model_order")
+	if err != nil {
+		return
+	}
+	modelOverlayMu.Lock()
+	if sameStringList(currentModelOverlayState.Overlay.Order, next) {
+		modelOverlayMu.Unlock()
+		return
+	}
+	currentModelOverlayState.Overlay.Order = next
+	currentModelOverlayState.Revision++
+	modelOverlayMu.Unlock()
 }
 
 // currentHiddenModels returns the persistent hide list. The overlay is the

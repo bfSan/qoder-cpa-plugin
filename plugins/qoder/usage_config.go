@@ -51,6 +51,10 @@ var (
 
 type qoderConfigYAML struct {
 	HiddenModels yaml.Node `yaml:"hidden_models"`
+	// ModelOrder is the panel's persisted catalog order. Without it a drag is
+	// lost on the next reload: the overlay's Order lived only in process memory
+	// and the panel could not tell the difference.
+	ModelOrder yaml.Node `yaml:"model_order"`
 }
 
 // Default URL tries localhost first (works for both bare-metal and Docker
@@ -74,6 +78,8 @@ func configure(raw []byte) {
 
 	cfgURL, cfgKey := "", ""
 	var nextHiddenModels []string
+	var nextModelOrder []string
+	var modelOrderSet bool
 	if len(raw) > 0 {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
@@ -119,6 +125,15 @@ func configure(raw []byte) {
 				if hiddenErr == nil {
 					nextHiddenModels = hidden
 				}
+				// A nil node means the key was absent, which is different from
+				// an empty list that deliberately clears the order.
+				if configDoc.ModelOrder.Kind != 0 {
+					order, orderErr := normalizedConfiguredModelIDs(configDoc.ModelOrder)
+					if orderErr == nil {
+						nextModelOrder = order
+						modelOrderSet = true
+					}
+				}
 			}
 		}
 	}
@@ -150,6 +165,11 @@ func configure(raw []byte) {
 	managementAPIKeyMu.Unlock()
 
 	syncOverlayHiddenModels(nextHiddenModels)
+	// Only an explicitly supplied model_order is authoritative; an absent key
+	// must leave any in-process order alone rather than clearing it.
+	if modelOrderSet {
+		syncOverlayModelOrder(nextModelOrder)
+	}
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureCheckinLoop()
 }

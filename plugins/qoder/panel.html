@@ -55,7 +55,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .card{padding:16px}
 .card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center;gap:8px}
 .uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
-.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border);white-space:nowrap}
 .badge.exhausted{background:var(--err-soft);color:var(--err);border:1px solid var(--err-border)}
 .badge.pro{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)}
 .badge.cn{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
@@ -67,7 +67,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .cooldown-row .cd-model{font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
 .cooldown-row .cd-left{color:var(--warn);font-variant-numeric:tabular-nums;flex:0 0 auto}
 .filter-bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
-.ftag{background:var(--surface);border:1px solid var(--border);color:var(--mut);border-radius:99px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:600}
+.ftag{background:var(--surface);border:1px solid var(--border);color:var(--mut);border-radius:99px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:600;white-space:nowrap}
 .ftag.active{background:var(--acc);color:var(--on-acc);border-color:var(--acc)}
 .ftag .cnt{font-size:10px;opacity:.75;margin-left:4px}
 /* 用量汇总与账号卡共用 --card，避免夜间两套底色 */
@@ -131,11 +131,37 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 .modal-ft button.sec:hover{background:var(--btn-sec-hover)}
 .mut{color:var(--mut)}
 .model-rows{display:flex;flex-direction:column;gap:6px;max-height:560px;overflow:auto;padding-right:2px}
-.model-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
-.model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow-wrap:anywhere;flex:1 1 auto}
-.model-name{font-size:12px;flex:0 1 42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.model-actions{display:flex;gap:6px;flex:0 0 auto}
-.model-tags{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+/* 操作列必须按内容留足宽度：模型 ID 再长也只在自己的列里换行，不能把按钮挤变形。
+   最后一列下限 290px：Qoder 走的就是 WorkBuddy 那一套共享面板布局，沿用同一个
+   下限值，跨插件观感一致。对 Qoder 这其实是偏大的余量——Qoder 能出现的最宽一档
+   （移除/恢复 + 自定义 + 冷却 999 + 已隐藏）用 headless Chrome 实测只有 235.4px，
+   290px 比它宽 55px，所以只会更不容易换行。上限用 max-content 兜底，超过下限时
+   列只会变宽不会裁切内容。整表最小宽度由这些轨道加总决定。 */
+.model-table-wrap{overflow-x:auto;max-width:100%}.model-table{min-width:940px}
+.model-head,.model-row{display:grid;grid-template-columns:38px minmax(140px,1.1fr) minmax(200px,1fr) minmax(200px,1fr) minmax(290px,max-content);align-items:center;gap:10px;padding:8px 10px}
+.model-head{color:var(--mut);font-size:12px;font-weight:700;border-bottom:1px solid var(--border)}
+.model-row{border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+.drag-handle{cursor:grab;touch-action:none}.drag-handle:active{cursor:grabbing}
+/* 隐藏行的排序轨占位：不可拖拽，但要占住轨道宽度，免得整行左移一格。 */
+.drag-gap{display:block;width:100%}
+.realm-cell{min-width:0}
+.realm-facts{display:flex;flex-direction:column;gap:2px;color:var(--mut);font-size:12px;white-space:nowrap}
+.realm-facts span:first-child{color:var(--fg)}
+/* 当前默认上下文档位：加粗 + 主色，让操作者一眼看出用的是哪一档 */
+.realm-facts .ctx-default{color:var(--acc);font-weight:700}
+.model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.model-name{font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 操作列内的按钮/徽章一律不换行：窄列下 "隐藏" 曾被压成 "隐\n藏" */
+.model-actions{display:flex;gap:6px;flex:0 0 auto;margin-left:auto;white-space:nowrap;flex-wrap:nowrap}
+.model-actions>*{white-space:nowrap}
+.model-tags{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;white-space:nowrap}
+.model-actions .ftag{padding:2px 8px;font-size:12px}
+.model-actions .ftag[disabled]{opacity:.4;cursor:default}
+/* region_models 缺失时的降级表格：同样是网格（保持对齐），但不画分区列。
+   轨道数必须与 renderModelsFlat 每行输出的单元格数一致 —— 排序轨 / ID / 名称 / 操作。
+   少一条轨道时多出来的单元格会掉进隐式行，操作按钮就被挤到第二行。 */
+.model-table-flat{min-width:640px}
+.model-row-flat{grid-template-columns:38px minmax(140px,1.4fr) minmax(120px,.8fr) minmax(200px,max-content)}
 @media (max-width:640px){
   .wrap{padding:18px 12px}
   .bar,.filter-bar,.actions{min-width:0}
@@ -734,7 +760,34 @@ async function load(force, btn){
   }
 }
 const MODEL_SOURCE_LABEL={dynamic:"上游实时",config:"配置覆盖",cache:"缓存",none:"未知"};
+// Qoder 的两个区就是 cn / intl（后端 normalizeRegion 也只认这两个，global 是 intl 的别名）。
+const REGION_ORDER=["cn","intl"];
+const REGION_LABEL={cn:"CN",intl:"Intl"};
 let lastModels=[];
+// 分区对照表用的原始数据：region_models 按 id 提供 CN / Intl 两侧的独立上游事实，
+// models 仍然只负责顺序 / 隐藏 / 自定义（两者不互相覆盖）。
+let lastRegionModels=[];
+let lastRegionStatus={};
+let hasRegionCatalog=false;
+let modelOrderSaving=false;
+let modelOrderVersion=0;
+let draggedModelID=null;
+// acceptModelCatalog 合并两个目录：models 决定顺序与覆盖位，region_models 只补
+// 面板事实。两侧都出现同一个 id 时不重复成两行，以 models 的行为准。
+function acceptModelCatalog(d){
+  const rows=new Map();
+  for(const m of (Array.isArray(d&&d.models)?d.models:[])){
+    if(m&&m.id!=null&&!rows.has(String(m.id))) rows.set(String(m.id),m);
+  }
+  const regions=Array.isArray(d&&d.region_models)?d.region_models:[];
+  lastRegionModels=regions;
+  lastRegionStatus=(d&&d.region_status)||{};
+  hasRegionCatalog=regions.length>0;
+  for(const m of regions){
+    if(m&&m.id!=null&&!rows.has(String(m.id))) rows.set(String(m.id),{id:String(m.id),name:m.name,displayName:m.displayName});
+  }
+  lastModels=[...rows.values()];
+}
 // refresh=true asks the plugin to re-pull the upstream model list; without it the
 // plugin answers from its 5 minute cache, so the button did nothing visible even
 // when upstream had published or retired a model. The forced read is the whole
@@ -759,10 +812,14 @@ async function loadModels(toastOnError,refresh){
   const box=document.getElementById("modelList");
   const srcEl=document.getElementById("modelSource");
   const hintEl=document.getElementById("modelHint");
-  if(!box||!srcEl||!hintEl) return;
+  if(!box||!srcEl||!hintEl) return false;
+  // 拖拽/键盘排序保存期间的旧响应，以及保存完成后的迟到响应，都不得覆盖新顺序。
+  const orderVersion=modelOrderVersion;
+  if(modelOrderSaving) return false;
   try{
     const d=await fetchModels(refresh);
-    lastModels=Array.isArray(d.models)?d.models:[];
+    if(modelOrderSaving||orderVersion!==modelOrderVersion) return false;
+    acceptModelCatalog(d);
     // A failed forced refresh serves the cached list, so the badge must not keep
     // claiming "上游实时" — that would be the exact misreport this refresh
     // path exists to remove.
@@ -771,59 +828,265 @@ async function loadModels(toastOnError,refresh){
     const parts=[`共 ${lastModels.length} 个模型`];
     if(d&&d.refresh_failed) parts.push("上游刷新失败，当前为缓存列表");
     if(d.persistent) parts.push("隐藏列表保存在插件配置中");
-    const overlay=d.overlay||{};
-    if((Array.isArray(overlay.order)&&overlay.order.length)||(Array.isArray(overlay.add)&&overlay.add.length)){
-      parts.push("排序和自定义模型仅保存在内存中");
+    parts.push("排序保存到插件配置（拖拽 ⠿ 手柄或聚焦手柄后按 ↑ / ↓ 键，改动即时写入）");
+    if(hasRegionCatalog){
+      parts.push("上下文为分区原始档位（加粗即当前默认档位，只读）");
+    }else{
+      // 降级时不画分区列，也就没有"未加载"这回事——说清楚是后端没给数据。
+      parts.push("后端未返回分区对照数据（region_models），暂不显示 CN / Intl 列");
     }
+    const overlay=d.overlay||{};
+    if(Array.isArray(overlay.add)&&overlay.add.length) parts.push("自定义模型仅保存在内存中");
+    regionStatusParts(d).forEach(p=>parts.push(p));
     hintEl.textContent=parts.join(" · ");
     renderModels();
     if(refresh){
       if(d&&d.refresh_failed) toast("刷新失败：仍显示缓存列表","err",String(d.refresh_error||"上游拉取失败").slice(0,160));
       else toast("模型列表已从上游刷新","ok",`共 ${lastModels.length} 个模型`);
     }
+    return lastModels.length>0;
   }catch(e){
+    if(modelOrderSaving||orderVersion!==modelOrderVersion) return false;
     // A failed forced refresh keeps the previous list rather than blanking the
     // panel; only a first load writes the error into the body.
     if(refresh&&lastModels.length){
       if(toastOnError) toast("刷新失败","err",String(e&&e.message||e));
-      return;
+      return false;
     }
     box.innerHTML=`<div class="mut">加载失败：${esc(String(e&&e.message||e))}</div>`;
     srcEl.textContent="—";
     if(toastOnError) toast("模型加载失败","err",String(e&&e.message||e));
+    return false;
   }
+}
+// regionStatusParts 把 region_status 翻成提示语。没有该字段（旧后端）时返回空数组，
+// 提示语保持原样，不造出"未加载"这种看起来像故障的说法。
+function regionStatusParts(d){
+  const raw=(d&&d.region_status)||null;
+  if(!raw||typeof raw!=="object") return [];
+  return REGION_ORDER.map(r=>{
+    const st=raw[r]||{};
+    if(st==null||typeof st!=="object") return `${REGION_LABEL[r]}：未上报`;
+    const loaded=st.loaded===true?"已加载":(st.loaded===false?"未加载":"未上报");
+    const state=asText(st.status||st.state||"")||"unknown";
+    const source=asText(st.source||"")||"unknown";
+    const when=st.fetched_at?(" · 刷新 "+asText(st.fetched_at)):"";
+    return `${REGION_LABEL[r]}：${loaded} · ${state} · ${source}${when}`;
+  });
+}
+// contextLabel 把 token 数变成 200K / 400K / 1M 这种档位标签。
+function contextLabel(n){
+  n=Number(n)||0; if(!n) return "自动";
+  if(n>=1000000) return (n/1000000).toFixed(n%1000000?1:0)+"M";
+  if(n>=1000) return Math.round(n/1000)+"K";
+  return String(n);
+}
+// creditText 统一倍率文案：上游给的是数字 price_factor，一律渲染成 "0.5x"。
+// 为 0 时说"免费 (0x)"，缺失/null 时说"未上报"——绝不能把 null 变成 0（Number(null)===0），
+// 那会把"上游没报"伪装成免费。
+function creditText(factor){
+  if(factor==null||factor==="") return "未上报";
+  const n=Number(factor);
+  if(!Number.isFinite(n)) return "未上报";
+  if(n===0) return "免费 (0x)";
+  return String(n)+"x";
+}
+// thinkingText 把分区 thinking 能力翻成一句人话。
+// supported 时带上当前默认档位；unknown 表示上游没报；unsupported 表示不支持。
+function thinkingText(t){
+  const think=t||{};
+  const status=String(think.status||"unknown").toLowerCase();
+  const levels=Array.isArray(think.levels)?think.levels.map(v=>asText(v).trim()).filter(Boolean):[];
+  const rawDefault=think.default==null?"":asText(think.default).trim();
+  if(status==="unsupported") return "不支持";
+  if(status==="off_only") return levels.length?`仅可关闭（${levels.join("/")}）`:"仅可关闭";
+  if(status==="supported"||levels.length){
+    if(rawDefault) return `默认 ${rawDefault}${levels.length?`（${levels.join("/")}）`:""}`;
+    return levels.length?levels.join(" / "):"未上报";
+  }
+  return "未上报";
+}
+// contextFactsHTML 渲染分区的上下文档位，并把当前默认档位加粗高亮，
+// 这样操作者一眼能看出上游现在用的是哪一档。
+// 键名兼容三种历史形状：context_tiers 优先（对象数组，带 is_default），
+// 其次是 context_options / supported_context_lengths（纯数字数组）。
+function contextFactsHTML(r){
+  const positive=values=>values.map(v=>Number(v)).filter(v=>Number.isFinite(v)&&v>0);
+  let values=[], rawDefault=null;
+  const tiers=Array.isArray(r.context_tiers)?r.context_tiers.filter(t=>t&&typeof t==="object"):[];
+  if(tiers.length){
+    values=positive(tiers.map(t=>t.tokens));
+    const marked=tiers.find(t=>t.is_default===true);
+    if(marked) rawDefault=Number(marked.tokens);
+  }else{
+    const options=Array.isArray(r.context_options)?positive(r.context_options):[];
+    const supported=Array.isArray(r.supported_context_lengths)?positive(r.supported_context_lengths):[];
+    values=options.length?options:supported;
+    rawDefault=Number(r.default_context_length);
+  }
+  const hasDefault=Number.isFinite(rawDefault)&&rawDefault>0&&values.indexOf(rawDefault)>=0;
+  if(!values.length){
+    return Number(r.context_length)>0?esc(contextLabel(r.context_length)):"未上报";
+  }
+  const label=tiers.length
+    ? (t=>asText(t.label||"").trim()||contextLabel(t.tokens))
+    : (v=>contextLabel(v));
+  const items=tiers.length?tiers:values;
+  return items.map(item=>{
+    const v=tiers.length?Number(item.tokens):item;
+    const text=tiers.length?label(item):label(v);
+    return hasDefault&&v===rawDefault
+      ? `<b class="ctx-default" title="当前默认档位">${esc(text)}</b>`
+      : esc(text);
+  }).join(" / ");
+}
+// regionCell 把一行的某一区渲染成三行事实。
+// present 显示实际值；absent 显示 "—"（该区有目录但没这个模型）；
+// not_loaded 显示 "未加载"（该区没有账号/目录）。两者语义不同，不能混同。
+function regionCell(m, region){
+  const r=m&&m[region];
+  if(!r||r.status==="not_loaded"||r.present===null) return "未加载";
+  if(r.status==="absent"||r.present===false) return "—";
+  if(r.status!=="present"&&r.present!==true) return "未加载";
+  const credit=creditText(r.price_factor);
+  const think=thinkingText(r.thinking||{});
+  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span title="分区原始上下文档位，只读">上下文 ${contextFactsHTML(r)}</span></div>`;
 }
 function renderModels(){
   const box=document.getElementById("modelList");
   if(!lastModels.length){box.innerHTML=`<div class="mut">暂无模型</div>`;return}
-  box.innerHTML=`<div class="model-rows">`+lastModels.map((m,i)=>{
-    const id=String(m.id||"");
-    const name=m.displayName||m.name||"";
-    const escId=esc(id);
-    const tags=[];
-    if(m.custom) tags.push(`<span class="badge">自定义</span>`);
-    if(typeof m.priceFactor==="number"){
-      tags.push(m.priceFactor===0
-        ? `<span class="badge">免费</span>`
-        : `<span class="badge disabled" title="上游计费倍率">×${m.priceFactor}</span>`);
-    }
-    if(Number(m.coolingAccounts)>0) tags.push(`<span class="badge cooling">冷却 ${Number(m.coolingAccounts)}</span>`);
-    return `<div class="model-row">
-      <span class="model-id" title="${escId}">${escId}</span>
-      <span class="model-name mut">${esc(name)}</span>
-      <span class="model-actions">
-        ${m.hidden?"":`
-          <button type="button" class="ftag" onclick="moveModel('${escId}',-1)" aria-label="上移 ${escId}"${i===0?" disabled":""}>↑</button>
-          <button type="button" class="ftag" onclick="moveModel('${escId}',1)" aria-label="下移 ${escId}"${i===lastModels.length-1?" disabled":""}>↓</button>
-        `}
-        ${m.hidden
-          ? `<button type="button" class="ftag" onclick="restoreModel('${escId}')">恢复</button>`
-          : `<button type="button" class="ftag" onclick="toggleModel('${escId}')">${m.custom?"移除":"隐藏"}</button>`}
-      </span>
-      ${m.hidden?`<span class="model-tags"><span class="badge disabled">已隐藏</span></span>`:""}
-      ${tags.length?`<span class="model-tags">${tags.join("")}</span>`:""}
-    </div>`;
-  }).join("")+`</div>`;
+  // 没有 region_models 数据时安全降级：不渲染 fake 分区列，回到原来的单列样子。
+  if(!hasRegionCatalog){renderModelsFlat(box);return}
+  const regionByID=new Map(lastRegionModels.map(m=>[String(m.id),m]));
+  box.innerHTML=`<div class="model-table-wrap"><div class="model-table" role="table"><div class="model-head" role="row">`+
+    `<span>排序</span><span>模型</span><span>${REGION_LABEL.cn}</span><span>${REGION_LABEL.intl}</span><span>操作</span></div>`+
+    lastModels.map(m=>{
+      const id=String(m.id||"");
+      const r=regionByID.get(id)||{};
+      const escId=esc(id);
+      const tags=modelTags(m);
+      // 排序轨每行都必须占位。隐藏的模型不可拖拽（它不在 CPA 的模型响应里，
+      // 拖它没有意义），但整轨留空会让这一行后面的单元格整体左移一格，列就对不齐。
+      const handle=m.hidden
+        ? `<span class="drag-gap" aria-hidden="true"></span>`
+        : `<button type="button" class="drag-handle ftag" data-model-action="drag" data-model-id="${escId}" draggable="true" aria-label="拖拽排序 ${escId}" title="拖拽排序（聚焦后也可按 ↑ / ↓ 键）">⠿</button>`;
+      const actions=m.hidden
+        ? `<button type="button" class="ftag" data-model-action="restore" data-model-id="${escId}">恢复</button>`
+        : `<button type="button" class="ftag" data-model-action="toggle" data-model-id="${escId}">${m.custom?"移除":"隐藏"}</button>`;
+      return `<div class="model-row" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span><span class="realm-cell">${regionCell(r,"cn")}</span><span class="realm-cell">${regionCell(r,"intl")}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
+    }).join("")+`</div></div>`;
+  bindModelActions();
+}
+// renderModelsFlat 是 region_models 缺失时的降级路径：保留原来的两列表格，
+// 只把上下箭头换掉（排序改由拖拽/键盘完成），绝不因为缺少分区数据而整段报错。
+function renderModelsFlat(box){
+  box.innerHTML=`<div class="model-table-wrap"><div class="model-table model-table-flat" role="table">`+
+    lastModels.map(m=>{
+      const id=String(m.id||"");
+      const escId=esc(id);
+      const name=asText(m.displayName||m.name||"");
+      const tags=modelTags(m);
+      // 排序轨必须每行都占位。隐藏的模型不可拖拽（它不在 CPA 的模型响应里），
+      // 但整轨留空会让这一行后面的单元格整体左移一格，列就对不齐了。
+      const handle=m.hidden
+        ? `<span class="drag-gap" aria-hidden="true"></span>`
+        : `<button type="button" class="drag-handle ftag" data-model-action="drag" data-model-id="${escId}" draggable="true" aria-label="拖拽排序 ${escId}" title="拖拽排序（聚焦后也可按 ↑ / ↓ 键）">⠿</button>`;
+      const actions=m.hidden
+        ? `<button type="button" class="ftag" data-model-action="restore" data-model-id="${escId}">恢复</button>`
+        : `<button type="button" class="ftag" data-model-action="toggle" data-model-id="${escId}">${m.custom?"移除":"隐藏"}</button>`;
+      return `<div class="model-row model-row-flat" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span><span class="model-name mut">${esc(name)}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
+    }).join("")+`</div></div>`;
+  bindModelActions();
+}
+// modelTags 是 Qoder 专有徽章的单一出口：自定义 / 冷却（coolingAccounts）/ 已隐藏。
+// 倍率不再放这里——它已经是 CN / Intl 两列里的分区事实，重复显示只会两处互相矛盾。
+function modelTags(m){
+  const tags=[];
+  if(m.custom) tags.push(`<span class="badge">自定义</span>`);
+  if(Number(m.coolingAccounts)>0) tags.push(`<span class="badge cooling">冷却 ${Number(m.coolingAccounts)}</span>`);
+  if(m.hidden) tags.push(`<span class="badge disabled">已隐藏</span>`);
+  return tags;
+}
+// bindModelActions 用 data-* 属性绑定事件，不再使用 inline onclick：
+// 模型 ID 里的引号会破坏内联 HTML，dataset 没有这个问题。
+function bindModelActions(){
+  document.querySelectorAll("[data-model-action]").forEach(el=>{
+    if(el._bound) return;
+    el._bound=true;
+    el.disabled=el.disabled||modelOrderSaving;
+    el.addEventListener("click",()=>{
+      if(modelOrderSaving) return;
+      const action=el.dataset.modelAction, id=el.dataset.modelId;
+      // 排序不再有 ↑ / ↓ 按钮；moveModel 只由拖拽手柄的键盘 ↑ / ↓ 触发。
+      if(action==="toggle") return toggleModel(id);
+      if(action==="restore") return restoreModel(id);
+    });
+    if(el.dataset.modelAction!=="drag") return;
+    const row=el.closest(".model-row");
+    if(!row) return;
+    el.draggable=!modelOrderSaving;
+    // 键盘排序：手柄获得焦点后按 ↑ / ↓ 仍然可用（唯一保留的按键排序入口）。
+    el.addEventListener("keydown",e=>{
+      if(e.key!=="ArrowUp"&&e.key!=="ArrowDown") return;
+      e.preventDefault();return moveModel(row.dataset.modelId,e.key==="ArrowUp"?-1:1);
+    });
+    el.addEventListener("dragstart",e=>{
+      if(modelOrderSaving){e.preventDefault();return}
+      draggedModelID=row.dataset.modelId;
+      if(e.dataTransfer){e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",draggedModelID)}
+    });
+    el.addEventListener("dragend",()=>{draggedModelID=null});
+    row.addEventListener("dragover",e=>{if(draggedModelID!==null&&!modelOrderSaving)e.preventDefault()});
+    row.addEventListener("drop",e=>{
+      e.preventDefault();const from=draggedModelID;draggedModelID=null;
+      if(from!==null&&from!==row.dataset.modelId&&!modelOrderSaving)return saveModelOrder(reorderModels(from,row.dataset.modelId));
+    });
+  });
+}
+function reorderModels(from,to){
+  const ids=lastModels.map(m=>String(m.id));
+  const a=ids.indexOf(String(from)),b=ids.indexOf(String(to));
+  if(a>=0&&b>=0&&a!==b){const [x]=ids.splice(a,1);ids.splice(b,0,x)}
+  return ids;
+}
+// saveModelOrder 只 PATCH model_order 这一个字段。hidden_models 等其它配置由各自
+// 的路径负责，这里连带覆盖会把操作者刚做的隐藏设置悄悄改掉。
+// 失败回滚本地顺序并 toast；并发调用用 modelOrderSaving 加锁；响应里的 error 要校验。
+async function saveModelOrder(order){
+  if(modelOrderSaving) return false;
+  const previous=lastModels.slice();
+  const ids=order.map(String);
+  const by=new Map(previous.map(m=>[String(m.id),m]));
+  if(ids.length!==by.size||new Set(ids).size!==by.size||ids.some(id=>!by.has(id))) return false;
+  if(ids.every((id,i)=>id===String(previous[i].id))) return false;
+  modelOrderVersion++;modelOrderSaving=true;
+  lastModels=ids.map(id=>by.get(id));renderModels();
+  try{
+    const response=await managementAPI("/plugins/qoder/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model_order:ids})});
+    if(response&&response.error) throw new Error(asText(response.error));
+  }catch(e){
+    lastModels=previous;modelOrderSaving=false;modelOrderVersion++;renderModels();
+    toast("保存模型顺序失败","err",String(e&&e.message||e));return false;
+  }
+  modelOrderSaving=false;modelOrderVersion++;renderModels();
+  toast("模型顺序已保存到插件配置","ok");
+  // 重新读回一次，确认后端真的收下了这个顺序。后端若还没有注册 model_order
+  // 配置字段（PATCH 返回 200 但字段被丢弃），面板会在下一次渲染时悄悄回到旧顺序，
+  // 而上面那句"已保存"就成了假报告 —— 与其让操作者自己发现，不如当场说清楚。
+  // Read back silently. A refresh=true read would also fire its own
+  // "模型列表已从上游刷新" toast, which reads as a second, unrelated event right
+  // after the save and buries the warning this check exists to raise.
+  const reloaded=await loadModels(false,false);
+  if(reloaded&&!orderKept(ids)) toast("顺序未生效","warn","插件配置没有保留新的模型顺序，请确认后端已支持 model_order 字段");
+  return true;
+}
+// orderKept 只比较保存过的那批 id 的相对顺序，忽略刷新期间上游新增/下架的模型，
+// 否则一次正常的目录变动会被误报成保存失败。
+function orderKept(ids){
+  const wanted=ids.filter(id=>lastModels.some(m=>String(m.id)===id));
+  const actual=lastModels.map(m=>String(m.id)).filter(id=>wanted.indexOf(id)>=0);
+  return wanted.length===actual.length&&wanted.every((id,i)=>id===actual[i]);
 }
 async function modelAction(action,id,extra){
   try{
@@ -834,15 +1097,22 @@ async function modelAction(action,id,extra){
       const hidden=Array.isArray(overlay.hide)?overlay.hide:[];
       await managementAPI("/plugins/qoder/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({hidden_models:hidden})});
-    }else if(action==="move"||action==="add"){
-      toast("排序和自定义模型目前仅保存在内存中，CPA 重启后恢复","warn");
+    }else if(action==="add"){
+      toast("自定义模型保存在内存中，CPA 重启后恢复","warn");
     }
     await loadModels(false);
   }catch(e){
     toast("模型操作失败","err",String(e&&e.message||e));
   }
 }
-function moveModel(id,offset){modelAction("move",id,{offset:offset})}
+// moveModel 只由拖拽手柄的键盘 ↑ / ↓ 触发：上下箭头按钮已删除，但排序实现保留。
+function moveModel(id,offset){
+  if(modelOrderSaving) return false;
+  const ids=lastModels.map(m=>String(m.id)),at=ids.indexOf(String(id)),next=at+offset;
+  if(at<0||next<0||next>=ids.length) return false;
+  [ids[at],ids[next]]=[ids[next],ids[at]];
+  return saveModelOrder(ids);
+}
 function toggleModel(id){
   const m=lastModels.find(x=>String(x.id)===String(id));
   if(m&&m.custom){modelAction("hide",id);return}

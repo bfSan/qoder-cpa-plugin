@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,11 @@ func wbModels() []pluginapi.ModelInfo {
 type dynamicModelEntry struct {
 	models  []pluginapi.ModelInfo
 	factors map[string]float64
+	// region caches the per-model capability facts (reasoning tiers, context
+	// tiers) that pluginapi.ModelInfo cannot carry. It is stored next to the
+	// models rather than in a provider-wide map because the CN and Intl
+	// gateways advertise different tiers for the same model ID.
+	region  map[string]modelRegionFacts
 	fetched time.Time
 }
 
@@ -141,12 +147,48 @@ func storeDynamicModels(models []pluginapi.ModelInfo) {
 }
 
 func storeDynamicModelsFor(key string, models []pluginapi.ModelInfo, factors map[string]float64) {
+	storeDynamicModelsForWithRegions(key, models, factors, nil)
+}
+
+// storeDynamicModelsForWithRegions is storeDynamicModelsFor plus the per-model
+// capability facts. Kept separate so the many existing callers and tests that
+// only have a model list are unaffected.
+func storeDynamicModelsForWithRegions(key string, models []pluginapi.ModelInfo, factors map[string]float64, region map[string]modelRegionFacts) {
 	dynamicModelsCache.Lock()
 	if dynamicModelsCache.byAccount == nil {
 		dynamicModelsCache.byAccount = make(map[string]dynamicModelEntry)
 	}
-	dynamicModelsCache.byAccount[key] = dynamicModelEntry{models: models, factors: factors, fetched: time.Now()}
+	dynamicModelsCache.byAccount[key] = dynamicModelEntry{models: models, factors: factors, region: region, fetched: time.Now()}
 	dynamicModelsCache.Unlock()
+}
+
+// cachedRegionFactsFor returns one account's capability facts. The second
+// result is false when that account has no cached discovery, which callers must
+// treat as "not loaded" rather than "no models".
+func cachedRegionFactsFor(key string) (map[string]modelRegionFacts, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	e, ok := dynamicModelsCache.byAccount[key]
+	if !ok || len(e.models) == 0 || time.Since(e.fetched) >= dynamicModelsCacheTTL {
+		return nil, false
+	}
+	return e.region, true
+}
+
+// cachedRegionKeysByRegion lists the cache keys belonging to one region. Keys
+// are "<region>\x00<uid>" (see accountCacheKey), so the prefix decides.
+func cachedRegionKeysByRegion(region string) []string {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	prefix := region + "\x00"
+	keys := make([]string, 0, len(dynamicModelsCache.byAccount))
+	for key := range dynamicModelsCache.byAccount {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // setDynamicModelsCacheForTest replaces the whole cache and returns a restore
@@ -375,12 +417,17 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		IsVL           bool    `json:"is_vl"`
 		MaxInputTokens int64   `json:"max_input_tokens"`
 		PriceFactor    float64 `json:"price_factor"`
+		// The gateway publishes reasoning and context tiers per model; without
+		// these two the panel could only show "未上报" and a bare token count.
+		Thinking      *qoderThinkingConfigWire        `json:"thinking_config"`
+		ContextConfig map[string]qoderContextTierWire `json:"context_config"`
 	}
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
 	}
 	var out []pluginapi.ModelInfo
 	factors := make(map[string]float64, len(models))
+	regions := make(map[string]modelRegionFacts, len(models))
 	for _, m := range models {
 		if !m.Enable {
 			continue
@@ -390,6 +437,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		if m.MaxInputTokens > 0 {
 			ctx2 = m.MaxInputTokens
 		}
+		tiers := parseContextTiers(m.ContextConfig)
 		out = append(out, pluginapi.ModelInfo{
 			ID:                         m.Key,
 			Name:                       m.DisplayName,
@@ -398,14 +446,30 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			OwnedBy:                    providerName,
 			SupportedGenerationMethods: []string{"chat"},
 		})
+		// The advertised context length is the default tier when one is
+		// marked: max_input_tokens is the ceiling the gateway accepts, while
+		// the default tier is what it applies without an explicit choice, and
+		// the panel labels that one as current.
+		effectiveCtx := ctx2
+		if tokens, ok := contextDefaultTokens(tiers); ok {
+			effectiveCtx = tokens
+		}
+		factor := m.PriceFactor
+		regions[m.Key] = modelRegionFacts{
+			PriceFactor:   &factor,
+			ContextLength: &effectiveCtx,
+			ContextTiers:  tiers,
+			Thinking:      parseThinkingFacts(m.Thinking, m.IsReasoning),
+		}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no enabled chat models")
 	}
 	// Cache under this account's own key: the CN and Intl gateways advertise
 	// different chat keys, so a shared slot would answer one region with the
-	// other's catalog.
-	storeDynamicModelsFor(accountCacheKey(sa), out, factors)
+	// other's catalog. The capability facts ride along for the same reason --
+	// the tiers are per region too.
+	storeDynamicModelsForWithRegions(accountCacheKey(sa), out, factors, regions)
 	return out, nil
 }
 
