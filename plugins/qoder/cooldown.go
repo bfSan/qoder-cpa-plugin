@@ -194,6 +194,38 @@ func clearModelCooldown(authID, model string) int {
 	return removed
 }
 
+// coolingModelSetFor returns the model IDs this account is cooling right now.
+//
+// One snapshot rather than a per-model lookup: handleModelForAuth walks the
+// whole catalog, and taking the lock once per entry would both cost more and
+// risk observing a different set partway through if a cooldown landed mid-loop.
+// Expired entries are dropped on the way out, the same sweep the other readers
+// perform.
+func coolingModelSetFor(authID string) map[string]struct{} {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	now := cooldownNowFn()
+	cooldownMu.Lock()
+	defer cooldownMu.Unlock()
+	var out map[string]struct{}
+	for key, entry := range cooldownTable {
+		if key.AuthID != authID {
+			continue
+		}
+		if !entry.Until.After(now) {
+			delete(cooldownTable, key)
+			continue
+		}
+		if out == nil {
+			out = make(map[string]struct{}, 4)
+		}
+		out[strings.TrimSpace(key.ModelID)] = struct{}{}
+	}
+	return out
+}
+
 // cooldownSnapshotFor lists the still-active pairs for one account.
 func cooldownSnapshotFor(authID string) []map[string]any {
 	authID = strings.TrimSpace(authID)

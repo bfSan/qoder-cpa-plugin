@@ -639,5 +639,76 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	models = applyModelOverlay(cloneModelInfos(models), loadedModelOverlayForRead())
 	models = sortModelsForCatalog(models)
 	models = filterExcludedModels(models, req.Host)
+	models = filterCoolingModels(req, models)
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
+}
+
+// filterCoolingModels withholds the models this account is currently cooling.
+//
+// Why this exists: the plugin has always recorded per-(account, model)
+// throttling for the panel (see cooldown.go), but model.for_auth ignored it, so
+// CPA went on believing the pair was healthy. With routing.session-affinity
+// enabled CPA pins a session to one account for the whole TTL, so a session kept
+// being routed into a pair this plugin had already decided to throttle until the
+// affinity expired, instead of failing over.
+//
+// Withholding the model is what makes CPA route around it. CPA registers this
+// exact response against the auth (RegisterClient, keyed by the auth ID) and its
+// selection loop skips any account whose registration does not carry the
+// requested model (authSupportsRouteModel -> ClientSupportsModel in
+// conductor_selection.go), an affinity-bound account included.
+//
+// Only the (account, model) pair is withheld, never the whole account. That is
+// deliberate and is the same rule cooldown.go documents: cooling the whole
+// credential would turn one degraded model into an auth-wide outage, which is
+// worst exactly when a single Qoder auth is configured.
+//
+// The filter applies only to this response. The dynamic cache and the panel's
+// admin catalog keep the full list, because an operator has to see a cooling
+// model in order to clear it.
+func filterCoolingModels(req pluginapi.AuthModelRequest, models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	authID := strings.TrimSpace(req.AuthID)
+	if authID == "" {
+		// Nothing scopes the cooldown without an auth ID, and matching against
+		// every account's state could hide a healthy model.
+		return models
+	}
+	cooling := coolingModelSetFor(authID)
+	if len(cooling) == 0 {
+		return models
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if _, skip := cooling[id]; skip {
+			continue
+		}
+		// Cooldowns are keyed by the routing model while this response carries
+		// catalog IDs, and CPA rewrites aliases between the two (the client asks
+		// for qoder-auto, upstream is auto). Try both the raw ID and its
+		// resolved upstream name. When neither matches the model is kept: a
+		// missed filter only preserves today's behaviour, whereas a false
+		// positive would make a working model disappear from the catalog.
+		matched := false
+		for _, candidate := range []string{resolveUpstreamModel(id, req.Attributes), stripProviderPrefix(id)} {
+			if candidate == "" {
+				continue
+			}
+			if _, skip := cooling[candidate]; skip {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
 }
