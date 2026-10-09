@@ -537,23 +537,115 @@ func pruneCheckinLocks() {
 // the one-time Pro pack (+ credits) when eligible. Surfaced as a panel
 // per-card button — NOT called automatically during login (login writes the
 // auth file first; this is a user-triggered post-login action).
+// handleClaimPro claims the one-time Pro upgrade pack for one account, or for
+// every claimable account when auth_index is omitted.
+//
+// The panel calls this from a single top-bar button rather than per card: the
+// pack is a one-time account-level benefit, so asking the operator to click each
+// card in turn only made a whole-account action look per-account.
 func handleClaimPro(req pluginapi.ManagementRequest) map[string]any {
+	t0 := time.Now()
 	var body struct {
 		AuthIndex string `json:"auth_index"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
 	authIndex := strings.TrimSpace(body.AuthIndex)
-	if authIndex == "" {
-		return map[string]any{"error": "auth_index is required"}
+	single := authIndex != ""
+
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
 	}
+	var targets []pluginapi.HostAuthFileEntry
+	for _, f := range files {
+		if !single || f.AuthIndex == authIndex {
+			targets = append(targets, f)
+		}
+	}
+	if len(targets) == 0 {
+		return map[string]any{"error": "no matching account"}
+	}
+
+	// Same bounded-concurrency shape as handleManualCheckin: one goroutine per
+	// account, at most four in flight, results returned in input order so the
+	// panel can pair each row with its account.
+	type result struct {
+		idx int
+		out map[string]any
+	}
+	outCh := make(chan result, len(targets))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i, f := range targets {
+		wg.Add(1)
+		go func(i int, f pluginapi.HostAuthFileEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			outCh <- result{idx: i, out: claimProOneAccount(f.AuthIndex)}
+		}(i, f)
+	}
+	wg.Wait()
+	close(outCh)
+
+	results := make([]map[string]any, len(targets))
+	for r := range outCh {
+		results[r.idx] = r.out
+	}
+	successN, alreadyN, unsupportedN, failN := 0, 0, 0, 0
+	for _, r := range results {
+		if r["error"] != nil {
+			failN++
+			continue
+		}
+		if r["reason"] == "unsupported" {
+			unsupportedN++
+			continue
+		}
+		if r["success"] == true {
+			successN++
+			continue
+		}
+		// Not eligible with no error means the pack was already taken or the
+		// campaign is closed — a normal outcome, not a failure.
+		alreadyN++
+	}
+	resp := map[string]any{
+		"results": results,
+		"summary": map[string]any{
+			"total":       len(targets),
+			"success":     successN,
+			"already":     alreadyN,
+			"unsupported": unsupportedN,
+			"fail":        failN,
+			"elapsed_ms":  time.Since(t0).Milliseconds(),
+		},
+	}
+	// The single-account shape is what the old per-card button returned, so keep
+	// it at the top level for that caller.
+	if single && len(results) == 1 {
+		for k, v := range results[0] {
+			if k == "auth_index" || k == "nickname" {
+				continue
+			}
+			resp[k] = v
+		}
+		resp["auth_index"] = results[0]["auth_index"]
+		resp["nickname"] = results[0]["nickname"]
+	}
+	return resp
+}
+
+// claimProOneAccount runs the eligibility + claim flow for a single account.
+func claimProOneAccount(authIndex string) map[string]any {
+	authIndex = strings.TrimSpace(authIndex)
+	out := map[string]any{"auth_index": authIndex}
 	sa, err := hostAuthGet(authIndex)
 	if err != nil {
-		return map[string]any{"error": "get auth: " + err.Error()}
+		out["error"] = "get auth: " + err.Error()
+		return out
 	}
-	out := map[string]any{
-		"auth_index": authIndex,
-		"nickname":   sa.Account.Nickname,
-	}
+	out["nickname"] = sa.Account.Nickname
 	if !supportsProUpgrade(sa) {
 		out["success"] = false
 		out["skipped"] = true
@@ -582,7 +674,7 @@ func handleClaimPro(req pluginapi.ManagementRequest) map[string]any {
 	if _, ok := out["success"]; !ok {
 		out["success"] = true
 	}
-	// Refresh credits snapshot so panel shows updated balance immediately.
+	// Refresh the credits snapshot so the panel shows the new balance at once.
 	if cr, crErr := fetchUserResource(sa); crErr == nil && cr != nil {
 		out["credits"] = cr
 	}

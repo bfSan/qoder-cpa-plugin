@@ -98,3 +98,47 @@ func sortModelsForCatalog(models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
 	})
 	return out
 }
+
+// sortPanelCatalog orders the panel's catalog.
+//
+// adminModelCatalog already applied the operator overlay, which puts Order at
+// the front and appends hidden entries last. Running sortModelsForCatalog over
+// that would overwrite both: the operator's drag order would snap back to the
+// default grouping on every refresh, and hidden models would scatter back among
+// the visible ones.
+//
+// So the only work left here is to sink hidden models. The default grouping is
+// applied by the caller only when the operator has not ordered anything, via
+// sortModelsForCatalog, which this function must not second-guess.
+func sortPanelCatalog(models []pluginapi.ModelInfo, overlay modelOverlay) []pluginapi.ModelInfo {
+	return sortHiddenLast(models, overlay)
+}
+
+// sortHiddenLast moves hidden models to the bottom, keeping everything else in
+// the order it arrived in.
+func sortHiddenLast(models []pluginapi.ModelInfo, overlay modelOverlay) []pluginapi.ModelInfo {
+	if len(models) < 2 || len(overlay.Hide) == 0 {
+		return models
+	}
+	hidden := make(map[string]struct{}, len(overlay.Hide))
+	for _, id := range overlay.Hide {
+		if id = strings.TrimSpace(id); id != "" {
+			hidden[id] = struct{}{}
+		}
+	}
+	if len(hidden) == 0 {
+		return models
+	}
+	out := cloneModelInfos(models)
+	// SliceStable keeps the relative order inside each band, so whatever ordered
+	// the visible models earlier still decides how they read.
+	sort.SliceStable(out, func(i, j int) bool {
+		_, ih := hidden[strings.TrimSpace(out[i].ID)]
+		_, jh := hidden[strings.TrimSpace(out[j].ID)]
+		if ih == jh {
+			return false
+		}
+		return !ih
+	})
+	return out
+}

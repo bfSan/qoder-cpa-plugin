@@ -134,6 +134,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/models/action", Description: "Apply one model action: hide, restore, move or add."},
 			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start a CN or Intl Qoder device-authorization login (body: {region})."},
 			{Method: http.MethodPost, Path: base + "/oauth/poll", Description: "Poll a plugin-owned Qoder device-authorization login (body: {state})."},
+			{Method: http.MethodPost, Path: base + "/accounts/disabled", Description: "Manually enable or disable one account (body: {auth_index, disabled}). Manual state is recorded so lifecycle automation will not silently re-enable it."},
 			{Method: http.MethodPost, Path: base + "/accounts/rename", Description: "Set the display name of one account (body: {auth_index, name})."},
 			{Method: http.MethodPost, Path: base + "/accounts/delete", Description: "Delete one account (body: {auth_index})."},
 		},
@@ -228,6 +229,91 @@ func handleAccountDelete(req pluginapi.ManagementRequest) map[string]any {
 	return map[string]any{"status": "ok", "auth_index": authIndex, "file": filepath.Base(path)}
 }
 
+// disableReasonManual marks a disable that the operator asked for.
+//
+// Lifecycle automation re-enables a CN account as soon as its balance looks
+// positive again (see shouldReenableCN), and it decides that from credits alone
+// -- it has no idea the operator parked the account on purpose. Without a
+// recorded intent, a manual disable would appear to work and then quietly undo
+// itself on the next tick or the next restart, which is worse than refusing the
+// action outright.
+const disableReasonManual = "manual"
+
+// handleAccountSetDisabled parks or restores one credential.
+func handleAccountSetDisabled(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		AuthIndex string `json:"auth_index"`
+		Disabled  *bool  `json:"disabled"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &body)
+	}
+	authIndex := strings.TrimSpace(body.AuthIndex)
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
+	}
+	if authIndex == "" {
+		return map[string]any{"error": "auth_index is required"}
+	}
+	disabled := body.Disabled
+	if disabled == nil {
+		// Allow a query-style toggle so the panel can use the same route for both.
+		raw := strings.TrimSpace(req.Query.Get("disabled"))
+		if raw == "" {
+			return map[string]any{"error": "disabled is required"}
+		}
+		val := raw == "true" || raw == "1"
+		disabled = &val
+	}
+
+	phys, err := hostAuthGetPhysicalFn(authIndex)
+	if err != nil || phys == nil {
+		return map[string]any{"error": "account not found"}
+	}
+	sa, err := parseStored(phys.JSON)
+	if err != nil || sa == nil {
+		return map[string]any{"error": "stored auth is nil"}
+	}
+
+	next := *disabled
+	// Keep the credit segment already on disk: a manual toggle should not blank
+	// the balance the operator was looking at when they decided to park it.
+	note := displayNoteWithPrev(sa, nil, next, existingNoteCredits(authIndex))
+	extra := map[string]any{}
+	if next {
+		extra["disabled_reason"] = disableReasonManual
+	} else {
+		// Enabling is the explicit undo, so the intent must not survive it and be
+		// read as a stale failure later. null removes the key entirely.
+		extra["disabled_reason"] = nil
+	}
+	raw, err := buildAuthFileJSON(sa, next, note, extra)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	name := strings.TrimSpace(phys.Name)
+	if name == "" {
+		name = authFileNameFor(sa)
+	}
+	if err := hostAuthSaveJSONFn(name, raw); err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	// Both cache keys the dashboard reads from must stop serving the old state.
+	accountCache.Delete(authIndex)
+	if id := strings.TrimSpace(sa.Account.UID); id != "" {
+		accountCache.Delete(id)
+	}
+	// Remember the new state so lifecycle reconciliation does not treat this as
+	// an unexplained change and act on it.
+	rememberLifecycleState(authIndex, next, note)
+	return map[string]any{
+		"status":     "ok",
+		"auth_index": authIndex,
+		"disabled":   next,
+		"label":      labelForAuth(sa),
+	}
+}
+
 // authDirFromPath returns the directory of an auth file so deletes stay
 // confined to the directory the host handed us.
 func authDirFromPath(path string) string { return filepath.Dir(path) }
@@ -302,6 +388,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManagementOAuthPoll(req)))
 	case req.Method == http.MethodPost && path == base+"/accounts/rename":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleAccountRename(req)))
+	case req.Method == http.MethodPost && path == base+"/accounts/disabled":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleAccountSetDisabled(req)))
 	case req.Method == http.MethodPost && path == base+"/accounts/delete":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleAccountDelete(req)))
 	}

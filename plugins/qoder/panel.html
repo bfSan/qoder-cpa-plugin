@@ -231,11 +231,12 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     </div>
   </div>
   <div class="bar">
-    <button class="sec" id="oauthBtn" onclick="openOAuthModal('cn')">登录 CN 账号</button>
-    <button class="sec" id="importIntlBtn" onclick="openOAuthModal('intl')">登录 Intl 账号</button>
+    <button class="sec" id="oauthBtn" onclick="startOAuthLogin(this,'cn')">登录 CN 账号</button>
+    <button class="sec" id="importIntlBtn" onclick="startOAuthLogin(this,'intl')" title="登录国际账号（qoder.com）。国际账号的模型目录与国内不同。">登录 Intl 账号</button>
     <button class="sec" id="importBtn" onclick="openImportModal()">导入 PAT 凭证</button>
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
+    <button class="sec" id="claimProAllBtn" onclick="claimProAll(this)" title="为所有可领取的 CN 账号领取一次性 Pro 升级包（Intl 不支持）">全部领取 Pro</button>
     
     <label class="toggle" title="所有账号 10:00 / 21:00"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
     <span class="toggle" id="svtime"></span>
@@ -259,25 +260,6 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <div id="modelAddRow" style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
       <input id="modelAddInput" class="field-input" type="text" placeholder="添加自定义模型 ID" aria-label="添加自定义模型 ID">
       <button type="button" class="ftag" onclick="addModel()">添加</button>
-    </div>
-  </div>
-</div>
-<div class="modal-mask" id="oauthModal" onclick="onOAuthMaskClick(event)">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="oauthModalTitle">
-    <div class="modal-hd">
-      <h2 id="oauthModalTitle">OAuth 登录</h2>
-      <button type="button" class="modal-x" onclick="closeOAuthModal()" aria-label="关闭">×</button>
-    </div>
-    <div class="modal-bd">
-      <p class="hint">选择区域后会用系统浏览器打开官方设备授权页。完成授权后，插件会自动轮询并保存对应区域的账号，无需手动复制 token。</p>
-      <div style="display:flex;gap:8px;margin-top:12px">
-        <button type="button" class="sec" onclick="startOAuth('cn',this)">登录 CN（qoder.com.cn）</button>
-        <button type="button" class="sec" onclick="startOAuth('intl',this)">登录 Intl（qoder.com）</button>
-      </div>
-      <p class="hint" style="margin-top:12px">如果你已经有 Personal Access Token，也可以用“导入 PAT 凭证”。</p>
-    </div>
-    <div class="modal-ft">
-      <button type="button" class="sec" onclick="closeOAuthModal()">关闭</button>
     </div>
   </div>
 </div>
@@ -411,8 +393,9 @@ function bindCardActions(root){
       const idx=ev.currentTarget.dataset.authIndex;
       if(act==="checkin") checkin(idx, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
-      else if(act==="claim-pro") claimPro(idx, ev.currentTarget);
       else if(act==="cooldown-clear") clearCooldown(ev.currentTarget.getAttribute("data-auth-id")||idx, ev.currentTarget.getAttribute("data-model"), ev.currentTarget);
+      else if(act==="disable") setAccountDisabled(idx, true, ev.currentTarget.dataset.nick||"", ev.currentTarget);
+      else if(act==="enable") setAccountDisabled(idx, false, ev.currentTarget.dataset.nick||"", ev.currentTarget);
       else if(act==="rename") renameAccount(idx, ev.currentTarget.dataset.nick||"");
       else if(act==="delete") deleteAccount(idx, ev.currentTarget.dataset.nick||"该账号");
     });
@@ -452,11 +435,8 @@ function card(a){
   const btnText=checked?"已签到":(ciActive?"签到":"不可签");
   const btnDisabled=(checked||!ciActive)?" disabled=\"disabled\"":"";
   let actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${esc(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
-  if(isIntl){
-    actionHTML+=`<button class="done" disabled="disabled" title="Intl 不支持 Pro 升级包">不支持Pro</button>`;
-  }else{
-    actionHTML+=`<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`;
-  }
+  // Pro 升级包改为顶部"全部领取 Pro"一次性处理：它是账号级的一次性权益，
+  // 逐个卡片点击只会让一个整体动作看起来像每个账号各自的事。
   const refreshBtn=`<button class="sec" data-action="refresh" data-auth-index="${esc(a.auth_index)}" title="刷新积分">刷新</button>`;
   const cooling=Array.isArray(a.cooling)?a.cooling.filter(c=>Number(c&&c.seconds)>0):[];
   const coolingBadge=cooling.length?`<span class="badge cooling" title="按模型维度的临时冷却">冷却 ${cooling.length}</span>`:"";
@@ -469,7 +449,13 @@ function card(a){
   }).join("")+`</div>`:"";
   const display=(a.nickname||a.label||a.name||"").replace(/^qoderwork-?/i,"");
   const nick=display||("u"+(a.uid||"").slice(-8));
-  const manageBtn=`<button class="sec" data-action="rename" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(a.nickname||"")}" title="重命名账号">重命名</button><button class="danger" data-action="delete" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(nick)}" title="删除账号后可重新登录">删除</button>`;
+  // 手动禁用必须能在面板上直接切换：账号被生命周期自动禁用时只有"启用"能恢复，
+  // 而操作者主动停用一个账号后，也要能一眼看出它已经被停用。
+  const disabledNow=a.disabled===true;
+  const toggleBtn=disabledNow
+    ? `<button class="sec" data-action="enable" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(nick)}" title="重新启用该账号，恢复接收流量">启用</button>`
+    : `<button class="sec" data-action="disable" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(nick)}" title="停用该账号，不再接收流量（凭证保留）">禁用</button>`;
+  const manageBtn=toggleBtn+`<button class="sec" data-action="rename" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(a.nickname||"")}" title="重命名账号">重命名</button><button class="danger" data-action="delete" data-auth-index="${esc(a.auth_index)}" data-nick="${esc(nick)}" title="删除账号后可重新登录">删除</button>`;
   return `<div class="card" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(nick)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -483,6 +469,12 @@ let currentFilter="all";
 let lastAccounts=[];
 let authFailCount=0;
 let authFailUntil=0;
+// 登录会话状态。区域由顶部按钮决定，弹框只负责显示进度与链接。
+let oauthRegion="cn";
+let oauthState="";
+let oauthDeadline=0;
+let oauthPollTimer=null;
+let oauthGeneration=0;
 // Lazy-load: fetch credits for all cards that lack them, concurrently.
 // Each card fetches independently; failed ones retry once after 2s.
 function lazyLoadCredits(accounts){
@@ -703,7 +695,7 @@ async function load(force, btn){
   if(!getKey()){
     showAuth();
     g.innerHTML='<div class="loading">请先填写 management key</div>';
-    return;
+    return false;
   }
   // 刷新按钮：loading 态 + 右上角 toast。原先 force 路径静默调 /refresh，
   // 成功/失败都无反馈（签到按钮有 toast，刷新没有）。
@@ -722,7 +714,7 @@ async function load(force, btn){
     if(d.error){
       g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";
       if(force) toast("刷新失败", "err", d.error);
-      return;
+      return false;
     }
     const accounts=d.accounts||[];
     lastAccounts=accounts;
@@ -731,7 +723,7 @@ async function load(force, btn){
       g.innerHTML='<div class="loading">暂无 Qoder 账号</div>';
       renderSummary([]);
       if(force) toast("数据已刷新", "warn", "暂无 Qoder 账号");
-      return;
+      return true;
     }
     g.innerHTML=accounts.map(card).join("");
     bindCardActions(g);
@@ -749,12 +741,14 @@ async function load(force, btn){
       if(errN) toast("数据已刷新", "warn", extra);
       else toast("数据已刷新", "ok", extra);
     }
+    return true;
   }catch(e){
     if(force) toast("刷新失败", "err", e.message||String(e));
     // 强制刷新失败时保留旧卡片，只 toast；首次加载仍写错误到 grid。
     if(!force || !g.querySelector(".card")){
       g.innerHTML='<div class="loading">'+esc(e.message||String(e))+"</div>";
     }
+    return false;
   }finally{
     if(force) busy(btn, false);
   }
@@ -1062,9 +1056,17 @@ async function saveModelOrder(order){
   modelOrderVersion++;modelOrderSaving=true;
   lastModels=ids.map(id=>by.get(id));renderModels();
   try{
+    // 两条写入缺一不可：
+    // PUT /models 让插件内存里的 overlay 立刻生效，本次会话马上按新顺序渲染；
+    // PATCH config 把顺序落到 config.yaml，重启后由 reconfigure 恢复。
+    // 只做 PATCH 的话，要等 CPA 下一次重载插件才生效（而且不一定会重载），
+    // 操作者看到的是"保存成功但顺序没变"。
+    const putOK=await managementAPI("/plugins/qoder/models",{method:"PUT",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({order:ids})}).then(r=>!(r&&r.error)).catch(()=>false);
     const response=await managementAPI("/plugins/qoder/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({model_order:ids})});
     if(response&&response.error) throw new Error(asText(response.error));
+    if(!putOK) throw new Error("插件未能应用新的模型顺序");
   }catch(e){
     lastModels=previous;modelOrderSaving=false;modelOrderVersion++;renderModels();
     toast("保存模型顺序失败","err",String(e&&e.message||e));return false;
@@ -1171,17 +1173,59 @@ async function checkin(idx, btn){
     busy(btn,false);
   }
 }
-async function claimPro(idx, btn){
+// setAccountDisabled parks or restores one account. Manual state is recorded on
+// the auth file so lifecycle automation will not silently re-enable it.
+async function setAccountDisabled(idx, disabled, nick, btn){
+  const who=nick||"账号";
+  const verb=disabled?"停用":"启用";
+  if(disabled&&!confirm("确定停用「"+who+"」？凭证会保留，随时可以再启用。")) return;
   busy(btn,true);
   try{
-    const d=await api("/claim-pro",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
-    const name=d.nickname||"账号";
-    if(d.error){toast(name+"：领取失败","err",asText(d.error));busy(btn,false);return}
-    if(d.success){toast(name+"：领取成功","ok","Pro 升级包已领取"+(d.credits?(" · 积分 "+(d.credits.total_remain||0)):""))}
-    else{toast(name+"："+(asText(d.message)||"不可领取"),"warn")}
+    const d=await api("/accounts/disabled",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({auth_index:idx,disabled:disabled})});
+    if(d.error){toast(verb+"失败","err",asText(d.error));return}
+    if(d.warning){toast(verb+"成功（有警告）","warn",asText(d.warning))}
+    else{toast(who+"：已"+verb,"ok")}
+    await load(false);
+  }catch(e){
+    toast(verb+"失败","err",e.message||String(e));
+  }finally{
+    busy(btn,false);
+  }
+}
+// claimProAll 为所有可领取的账号领取一次性 Pro 升级包。不带 auth_index 让后端
+// 自己挑目标（它会跳过 Intl 和已领过的），面板只负责汇总结果。
+async function claimProAll(btn){
+  busy(btn,true);
+  try{
+    const d=await api("/claim-pro",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(d.error){toast("领取失败","err",asText(d.error));return}
+    const rs=Array.isArray(d.results)?d.results:[];
+    const sum=d.summary||{};
+    const ok=Number(sum.success||rs.filter(x=>x.success&&x.reason!=="unsupported").length)||0;
+    const already=Number(sum.already||0);
+    const unsupported=Number(sum.unsupported||0);
+    const fail=Number(sum.fail||rs.filter(x=>x.error).length)||0;
+    const parts=[];
+    if(ok) parts.push("成功 "+ok);
+    if(already) parts.push("无需领取 "+already);
+    if(unsupported) parts.push("不支持 "+unsupported);
+    if(fail) parts.push("失败 "+fail);
+    const detail=parts.join(" · ");
+    if(fail){
+      const errDetail=rs.filter(x=>x.error).map(x=>(x.nickname||x.auth_index||"")+": "+asText(x.error)).join("；");
+      toast("领取 Pro："+ok+" 成功 / "+fail+" 失败","err",errDetail||detail);
+    }else if(ok){
+      toast("领取 Pro："+ok+" 个账号成功","ok",detail);
+    }else if(unsupported&&!already){
+      toast("没有可领取的账号","warn",detail||"Intl 账号不支持 Pro 升级包");
+    }else{
+      toast("无需领取","ok",detail||"所有账号均已领取或活动未开放");
+    }
     await load(true);
   }catch(e){
-    toast("领取请求失败","err",e.message);
+    toast("领取请求失败","err",e.message||String(e));
+  }finally{
     busy(btn,false);
   }
 }
@@ -1269,35 +1313,8 @@ function openImportModal(){
 function closeImportModal(){
   document.getElementById("importModal").classList.remove("show");
 }
-function openOAuthModal(){
-  document.getElementById("oauthModal").classList.add("show");
-}
-function closeOAuthModal(){
-  document.getElementById("oauthModal").classList.remove("show");
-}
-function onOAuthMaskClick(e){
-  if(e.target===document.getElementById("oauthModal")) closeOAuthModal();
-}
-async function startOAuth(region, btn){
-  busy(btn,true);
-  try{
-    const d=await api("/oauth/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({region})});
-    const loginURL=buildLoginURL(d);
-    if(loginURL){
-      window.open(loginURL,"_blank","noopener");
-      const who=region==="intl"?"Intl":"CN";
-      toast("已打开 "+who+" 登录页","ok","完成授权后会自动写回账号，无需关闭此设置页");
-      closeOAuthModal();
-      pollOAuth(region,d.state,0);
-    }else{
-      throw new Error(d.error||"未返回登录链接");
-    }
-  }catch(e){
-    toast("启动 OAuth 失败","err",e.message||String(e));
-  }finally{
-    busy(btn,false);
-  }
-}
+// buildLoginURL 拼 OAuth 登录地址：优先用服务端给的 url_base + query（逐键追加，
+// 数组值展开成多个同名参数），拿不到就退回现成的 url 字段。
 function buildLoginURL(d){
   if(!d)return "";
   if(d.url_base&&d.query){
@@ -1312,23 +1329,85 @@ function buildLoginURL(d){
   }
   return String(d.url||"").replace(/&amp;/g,"&");
 }
-async function pollOAuth(region, state, tries){
-  if(!state||tries>120) return;
-  const wait=()=>new Promise(r=>setTimeout(r,3000));
-  await wait();
+// startOAuthLogin 是顶部两个登录按钮的唯一入口。区域在点击时就已确定，
+// 不再弹框让操作者二次选择区域——点击即直接打开官方登录页。
+//
+// window.open 必须在点击的同步阶段发起：等 /oauth/start 返回再开窗，会被浏览器
+// 的弹窗拦截器当成"非用户手势触发的弹窗"直接吃掉。所以先开一个空白页占位，
+// 拿到地址后再填进去。
+async function startOAuthLogin(btn,region){
+  region=normalizeLoginRegion(region);
+  oauthRegion=region;
+  oauthState="";
+  oauthDeadline=0;
+  const generation=++oauthGeneration;
+  const who=region==="intl"?"Intl":"CN";
+  let win=null;
+  try{win=window.open("about:blank","_blank")}catch(_){}
+  busy(btn,true);
   try{
-    const d=await api("/oauth/poll",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({state})});
+    const d=await api("/oauth/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({region})});
+    if(generation!==oauthGeneration) return;
+    const loginURL=buildLoginURL(d);
+    if(!loginURL||!d.state) throw new Error(d.error||"登录会话创建失败");
+    oauthState=d.state;
+    // 截止时间取服务端的 expires_at（Unix 秒），缺字段时退回 loginTTL 的 10 分钟，
+    // 不再自己编一个比服务端更短的窗口。
+    const exp=Number(d.expires_at);
+    oauthDeadline=exp>0?exp*1000:Date.now()+600000;
+    if(win&&!win.closed){
+      try{win.location.href=loginURL}catch(_){win=null}
+    }
+    if(!win||win.closed){
+      // 占位页被拦截或已关闭：退回当前页跳转，至少让操作者能完成登录。
+      window.location.href=loginURL;
+      return;
+    }
+    toast("已打开 "+who+" 登录页","ok","完成授权后会自动写回账号，无需停留在登录页");
+    scheduleOAuthPoll(generation);
+  }catch(e){
+    if(win&&!win.closed){try{win.close()}catch(_){}}
+    if(generation===oauthGeneration) toast("启动登录失败","err",e.message||String(e));
+  }finally{
+    busy(btn,false);
+  }
+}
+function normalizeLoginRegion(region){
+  return String(region||"").toLowerCase()==="intl"?"intl":"cn";
+}
+// scheduleOAuthPoll 与 pollOAuth 用 generation 校验：重新点击登录后，上一轮
+// 已经排队的定时器会自己退出，不会把过期会话的结果盖到新一轮上。
+function scheduleOAuthPoll(generation){
+  oauthPollTimer=setTimeout(()=>pollOAuth(generation),2000);
+}
+function stopOAuthPolling(){
+  if(oauthPollTimer){clearTimeout(oauthPollTimer);oauthPollTimer=null}
+}
+async function pollOAuth(generation){
+  if(generation!==oauthGeneration||!oauthState) return;
+  if(Date.now()>=oauthDeadline){
+    stopOAuthPolling();
+    if(generation===oauthGeneration) toast("登录会话已过期","warn","请重新点击登录按钮");
+    return;
+  }
+  try{
+    const d=await api("/oauth/poll",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({state:oauthState})});
+    if(generation!==oauthGeneration) return;
     if(d&&d.status==="ok"){
-      toast("OAuth 登录成功","ok",(region==="intl"?"Intl":"CN")+" 账号已写入");
+      stopOAuthPolling();
+      toast("OAuth 登录成功","ok",d.nickname||((oauthRegion==="intl"?"Intl":"CN")+" 账号已添加"));
       await load(true);
       return;
     }
     if(d&&d.status==="error"){
-      toast("OAuth 登录失败","err",d.error||"unknown");
+      // 服务端判定的终态：把原因原样显示，不要压成"登录失败"——浏览器那边
+      // 其实成功了、只是落库失败时，压平会把操作者引向错误的排查方向。
+      stopOAuthPolling();
+      toast("OAuth 登录失败","err",d.error||"未知错误");
       return;
     }
   }catch(_){}
-  pollOAuth(region, state, tries+1);
+  if(generation===oauthGeneration) scheduleOAuthPoll(generation);
 }
 async function clearCooldown(authId, model, btn){
   busy(btn,true);
@@ -1368,15 +1447,23 @@ async function importAuth(btn){
 document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
 document.addEventListener("keydown",e=>{
   if(e.key=="Escape"&&document.getElementById("importModal").classList.contains("show")) closeImportModal();
-  if(e.key=="Escape"&&document.getElementById("oauthModal").classList.contains("show")) closeOAuthModal();
 });
 /* Start theme sync watcher (parent MutationObserver + standalone prefers-color-scheme listener). */
 if(window.__wbThemeSync)window.__wbThemeSync();
-if(getKey()){
-  load(false);
-}else{
-  showAuth();
+// 首次进入时主动补一次额度：/accounts 用的是插件缓存，账号是刚登录或刚重启时
+// 缓存里还没有余额，卡片会一直停在占位状态，必须等操作者手动点"刷新"才出数。
+// load 返回成功后再拉一遍 /credits，卡片就能自己填上。
+async function loadInitial(){
+  if(!getKey()){showAuth();return}
+  if(await load(false)) refreshAllCredits();
 }
+// refreshAllCredits 只重新取余额，不重建卡片，避免首屏闪一下再重排。
+function refreshAllCredits(){
+  const accounts=lastAccounts||[];
+  if(!accounts.length) return;
+  accounts.forEach(a=>{if(!a.disabled) lazyLoadCredits([a])});
+}
+loadInitial();
 </script>
 </body>
 </html>

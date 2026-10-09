@@ -412,32 +412,45 @@ test("model action column never wraps and keeps a content-sized track", () => {
 
 // ---------------------------------------------- 7. 排序持久化只 PATCH 一个字段
 
-test("saveModelOrder patches only model_order", async () => {
+// 保存一次排序要发两个请求：PUT /models 让插件内存里的 overlay 立刻生效，
+// PATCH config 把顺序落盘以便重启后恢复。只做 PATCH 的话，顺序要等 CPA
+// 下一次重载插件才生效——而它不一定会重载，操作者就会看到"保存成功但没变"。
+test("saveModelOrder applies immediately and persists", async () => {
   const panel = loadPanelWithCatalog();
   await panel.context.loadModels(false);
   const saved = await panel.context.saveModelOrder(["qmodel", "auto"]);
   assert.equal(saved, true);
-  assert.deepEqual(panel.state.patches, [["/plugins/qoder/config", { model_order: ["qmodel", "auto"] }]]);
-  assert.deepEqual(
-    Object.keys(panel.state.patches[0][1]),
-    ["model_order"],
-    "model_order is the only field this save may touch",
-  );
+
+  // Immediately applied through the model overlay endpoint.
+  assert.equal(panel.state.patches[0][0], "/plugins/qoder/models");
+  assert.deepEqual(panel.state.patches[0][1], { order: ["qmodel", "auto"] });
+
+  // Persisted through config so the order survives a restart.
+  const patch = panel.state.patches.find((p) => p[0] === "/plugins/qoder/config");
+  assert.ok(patch, "config must be patched for the order to persist");
+  assert.deepEqual(Object.keys(patch[1]), ["model_order"], "model_order is the only config field to touch");
+  assert.deepEqual(patch[1].model_order, ["qmodel", "auto"]);
   assert.equal(panelState(panel, "JSON.stringify(lastModels.map(m=>m.id))"), JSON.stringify(["qmodel", "auto"]));
 });
 
-test("saveModelOrder rolls back the local order when the response reports an error", async () => {
+// 内存里应用成功了、但落盘失败，也必须回滚：重启后顺序会丢，
+// 面板不能在这时候报告"已保存"。
+test("saveModelOrder rolls back when persistence fails", async () => {
   const panel = loadPanelWithCatalog();
   await panel.context.loadModels(false);
   const toasts = [];
   panel.context.toast = (title, kind, detail) => { toasts.push([title, kind, detail]); };
-  panel.context.managementAPI = async () => ({ error: "rejected" });
+  panel.context.managementAPI = async (path) => {
+    if (path === "/plugins/qoder/models") return { ok: true };
+    return { error: "rejected" };
+  };
   const saved = await panel.context.saveModelOrder(["qmodel", "auto"]);
   assert.equal(saved, false);
   assert.equal(panelState(panel, "JSON.stringify(lastModels.map(m=>m.id))"), JSON.stringify(["auto", "qmodel"]));
   assert.equal(toasts.length, 1);
   assert.equal(toasts[0][1], "err");
 });
+
 
 test("saveModelOrder refuses a partial or unchanged order", async () => {
   const panel = loadPanelWithCatalog();
@@ -451,12 +464,21 @@ test("saveModelOrder refuses a partial or unchanged order", async () => {
 test("a save in flight blocks a concurrent save and a stale catalog reload", async () => {
   const panel = loadPanelWithCatalog();
   await panel.context.loadModels(false);
-  let release;
+  // A save issues two requests now (PUT the overlay, PATCH the config), so every
+  // call needs its own gate — releasing only the first would park the second one
+  // forever and turn a concurrency test into a deadlock.
+  // A save issues two requests in sequence (PUT the overlay, then PATCH the
+  // config). The gate must therefore stay open once released: releasing only the
+  // requests parked at that moment would leave the PATCH that follows parked
+  // forever, turning a concurrency test into a deadlock.
+  let open = false;
+  const waiting = [];
   const passthrough = panel.context.managementAPI;
   panel.context.managementAPI = async (p, o) => {
-    await new Promise(resolve => { release = resolve; });
+    if (!open) await new Promise(resolve => { waiting.push(resolve); });
     return passthrough(p, o);
   };
+  const release = () => { open = true; waiting.splice(0).forEach(fn => fn()); };
   panel.context.toast = () => {};
   const inFlight = panel.context.saveModelOrder(["qmodel", "auto"]);
   // While the PATCH is in flight the local order is already the new one, and any
@@ -476,7 +498,9 @@ test("moveModel swaps neighbours and persists through the plugin config", async 
   await panel.context.loadModels(false);
   panel.context.toast = () => {};
   assert.equal(await panel.context.moveModel("qmodel", -1), true);
-  assert.deepEqual(panel.state.patches, [["/plugins/qoder/config", { model_order: ["qmodel", "auto"] }]]);
+  // A move now persists the same way a drag does: apply the overlay, then the config.
+  const moved = panel.state.patches.find((p) => p[0] === "/plugins/qoder/config");
+  assert.deepEqual(moved[1], { model_order: ["qmodel", "auto"] });
   // Off the ends is a no-op, not an error.
   assert.equal(await panel.context.moveModel("qmodel", -1), false);
 });
@@ -661,7 +685,8 @@ test("rendered rows bind through data-* attributes and drag reorders persistentl
   fireDrag(panel, nodes, "qmodel", "auto", transfer);
   assert.equal(transfer.value, "qmodel", "the drag payload carries the model id");
   await settle();
-  assert.deepEqual(panel.state.patches, [["/plugins/qoder/config", { model_order: ["qmodel", "auto"] }]]);
+  const dragged = panel.state.patches.find((p) => p[0] === "/plugins/qoder/config");
+  assert.deepEqual(dragged[1], { model_order: ["qmodel", "auto"] });
   assert.equal(panelState(panel, "JSON.stringify(lastModels.map(m=>m.id))"), JSON.stringify(["qmodel", "auto"]));
 
   // Re-bind against the repainted table and reorder by keyboard instead.
@@ -673,15 +698,18 @@ test("rendered rows bind through data-* attributes and drag reorders persistentl
   handle.fire("keydown", { key: "ArrowUp", preventDefault() { prevented = true; } });
   assert.equal(prevented, true, "the handle must claim the arrow key so the page does not scroll");
   await settle();
-  assert.equal(panel.state.patches.length, 2);
-  assert.deepEqual(panel.state.patches[1], ["/plugins/qoder/config", { model_order: ["auto", "qmodel"] }]);
+  // One drag = two writes: the drag above already wrote once, so the overview is
+  // apply-then-persist twice over (see below).
+  assert.equal(panel.state.patches.length, 4, "each save writes the overlay and the config");
+  const keyed = panel.state.patches.filter((p) => p[0] === "/plugins/qoder/config");
+  assert.deepEqual(keyed[1], ["/plugins/qoder/config", { model_order: ["auto", "qmodel"] }]);
 
   // Arrow keys are the only ordering gesture left, so non-arrow keys stay inert.
   const before = panelState(panel, "modelOrderVersion");
   handle.fire("keydown", { key: "ArrowLeft", preventDefault() {} });
   await settle();
   assert.equal(panelState(panel, "modelOrderVersion"), before);
-  assert.equal(panel.state.patches.length, 2);
+  assert.equal(panel.state.patches.length, 4, "an inert key must not write anything");
 });
 
 test("a hidden row has no drag handle and its click handler restores it", async () => {
@@ -754,7 +782,9 @@ test("a catalog response that lands after a save cannot overwrite the new order"
   assert.equal(calls, 2, "the stale read must be outstanding when the save happens");
 
   await panel.context.saveModelOrder(["qmodel", "auto"]);
-  assert.deepEqual(patched, [{ model_order: ["qmodel", "auto"] }]);
+  // Two writes per save: the overlay that applies immediately, then the config
+  // that makes it survive a restart.
+  assert.deepEqual(patched, [{ order: ["qmodel", "auto"] }, { model_order: ["qmodel", "auto"] }]);
   assert.equal(panelState(panel, "JSON.stringify(lastModels.map(m=>m.id))"), JSON.stringify(["qmodel", "auto"]));
 
   // Now let the stale read land. Applying it would silently resurrect the order
@@ -782,12 +812,17 @@ test("a save in flight makes an arriving catalog reload a no-op", async () => {
   const panel = loadPanelWithCatalog();
   await panel.context.loadModels(false);
   panel.context.toast = () => {};
-  let release;
+  // The gate stays open once released: a save now performs two sequential
+  // requests, so releasing only the parked one would leave the PATCH that
+  // follows blocked forever.
+  let open = false;
+  const waiting = [];
   const passthrough = panel.context.managementAPI;
   panel.context.managementAPI = async (p, o) => {
-    await new Promise(resolve => { release = resolve; });
+    if (!open) await new Promise(resolve => { waiting.push(resolve); });
     return passthrough(p, o);
   };
+  const release = () => { open = true; waiting.splice(0).forEach(fn => fn()); };
   const save = panel.context.saveModelOrder(["qmodel", "auto"]);
   await settle();
   assert.equal(panelState(panel, "modelOrderSaving"), true);
@@ -797,7 +832,8 @@ test("a save in flight makes an arriving catalog reload a no-op", async () => {
   assert.equal(panelState(panel, "JSON.stringify(lastModels.map(m=>m.id))"), readsBefore);
   release();
   await save;
-  assert.deepEqual(panel.state.patches, [["/plugins/qoder/config", { model_order: ["qmodel", "auto"] }]]);
+  const written = panel.state.patches.find((p) => p[0] === "/plugins/qoder/config");
+  assert.deepEqual(written, ["/plugins/qoder/config", { model_order: ["qmodel", "auto"] }]);
 });
 
 test("every row occupies the same five grid tracks, including hidden rows", async () => {

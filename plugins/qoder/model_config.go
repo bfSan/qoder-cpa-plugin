@@ -309,8 +309,11 @@ func buildModelListQuery() map[string]any {
 // failed refresh is visible rather than looking like an unchanged list.
 func buildModelListQueryForce(force bool) map[string]any {
 	models, refreshErr := adminModelCatalogForce(force)
-	models = sortModelsForCatalog(models)
 	overlay, revision := loadedModelOverlay()
+	// 面板的目录必须把已隐藏的模型沉到底部：applyModelOverlayForAdmin 已经把它们
+	// 追加在末尾，但紧接着的排序会打乱这个位置，于是隐藏项散落在可见模型中间，
+	// 操作者很难看清自己藏了哪些。sortPanelCatalog 把 hidden 作为第一排序键。
+	models = sortPanelCatalog(models, overlay)
 	items := make([]map[string]any, 0, len(models))
 	for i, m := range models {
 		id := strings.TrimSpace(m.ID)

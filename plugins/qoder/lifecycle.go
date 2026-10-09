@@ -110,6 +110,21 @@ func disableAuth(authIndex, authID string, sa *storedAuth, cr *creditsSummary, r
 	return nil
 }
 
+// manualDisableReason reports whether this auth file was disabled by hand
+// rather than by credit exhaustion.
+func manualDisableReason(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var m struct {
+		DisabledReason string `json:"disabled_reason"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return false
+	}
+	return strings.TrimSpace(m.DisabledReason) == disableReasonManual
+}
+
 // reenableAuth writes disabled:false when CN has credits again.
 func reenableAuth(authIndex, authID string, sa *storedAuth, cr *creditsSummary) error {
 	mu := checkinLockFor(authIndex)
@@ -354,6 +369,14 @@ func reconcileOneAccount(authIndex, authID string, force bool) (action lifecycle
 				(strings.Contains(pjson.Note, "SESSION-DEAD") || strings.Contains(pjson.Note, "TOKEN_EXPIRE")) {
 				return lifecycleNone, nil
 			}
+		}
+		// A manual disable outranks the credit heuristic: the operator parked
+		// this account on purpose, and shouldReenableCN decides purely from the
+		// balance, so without this guard the account would quietly come back on
+		// the next tick and the disable would look like it never took.
+		if phys != nil && manualDisableReason(phys.JSON) {
+			_ = syncAuthNote(authIndex, authID, sa, cr, true)
+			return lifecycleNone, nil
 		}
 		if shouldReenableCN(true, cr) {
 			if err := reenableAuth(authIndex, authID, sa, cr); err != nil {

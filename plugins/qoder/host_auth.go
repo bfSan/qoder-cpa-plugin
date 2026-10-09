@@ -63,8 +63,13 @@ func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 }
 
 // hostAuthGet fetches the credential JSON for one auth index.
+//
+// It goes through hostAuthGetPhysicalFn so the documented test seam actually
+// covers this path: reading the physical function directly meant the seam only
+// applied to its few direct callers, and every test that needed to exercise a
+// credential read still hit the live host RPC.
 func hostAuthGet(authIndex string) (*storedAuth, error) {
-	phys, err := hostAuthGetPhysical(authIndex)
+	phys, err := hostAuthGetPhysicalFn(authIndex)
 	if err != nil {
 		return nil, err
 	}

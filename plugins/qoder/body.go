@@ -226,6 +226,54 @@ type openAIRequest struct {
 	Tools json.RawMessage `json:"tools,omitempty"`
 }
 
+// qoderBodyConfig carries per-request overrides resolved from the account's
+// model catalog. Zero values leave the template's own defaults in place, which
+// keeps every existing caller (and its tests) working unchanged.
+type qoderBodyConfig struct {
+	// maxInputTokens is the context window the gateway should prepare. It comes
+	// from the model's default context tier, not from a fixed constant.
+	maxInputTokens int64
+}
+
+type qoderBodyOption func(*qoderBodyConfig)
+
+// withModelContext applies a model's context facts to the request body.
+func withModelContext(facts *modelRegionFacts) qoderBodyOption {
+	return func(c *qoderBodyConfig) {
+		if c == nil || facts == nil {
+			return
+		}
+		// The default tier is what the gateway applies on its own; the advertised
+		// ContextLength already resolves to that tier when one is marked.
+		if facts.ContextLength != nil && *facts.ContextLength > 0 {
+			c.maxInputTokens = *facts.ContextLength
+			return
+		}
+		if tokens, ok := contextDefaultTokens(facts.ContextTiers); ok && tokens > 0 {
+			c.maxInputTokens = tokens
+		}
+	}
+}
+
+// contextTierForModel resolves the context facts of one model as advertised by
+// the gateway for this account's region. The boolean reports whether a catalog
+// entry was found at all, so callers can tell "no data" from "zero".
+func contextTierForModel(sa *storedAuth, modelKey string) (*modelRegionFacts, bool) {
+	modelKey = strings.TrimSpace(modelKey)
+	if sa == nil || modelKey == "" {
+		return nil, false
+	}
+	facts, ok := cachedRegionFactsFor(accountCacheKey(sa))
+	if !ok || len(facts) == 0 {
+		return nil, false
+	}
+	fact, found := facts[modelKey]
+	if !found {
+		return nil, false
+	}
+	return &fact, true
+}
+
 // extractLatestUserPrompt returns the textual content of the last user
 // message (structured content arrays contribute their text parts).
 func extractLatestUserPrompt(messages []openAIMessage) string {
@@ -261,7 +309,11 @@ func normalizeReasoningEffort(s string) string {
 
 // buildQoderBody renders the upstream agent_chat_generation body for one request.
 // modelKey is the upstream key (already mapped via cpaToUpstreamKey).
-func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, error) {
+func buildQoderBody(req *openAIRequest, modelKey, userType string, opts ...qoderBodyOption) ([]byte, error) {
+	var cfg qoderBodyConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	var base map[string]any
 	if err := json.Unmarshal(basepromptJSON, &base); err != nil {
 		return nil, fmt.Errorf("baseprompt decode: %w", err)
@@ -291,6 +343,13 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 		mc["is_reasoning"] = true
 		if _, ok := mc["source"]; !ok {
 			mc["source"] = "system"
+		}
+		// max_input_tokens 决定上游为这次请求准备多大的上下文窗口。模板里写死的
+		// 180000 对任何模型都一样，而网关其实按模型发布了档位（200K/400K/1M），
+		// 默认档位才是它自己会用的值。发模板值时，1M 档的模型被当成 180K 用，
+		// 长上下文请求会被上游按超长拒绝。
+		if cfg.maxInputTokens > 0 {
+			mc["max_input_tokens"] = cfg.maxInputTokens
 		}
 	}
 

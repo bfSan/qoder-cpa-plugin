@@ -98,6 +98,7 @@ type hostAuthPhysical struct {
 var (
 	hostAuthGetPhysicalFn    = hostAuthGetPhysical
 	hostAuthPersistMigrateFn = hostAuthPersistMigrate
+	hostAuthSaveJSONFn       = hostAuthSaveJSON
 )
 
 func hostAuthGetPhysical(authIndex string) (*hostAuthPhysical, error) {

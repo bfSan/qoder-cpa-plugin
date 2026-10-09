@@ -355,7 +355,7 @@ type registrationCapability struct {
 // `make build` feeds from the VERSION file. This literal is the fallback for a
 // bare `go build`; keep it in step with VERSION so a stray build never
 // under-reports the plugin version.
-var version = "0.9.11"
+var version = "0.9.12"
 
 func wbRegistration() registration {
 	return registration{
@@ -755,7 +755,13 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
 		return nil, fmt.Errorf("payload parse: %w", err)
 	}
-	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
+	// 按该账号所属区域里这个模型的默认档位设置上下文窗口；没有目录数据时
+	// withModelContext 不会传任何值，模板默认保持不变。
+	var bodyOpts []qoderBodyOption
+	if facts, ok := contextTierForModel(sa, upstreamModel); ok {
+		bodyOpts = append(bodyOpts, withModelContext(facts))
+	}
+	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil), bodyOpts...)
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
 		return nil, fmt.Errorf("body build: %w", err)
@@ -898,7 +904,13 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
 		return nil, fmt.Errorf("payload parse: %w", err)
 	}
-	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
+	// 按该账号所属区域里这个模型的默认档位设置上下文窗口；没有目录数据时
+	// withModelContext 不会传任何值，模板默认保持不变。
+	var bodyOpts []qoderBodyOption
+	if facts, ok := contextTierForModel(sa, upstreamModel); ok {
+		bodyOpts = append(bodyOpts, withModelContext(facts))
+	}
+	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil), bodyOpts...)
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
 		return nil, fmt.Errorf("body build: %w", err)

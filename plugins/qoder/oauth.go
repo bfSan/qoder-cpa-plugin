@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -378,11 +379,23 @@ func handleManagementOAuthPoll(req pluginapi.ManagementRequest) map[string]any {
 	}
 
 	sa := buildStoredAuthFromDeviceToken(tok, nil, lc.region)
+	// DEBUG(login-intl): 记录落库前的关键字段。uid 与文件名不算机密，token 不记。
+	hostLog("debug", "qoder oauth poll: persisting credential", map[string]any{
+		"region":         lc.region,
+		"uid_present":    sa.Account.UID != "",
+		"nickname":       sa.Account.Nickname,
+		"domain":         sa.Auth.Domain,
+		"access_prefix":  tokenPrefix(sa.Auth.AccessToken),
+		"refresh_prefix": tokenPrefix(sa.Auth.RefreshToken),
+		"file":           authFileNameFor(sa),
+	})
 	fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), nil)
 	if err != nil {
+		hostLog("error", "qoder oauth poll: buildAuthFileJSON failed", map[string]any{"error": err.Error()})
 		return map[string]any{"status": "error", "error": err.Error()}
 	}
 	if err := hostAuthSaveJSON(authFileNameFor(sa), fileJSON); err != nil {
+		hostLog("error", "qoder oauth poll: host.auth.save failed", map[string]any{"error": err.Error()})
 		return map[string]any{"status": "error", "error": err.Error()}
 	}
 	loginStates.Delete(state)
@@ -503,6 +516,14 @@ func pollDeviceToken(nonce, verifier, region string) (*deviceTokenResponse, bool
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	// DEBUG(login-intl): 记录轮询的真实结果。只记状态码、响应键名和 token 前缀，
+	// 绝不打印 token 本体。
+	hostLog("debug", "qoder deviceToken poll", map[string]any{
+		"region":      region,
+		"http_status": resp.StatusCode,
+		"body_keys":   jsonKeyNames(raw),
+		"body_head":   truncateRedacted(string(raw), 300),
+	})
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusAccepted {
 		return nil, true, nil
 	}
@@ -516,7 +537,42 @@ func pollDeviceToken(nonce, verifier, region string) (*deviceTokenResponse, bool
 	if out.accessToken() == "" {
 		return nil, true, nil // 200 without token yet — treat as pending
 	}
+	hostLog("info", "qoder deviceToken poll: token obtained", map[string]any{
+		"region":          region,
+		"access_prefix":   tokenPrefix(out.accessToken()),
+		"access_len":      len(out.accessToken()),
+		"refresh_prefix":  tokenPrefix(out.RefreshToken),
+		"refresh_len":     len(out.RefreshToken),
+		"user_id_present": out.UserID != "",
+		"expires_in":      out.ExpiresIn,
+		"expires_at_set":  out.ExpiresAt != "",
+	})
 	return &out, false, nil
+}
+
+// tokenPrefix 只返回令牌的类型前缀（如 "dt-"、"drt-"、"pt-"），不泄露内容。
+func tokenPrefix(tok string) string {
+	if i := strings.Index(tok, "-"); i > 0 && i <= 6 {
+		return tok[:i+1]
+	}
+	if tok == "" {
+		return ""
+	}
+	return "(no-dash)"
+}
+
+// jsonKeyNames 返回 JSON 顶层键名，用于诊断响应形状而不暴露内容。
+func jsonKeyNames(raw []byte) string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "(not-object)"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 // refreshDeviceToken calls POST /api/v1/deviceToken/refresh with a drt-.
