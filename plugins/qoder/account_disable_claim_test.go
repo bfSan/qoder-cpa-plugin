@@ -11,7 +11,7 @@ import (
 )
 
 // 凭证禁用必须能被操作者手动控制，而且这个意图要活过生命周期自动化——
-// shouldReenableCN 只看余额，会把"有余额的已禁用账号"当成意外状态直接恢复。
+// shouldReenable 只看余额，会把"有余额的已禁用账号"当成意外状态直接恢复。
 
 // fillFixtureToken gives a credential fixture a usable access token: parseStored
 // refuses to build a storedAuth without one, which is the right behaviour for
@@ -195,7 +195,7 @@ func TestAccountSetDisabledClearsIntentOnEnable(t *testing.T) {
 	}
 }
 
-// 手动禁用必须能被生命周期识别，从而不被 shouldReenableCN 推翻。
+// 手动禁用必须能被生命周期识别，从而不被 shouldReenable 推翻。
 func TestManualDisableReasonDetection(t *testing.T) {
 	manual, _ := json.Marshal(map[string]any{"disabled": true, "disabled_reason": disableReasonManual})
 	if !manualDisableReason(manual) {
@@ -222,10 +222,10 @@ func TestManualDisableSurvivesReenableDecision(t *testing.T) {
 	if out := handleAccountSetDisabled(disableRequest("idx-1", true)); out["error"] != nil {
 		t.Fatalf("disable failed: %v", out["error"])
 	}
-	// 余额充足——shouldReenableCN 会说要恢复。
+	// 余额充足——shouldReenable 会说要恢复。
 	cr := &creditsSummary{TotalRemain: 500, TotalSize: 500}
-	if !shouldReenableCN(true, cr) {
-		t.Fatal("precondition: shouldReenableCN should want to re-enable")
+	if !shouldReenable(true, cr) {
+		t.Fatal("precondition: shouldReenable should want to re-enable")
 	}
 	// 但写下去的文件必须带手动意图，生命周期据此跳过恢复。
 	if !manualDisableReason(stub.saved) {

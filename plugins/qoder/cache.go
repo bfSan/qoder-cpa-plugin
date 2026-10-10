@@ -110,7 +110,7 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		errMu.Unlock()
 	}
 	wg.Add(2)
-	go func() { defer wg.Done(); plan = fetchPaymentType(sa) }()
+	go func() { defer wg.Done(); plan = fetchPaymentTypeFn(sa) }()
 	if supportsCheckin(sa) {
 		wg.Add(1)
 		go func() {
@@ -128,7 +128,9 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 	}
 	go func() {
 		defer wg.Done()
-		if r, err := fetchUserResource(sa); err == nil {
+		// Route through the indirection var so tests can exercise this path; the
+		// documented seam (fetchUserResourceFn) only helps if it is actually used.
+		if r, err := fetchUserResourceFn(sa); err == nil {
 			cr = r
 		} else {
 			if isAuthRejectedError(err) {

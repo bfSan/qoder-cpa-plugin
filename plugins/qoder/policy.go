@@ -123,8 +123,11 @@ func lifecycleActionFor(region string, cr *creditsSummary) lifecycleAction {
 	return lifecycleDisable
 }
 
-// shouldReenableCN is true when a CN account is disabled but now has credits.
-func shouldReenableCN(disabled bool, cr *creditsSummary) bool {
+// shouldReenable is true when a disabled account has credits available again.
+//
+// It reads only the balance, so it applies to both regions; the name keeps the
+// CN suffix only because that is where it started.
+func shouldReenable(disabled bool, cr *creditsSummary) bool {
 	if !disabled {
 		return false
 	}

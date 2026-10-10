@@ -131,7 +131,7 @@ func reenableAuth(authIndex, authID string, sa *storedAuth, cr *creditsSummary) 
 	mu.Lock()
 	defer mu.Unlock()
 
-	if !shouldReenableCN(true, cr) {
+	if !shouldReenable(true, cr) {
 		return nil
 	}
 	note := displayNote(sa, cr, false)
@@ -357,7 +357,12 @@ func reconcileOneAccount(authIndex, authID string, force bool) (action lifecycle
 	}
 
 	region := authRegion(sa)
-	if region == regionCN && disabled {
+	// A disabled account whose credits are back should be restored in either
+	// region. This used to be gated on regionCN, which left every Intl account
+	// parked forever: once something disabled it, no code path could bring it
+	// back — even while the gateway reported an available balance. The Intl
+	// account reading "余100 已用100 池200" while still disabled was exactly this.
+	if disabled {
 		// Don't re-enable accounts marked session-dead by keepalive.
 		// The credits snapshot may still look healthy, but the session
 		// was revoked server-side — re-enabling would cause 401 storms.
@@ -371,14 +376,14 @@ func reconcileOneAccount(authIndex, authID string, force bool) (action lifecycle
 			}
 		}
 		// A manual disable outranks the credit heuristic: the operator parked
-		// this account on purpose, and shouldReenableCN decides purely from the
+		// this account on purpose, and shouldReenable decides purely from the
 		// balance, so without this guard the account would quietly come back on
 		// the next tick and the disable would look like it never took.
 		if phys != nil && manualDisableReason(phys.JSON) {
 			_ = syncAuthNote(authIndex, authID, sa, cr, true)
 			return lifecycleNone, nil
 		}
-		if shouldReenableCN(true, cr) {
+		if shouldReenable(true, cr) {
 			if err := reenableAuth(authIndex, authID, sa, cr); err != nil {
 				return lifecycleReenable, err
 			}

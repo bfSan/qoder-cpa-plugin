@@ -239,7 +239,7 @@ func handleAccountDelete(req pluginapi.ManagementRequest) map[string]any {
 // disableReasonManual marks a disable that the operator asked for.
 //
 // Lifecycle automation re-enables a CN account as soon as its balance looks
-// positive again (see shouldReenableCN), and it decides that from credits alone
+// positive again (see shouldReenable), and it decides that from credits alone
 // -- it has no idea the operator parked the account on purpose. Without a
 // recorded intent, a manual disable would appear to work and then quietly undo
 // itself on the next tick or the next restart, which is worse than refusing the
