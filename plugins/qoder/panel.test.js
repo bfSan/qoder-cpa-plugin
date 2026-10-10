@@ -234,8 +234,11 @@ test("region table renders CN and Intl columns with per-region facts", async () 
   const html = panel.elements.get("modelList").innerHTML;
 
   assert.match(html, /model-table/);
-  // Five-column header: 排序 / 模型 / CN / Intl / 操作.
-  assert.match(html, /<span>排序<\/span><span>模型<\/span><span>CN<\/span><span>Intl<\/span><span>操作<\/span>/);
+  // Six-column header: 排序 / 模型 / 模型名 / CN / Intl / 操作.
+  assert.match(html, /<span>排序<\/span><span>模型<\/span><span>模型名<\/span><span>CN<\/span><span>Intl<\/span><span>操作<\/span>/);
+  // The display-name column turns the upstream key into something readable: the
+  // fixture's qmodel carries upstream display_name "Q".
+  assert.match(html, /class="model-display"[^>]*>Q</);
   assert.match(html, /倍率 0\.5x/);
   assert.match(html, /思考 默认 high（low\/medium\/high）/);
   assert.doesNotMatch(html, /Global/, "Qoder's regions are cn/intl, not global");
@@ -383,8 +386,9 @@ test("model action column never wraps and keeps a content-sized track", () => {
   const tracks = rule(".model-head,.model-row").match(/grid-template-columns:([^;]+);/);
   assert.ok(tracks, "grid-template-columns must be declared for the model table");
   const columns = tracks[1].trim().split(/\s+(?![^()]*\))/);
-  assert.equal(columns.length, 5, `expected 5 tracks, got ${columns.join(" | ")}`);
-  const last = columns[4];
+  // 排序 / ID / 模型名 / CN / Intl / 操作
+  assert.equal(columns.length, 6, `expected 6 tracks, got ${columns.join(" | ")}`);
+  const last = columns[5];
   assert.doesNotMatch(last, /1fr|fit-content/);
   // 290px is the shared panel layout's floor, kept so Qoder matches WorkBuddy.
   // It is not a guess for Qoder either: the widest action set Qoder can emit
@@ -400,6 +404,10 @@ test("model action column never wraps and keeps a content-sized track", () => {
     `action track floor ${floor[1]}px is below the widest action set (${WIDEST_ACTION_SET_PX}px)`,
   );
   assert.match(columns[1], /^minmax\(\s*\d+px/);
+  // The display-name track must be able to shrink-or-grow but never collapse:
+  // without a px floor a long model ID beside it squeezes the name to nothing,
+  // which is the exact confusion this column was added to remove.
+  assert.match(columns[2], /^minmax\(\s*\d+px/, "the model-name track needs a px floor");
   const minWidth = Number((rule(".model-table").match(/min-width:(\d+)px/) || [])[1] || 0);
   const padding = Number((rule(".model-head,.model-row").match(/padding:\d+px (\d+)px/) || [])[1] || 0);
   const floorSum = columns.reduce((sum, track) => {
@@ -889,7 +897,7 @@ test("hidden rows keep their region facts in the CN / Intl cells", async () => {
 });
 
 test("the degraded flat row declares one grid track per cell it emits", async () => {
-  // The flat table emits 排序 / ID / 名称 / 操作 cells. Declaring fewer tracks
+  // The flat table emits 排序 / ID / 模型名 / 操作 cells. Declaring fewer tracks
   // than cells pushes the extras into implicit rows, which wrapped the action
   // buttons onto a second line.
   const panel = loadPanel();
@@ -899,8 +907,8 @@ test("the degraded flat row declares one grid track per cell it emits", async ()
   });
   await panel.context.loadModels(false);
   const row = panel.elements.get("modelList").innerHTML.split('<div class="model-row')[1];
-  const cells = [...row.matchAll(/class="(drag-handle|drag-gap|model-id|model-name|model-actions)[^"]*"/g)].map(m => m[1]);
-  assert.deepEqual(cells, ["drag-handle", "model-id", "model-name", "model-actions"]);
+  const cells = [...row.matchAll(/class="(drag-handle|drag-gap|model-id|model-display|model-actions)[^"]*"/g)].map(m => m[1]);
+  assert.deepEqual(cells, ["drag-handle", "model-id", "model-display", "model-actions"]);
 
   const html = fs.readFileSync(path.join(__dirname, "panel.html"), "utf8");
   const rule = html.match(/(?:^|[}\n])\.model-row-flat\{([^}]*)\}/);
@@ -924,8 +932,8 @@ test("the region table declares one track per cell too", async () => {
   const panel = loadPanelWithCatalog();
   await panel.context.loadModels(false);
   const row = panel.elements.get("modelList").innerHTML.split('<div class="model-row')[1];
-  const cells = [...row.matchAll(/class="(drag-handle|drag-gap|model-id|realm-cell|model-actions)[^"]*"/g)].map(m => m[1]);
-  assert.deepEqual(cells, ["drag-handle", "model-id", "realm-cell", "realm-cell", "model-actions"]);
+  const cells = [...row.matchAll(/class="(drag-handle|drag-gap|model-id|model-display|realm-cell|model-actions)[^"]*"/g)].map(m => m[1]);
+  assert.deepEqual(cells, ["drag-handle", "model-id", "model-display", "realm-cell", "realm-cell", "model-actions"]);
   const html = fs.readFileSync(path.join(__dirname, "panel.html"), "utf8");
   const tracks = html.match(/(?:^|[}\n])\.model-head,\.model-row\{([^}]*)\}/)[1].match(/grid-template-columns:([^;]+);/)[1];
   assert.equal(tracks.trim().split(/\s+(?![^()]*\))/).length, cells.length);
@@ -950,6 +958,50 @@ test("a silently dropped model_order is reported instead of claimed as saved", a
   assert.equal(toasts[1][0], "顺序未生效");
   assert.equal(toasts[1][1], "warn");
   assert.match(toasts[1][2], /model_order/);
+});
+
+// Qoder 对外的模型 ID 是上游内部 key（dmodel / qmodel / gmodel / kmodel …），
+// 光看 ID 认不出是哪个模型。上游的 display_name 才是人类可读的名字，它在 discovery
+// 时存进 ModelInfo.Name。这一列的存在意义就是把代号翻译成人能读的名字。
+test("the model name column translates the upstream key into a readable name", async () => {
+  const panel = loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  const html = panel.elements.get("modelList").innerHTML;
+
+  // 每一行都必须有名称单元格，且与 ID 单元格相邻（ID 在前，名称在后）。
+  assert.match(html, /<span class="model-id" title="qmodel">qmodel<\/span><span class="model-display" title="Q">Q<\/span>/,
+    "the qmodel key must be shown next to its readable name");
+
+  // 名称从 models 行的 name 取（即上游 display_name）。
+  assert.equal(panel.context.modelDisplayLabel({ id: "dmodel", name: "DeepSeek V4.1 Flash" }, null), "DeepSeek V4.1 Flash");
+  // region_models 里只有 name（没有 displayName），也要能用。
+  assert.equal(panel.context.modelDisplayLabel({ id: "gm51model" }, { name: "GLM-5.1" }), "GLM-5.1");
+  // models 的 name 优先于 displayName：displayName 是面板自定义显示名，通常为空，
+  // 若它非空也不能盖掉上游真名。
+  assert.equal(panel.context.modelDisplayLabel({ name: "上游真名", displayName: "自定义" }, null), "上游真名");
+  // 全空时返回空串，由调用方渲染占位符 —— 不编造名字。
+  assert.equal(panel.context.modelDisplayLabel({ id: "kmodel" }, {}), "");
+  assert.equal(panel.context.modelDisplayLabel({}, null), "");
+  assert.equal(panel.context.modelDisplayLabel({ name: "" }, null), "");
+  // 非字符串会被 asText 字符串化（与面板其余地方处理这些字段的方式一致）。
+  // Go 侧 name/displayName 都是 string，只可能缺席、不可能是别的类型，所以这个
+  // 分支在真实数据里到不了；写成断言是为了钉住「沿用 asText」这个选择本身，
+  // 免得以后有人以为这里做过类型过滤。
+  assert.equal(panel.context.modelDisplayLabel({ name: 0 }, null), "0");
+});
+
+test("a model with no upstream name renders a placeholder instead of an empty cell", async () => {
+  const panel = loadPanel();
+  panel.context.api = async () => ({
+    source: "dynamic",
+    models: [{ id: "kmodel", hidden: false, custom: false, coolingAccounts: 0 }],
+    region_models: [{ id: "kmodel", cn: { status: "present", present: true, price_factor: 1, context_length: 128000 } }],
+  });
+  await panel.context.loadModels(false);
+  const html = panel.elements.get("modelList").innerHTML;
+  // 空着分不清「没有名字」和「这一列没渲染」，所以要有明确占位符。
+  assert.match(html, /class="model-display mut"[^>]*>未上报</);
+  assert.match(html, /title="上游未上报 display_name"/);
 });
 
 test("orderKept ignores models added or removed by the upstream catalog", () => {

@@ -137,8 +137,12 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
    （移除/恢复 + 自定义 + 冷却 999 + 已隐藏）用 headless Chrome 实测只有 235.4px，
    290px 比它宽 55px，所以只会更不容易换行。上限用 max-content 兜底，超过下限时
    列只会变宽不会裁切内容。整表最小宽度由这些轨道加总决定。 */
-.model-table-wrap{overflow-x:auto;max-width:100%}.model-table{min-width:940px}
-.model-head,.model-row{display:grid;grid-template-columns:38px minmax(140px,1.1fr) minmax(200px,1fr) minmax(200px,1fr) minmax(290px,max-content);align-items:center;gap:10px;padding:8px 10px}
+/* 轨道数为 6：排序 / ID / 模型名 / CN / Intl / 操作。轨道数必须与 renderModels
+   每行输出的单元格数一致 —— 少一条时多出来的单元格会掉进隐式行，操作按钮被挤到
+   第二行。模型名列取 minmax(150px,.9fr)：名字是给人看的短标签（"DeepSeek V4.1
+   Flash"），比 ID 短，但不设下限会在窄窗口被压成一两个字。 */
+.model-table-wrap{overflow-x:auto;max-width:100%}.model-table{min-width:1090px}
+.model-head,.model-row{display:grid;grid-template-columns:38px minmax(140px,1.1fr) minmax(150px,.9fr) minmax(200px,1fr) minmax(200px,1fr) minmax(290px,max-content);align-items:center;gap:10px;padding:8px 10px}
 .model-head{color:var(--mut);font-size:12px;font-weight:700;border-bottom:1px solid var(--border)}
 .model-row{border:1px solid var(--border);border-radius:8px;background:var(--surface)}
 .drag-handle{cursor:grab;touch-action:none}.drag-handle:active{cursor:grabbing}
@@ -150,6 +154,12 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 /* 当前默认上下文档位：加粗 + 主色，让操作者一眼看出用的是哪一档 */
 .realm-facts .ctx-default{color:var(--acc);font-weight:700}
 .model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+/* 模型名列：上游 display_name 是人类可读名，可能带空格和斜杠。
+   与 .model-name 不同，这里不设 white-space:nowrap —— ID 列已经用 anywhere 换行，
+   名字列溢出会把操作列顶出去。窄屏也不隐藏它（见下面的 @media）：这一列的存在
+   意义就是让代号可读，把小屏上的真名藏掉等于在这块屏上回到改之前的状态。 */
+.model-display{font-size:12.5px;min-width:0;overflow-wrap:anywhere;color:var(--fg)}
+.model-display.mut{color:var(--mut);font-style:italic}
 .model-name{font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 操作列内的按钮/徽章一律不换行：窄列下 "隐藏" 曾被压成 "隐\n藏" */
 .model-actions{display:flex;gap:6px;flex:0 0 auto;margin-left:auto;white-space:nowrap;flex-wrap:nowrap}
@@ -158,10 +168,10 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 .model-actions .ftag{padding:2px 8px;font-size:12px}
 .model-actions .ftag[disabled]{opacity:.4;cursor:default}
 /* region_models 缺失时的降级表格：同样是网格（保持对齐），但不画分区列。
-   轨道数必须与 renderModelsFlat 每行输出的单元格数一致 —— 排序轨 / ID / 名称 / 操作。
+   轨道数必须与 renderModelsFlat 每行输出的单元格数一致 —— 排序轨 / ID / 模型名 / 操作。
    少一条轨道时多出来的单元格会掉进隐式行，操作按钮就被挤到第二行。 */
-.model-table-flat{min-width:640px}
-.model-row-flat{grid-template-columns:38px minmax(140px,1.4fr) minmax(120px,.8fr) minmax(200px,max-content)}
+.model-table-flat{min-width:790px}
+.model-row-flat{grid-template-columns:38px minmax(140px,1.4fr) minmax(150px,.9fr) minmax(200px,max-content)}
 @media (max-width:640px){
   .wrap{padding:18px 12px}
   .bar,.filter-bar,.actions{min-width:0}
@@ -169,6 +179,9 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
   .filter-bar .field-input{flex:1 1 100%;width:100%}
   #modelBox h2{align-items:flex-start;flex-wrap:wrap}
   #modelBox h2>span{max-width:100%;flex-wrap:wrap}
+  /* 旧的 .model-name 在窄屏隐藏（曾经只是重复 ID 的次要信息）。模型名列不能跟着
+     隐藏：代号要可读正是加这一列的目的。窄屏改为横向滚动整张表，靠 .model-table-wrap
+     的 overflow-x，而不是把列去掉。 */
   .model-name{display:none}
   .model-row{align-items:flex-start;flex-wrap:wrap}
   .model-actions{margin-left:auto}
@@ -959,6 +972,24 @@ function regionCell(m, region){
   const think=thinkingText(r.thinking||{});
   return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span title="分区原始上下文档位，只读">上下文 ${contextFactsHTML(r)}</span></div>`;
 }
+// modelDisplayLabel 回答「这个代号到底是什么模型」。
+//
+// Qoder 对外的模型 ID 就是上游的内部 key（dmodel / qmodel / gmodel / kmodel …），
+// 光看 ID 认不出是哪家的哪个模型。上游的 display_name 才是人类可读的名字，它在
+// discovery 时存进了 ModelInfo.Name（models.go: Name: m.DisplayName），这里读的就是它。
+//
+// 取值顺序：models 行的 name（即上游 display_name）→ region_models 的 name
+// （同源；region 路径只为它输出 name，没有 displayName）→ displayName
+// （面板自定义显示名，通常为空，放最后以免盖掉上游真名）。
+// 全空时返回空串，由调用方渲染成占位符 —— 不编造名字。
+function modelDisplayLabel(m, region){
+  const cands=[m&&m.name, region&&region.name, m&&m.displayName];
+  for(const c of cands){
+    const t=asText(c).trim();
+    if(t) return t;
+  }
+  return "";
+}
 function renderModels(){
   const box=document.getElementById("modelList");
   if(!lastModels.length){box.innerHTML=`<div class="mut">暂无模型</div>`;return}
@@ -966,11 +997,17 @@ function renderModels(){
   if(!hasRegionCatalog){renderModelsFlat(box);return}
   const regionByID=new Map(lastRegionModels.map(m=>[String(m.id),m]));
   box.innerHTML=`<div class="model-table-wrap"><div class="model-table" role="table"><div class="model-head" role="row">`+
-    `<span>排序</span><span>模型</span><span>${REGION_LABEL.cn}</span><span>${REGION_LABEL.intl}</span><span>操作</span></div>`+
+    `<span>排序</span><span>模型</span><span>模型名</span><span>${REGION_LABEL.cn}</span><span>${REGION_LABEL.intl}</span><span>操作</span></div>`+
     lastModels.map(m=>{
       const id=String(m.id||"");
       const r=regionByID.get(id)||{};
       const escId=esc(id);
+      const name=modelDisplayLabel(m,r);
+      // 上游没上报名字时给一个明确的占位符，而不是留空白格：空着分不清
+      // 「没有名字」和「这一列没渲染」。esc() 已经转义引号，title 直接用它。
+      const nameCell=name
+        ? `<span class="model-display" title="${esc(name)}">${esc(name)}</span>`
+        : `<span class="model-display mut" title="上游未上报 display_name">未上报</span>`;
       const tags=modelTags(m);
       // 排序轨每行都必须占位。隐藏的模型不可拖拽（它不在 CPA 的模型响应里，
       // 拖它没有意义），但整轨留空会让这一行后面的单元格整体左移一格，列就对不齐。
@@ -980,7 +1017,7 @@ function renderModels(){
       const actions=m.hidden
         ? `<button type="button" class="ftag" data-model-action="restore" data-model-id="${escId}">恢复</button>`
         : `<button type="button" class="ftag" data-model-action="toggle" data-model-id="${escId}">${m.custom?"移除":"隐藏"}</button>`;
-      return `<div class="model-row" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span><span class="realm-cell">${regionCell(r,"cn")}</span><span class="realm-cell">${regionCell(r,"intl")}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
+      return `<div class="model-row" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span>${nameCell}<span class="realm-cell">${regionCell(r,"cn")}</span><span class="realm-cell">${regionCell(r,"intl")}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
     }).join("")+`</div></div>`;
   bindModelActions();
 }
@@ -991,7 +1028,10 @@ function renderModelsFlat(box){
     lastModels.map(m=>{
       const id=String(m.id||"");
       const escId=esc(id);
-      const name=asText(m.displayName||m.name||"");
+      const name=modelDisplayLabel(m,null);
+      const nameCell=name
+        ? `<span class="model-display" title="${esc(name)}">${esc(name)}</span>`
+        : `<span class="model-display mut" title="上游未上报 display_name">未上报</span>`;
       const tags=modelTags(m);
       // 排序轨必须每行都占位。隐藏的模型不可拖拽（它不在 CPA 的模型响应里），
       // 但整轨留空会让这一行后面的单元格整体左移一格，列就对不齐了。
@@ -1001,7 +1041,7 @@ function renderModelsFlat(box){
       const actions=m.hidden
         ? `<button type="button" class="ftag" data-model-action="restore" data-model-id="${escId}">恢复</button>`
         : `<button type="button" class="ftag" data-model-action="toggle" data-model-id="${escId}">${m.custom?"移除":"隐藏"}</button>`;
-      return `<div class="model-row model-row-flat" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span><span class="model-name mut">${esc(name)}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
+      return `<div class="model-row model-row-flat" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span>${nameCell}<span class="model-actions">${actions}${tags.join("")}</span></div>`;
     }).join("")+`</div></div>`;
   bindModelActions();
 }
