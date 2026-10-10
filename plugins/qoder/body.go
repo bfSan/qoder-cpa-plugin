@@ -238,6 +238,9 @@ type qoderBodyConfig struct {
 type qoderBodyOption func(*qoderBodyConfig)
 
 // withModelContext applies a model's context facts to the request body.
+//
+// 优先级：操作者覆盖 > 上游默认档。覆盖值由面板写入，代表"这个模型按多大窗口
+// 服务"；没有覆盖时完全沿用上游默认档，与加这个功能前一致。
 func withModelContext(facts *modelRegionFacts) qoderBodyOption {
 	return func(c *qoderBodyConfig) {
 		if c == nil || facts == nil {
@@ -258,6 +261,10 @@ func withModelContext(facts *modelRegionFacts) qoderBodyOption {
 // contextTierForModel resolves the context facts of one model as advertised by
 // the gateway for this account's region. The boolean reports whether a catalog
 // entry was found at all, so callers can tell "no data" from "zero".
+//
+// 这里也是操作者覆盖值生效的地方：返回的 facts 里 ContextLength 已被替换成
+// 覆盖值，而 withModelContext 优先取 ContextLength —— 所以请求体、面板显示、
+// CPA 对外广告三者用的是同一个数，不会出现"面板显示 1M 但实际按 200K 发"。
 func contextTierForModel(sa *storedAuth, modelKey string) (*modelRegionFacts, bool) {
 	modelKey = strings.TrimSpace(modelKey)
 	if sa == nil || modelKey == "" {
@@ -270,6 +277,12 @@ func contextTierForModel(sa *storedAuth, modelKey string) (*modelRegionFacts, bo
 	fact, found := facts[modelKey]
 	if !found {
 		return nil, false
+	}
+	if override, hasOverride := contextOverrideForModel(modelKey); hasOverride {
+		// 拷贝再改：fact 是缓存里那份的副本，但 ContextLength 是指针，
+		// 直接写会顺着指针改到共享的缓存对象上，把覆盖值固化进缓存。
+		value := override
+		fact.ContextLength = &value
 	}
 	return &fact, true
 }

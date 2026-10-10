@@ -355,7 +355,7 @@ type registrationCapability struct {
 // `make build` feeds from the VERSION file. This literal is the fallback for a
 // bare `go build`; keep it in step with VERSION so a stray build never
 // under-reports the plugin version.
-var version = "0.9.16"
+var version = "0.9.17"
 
 func wbRegistration() registration {
 	return registration{
@@ -374,6 +374,7 @@ func wbRegistration() registration {
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 				{Name: "hidden_models", Type: pluginapi.ConfigFieldTypeArray, Description: "Plugin-owned model deny-list. Hidden IDs are removed from CPA's model responses before registration; the panel persists hide/restore edits here."},
 				{Name: "model_order", Type: pluginapi.ConfigFieldTypeArray, Description: "Persisted catalog display order written by the panel drag handle. The complete model ID list is stored and restored on reload."},
+				{Name: "model_context", Type: pluginapi.ConfigFieldTypeArray, Description: "Persisted per-model context-window overrides written by the panel tier buttons, as {modelID: tokens}. Values must be one of the tiers the upstream gateway reports for that model; clearing the key reverts to the upstream default tier."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},

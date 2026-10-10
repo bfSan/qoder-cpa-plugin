@@ -44,8 +44,16 @@ function fakeElement() {
     },
     querySelectorAll() { return []; },
     addEventListener() {},
-    setAttribute() {},
-    removeAttribute() {},
+    // Attributes are stored, not swallowed: the tier buttons read their own
+    // aria-pressed back to decide whether a click is a no-op, so a stub that
+    // drops writes would make that path untestable (and would silently pass a
+    // click handler that never guards against re-clicking the live tier).
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
+    },
+    removeAttribute(name) { delete this.attributes[name]; },
     focus() {},
     closest() { return null; },
     remove() {
@@ -170,19 +178,54 @@ function loadPanelWithCatalog(catalog = CATALOG) {
   // catalog it serves is re-ordered by whatever was last PATCHed. Without that,
   // the reload saveModelOrder() performs at the end would silently undo the
   // order under test and hide order bugs.
-  const state = { order: null, patches: [] };
+  //
+  // It remembers model_context for the same reason: setContextTier() posts the
+  // override, persists it, then reloads and checks the served context_length
+  // actually changed. A stub that forgot the override would make that read-back
+  // fail and turn every tier switch into a spurious "档位未生效" warning.
+  const state = { order: null, context: {}, patches: [], contextCalls: [] };
   panel.state = state;
   const served = () => {
     const models = state.order
       ? state.order.map(id => catalog.models.find(m => m.id === id)).filter(Boolean)
       : catalog.models;
-    return { ...catalog, models };
+    // Apply the stored overrides to the served region cells, the way the real
+    // backend does in buildPanelRegionModels().
+    const regionModels = (catalog.region_models || []).map(row => {
+      const override = state.context[row.id];
+      if (!override) return row;
+      const next = { ...row };
+      for (const region of ["cn", "intl"]) {
+        if (next[region] && next[region].present === true) {
+          next[region] = { ...next[region], context_length: override, context_override: true };
+        }
+      }
+      return next;
+    });
+    return { ...catalog, models, region_models: regionModels };
   };
-  panel.context.api = async () => served();
+  panel.context.api = async (path, opts) => {
+    if (path === "/models/context") {
+      const body = JSON.parse(opts.body);
+      state.contextCalls.push(body);
+      const tiers = (catalog.region_models || [])
+        .find(r => r.id === body.id);
+      const options = tiers
+        ? [...new Set([tiers.cn, tiers.intl]
+            .filter(c => c && Array.isArray(c.context_tiers))
+            .flatMap(c => c.context_tiers.map(t => t.tokens)))].sort((a, b) => a - b)
+        : [];
+      if (body.context_length == null) delete state.context[body.id];
+      else state.context[body.id] = body.context_length;
+      return { success: true, id: body.id, context_length: body.context_length ?? null, model_context: { ...state.context }, context_options: options };
+    }
+    return served();
+  };
   panel.context.managementAPI = async (p, o) => {
     const body = JSON.parse(o.body);
     state.patches.push([p, body]);
     if (body.model_order) state.order = body.model_order;
+    if (body.model_context) state.context = { ...body.model_context };
     return { ok: true };
   };
   return panel;
@@ -320,6 +363,8 @@ test("thinking reports the default level, unknown, unsupported and off_only", ()
 
 test("the effective context tier is bolded, for tiers and both legacy key shapes", () => {
   const { context } = loadPanel();
+  // No model id → the tiers stay plain text. This is the fallback for a caller
+  // that has no id to key a click on; it must still mark the live tier.
   const line = facts => {
     const html = context.regionCell({ cn: { status: "present", present: true, ...facts } }, "cn");
     const match = html.match(/上下文 ([\s\S]*?)<\/span><\/div>$/);
@@ -327,6 +372,7 @@ test("the effective context tier is bolded, for tiers and both legacy key shapes
     return match[1];
   };
   const bolded = text => `<b class="ctx-default" title="当前生效档位 — CPA 与客户端看到的就是这一档">${text}</b>`;
+  const sep = '<span class="ctx-sep">/</span>';
   // context_tiers is the current key: objects with label/tokens/is_default.
   const tiers = line({
     context_length: 200000,
@@ -336,7 +382,7 @@ test("the effective context tier is bolded, for tiers and both legacy key shapes
       { label: "1M", tokens: 1000000 },
     ],
   });
-  assert.equal(tiers, `${bolded("200K")} / 400K / 1M`);
+  assert.equal(tiers, `${bolded("200K")}${sep}400K${sep}1M`);
   // The bold must follow context_length, NOT is_default. The backend advertises
   // a 1M-capable model at 1M even when the provider's own default tier is 200K
   // (models.go: effectiveCtx only falls back to the marked default when
@@ -350,13 +396,13 @@ test("the effective context tier is bolded, for tiers and both legacy key shapes
       { label: "1M", tokens: 1000000 },
     ],
   });
-  assert.equal(disagrees, `200K / ${bolded("1M")}`);
+  assert.equal(disagrees, `200K${sep}${bolded("1M")}`);
   assert.doesNotMatch(disagrees, /<b[^>]*>200K<\/b>/);
   // context_options is the legacy key; supported_context_lengths the older one.
   const options = line({ context_length: 600000, context_options: [300000, 600000, 1000000], default_context_length: 600000 });
-  assert.equal(options, `300K / ${bolded("600K")} / 1M`);
+  assert.equal(options, `300K${sep}${bolded("600K")}${sep}1M`);
   const legacy = line({ context_length: 300000, supported_context_lengths: [300000, 600000], default_context_length: 300000 });
-  assert.equal(legacy, `${bolded("300K")} / 600K`);
+  assert.equal(legacy, `${bolded("300K")}${sep}600K`);
   // context_tiers wins when both are present.
   assert.equal(
     line({ context_length: 128000, context_tiers: [{ label: "128K", tokens: 128000 }], context_options: [300000] }),
@@ -365,16 +411,54 @@ test("the effective context tier is bolded, for tiers and both legacy key shapes
   // No advertised value at all: the list renders unadorned rather than guessing
   // one of the tiers. Unknowable must stay visibly unknown.
   const noEffective = line({ context_options: [300000, 600000] });
-  assert.equal(noEffective, "300K / 600K");
+  assert.equal(noEffective, `300K${sep}600K`);
   assert.doesNotMatch(noEffective, /ctx-default/);
   // An effective value outside the offered tiers is appended instead of being
   // dropped: dropping it would leave the row with no bold at all, which reads
   // as "no tier is live" — the one thing this row must never imply.
   const foreign = line({ context_length: 750000, context_options: [300000, 600000], default_context_length: 750000 });
-  assert.equal(foreign, `300K / 600K / ${bolded("750K")}`);
+  assert.equal(foreign, `300K${sep}600K${sep}${bolded("750K")}`);
   // Single-tier fallback when no option list is reported.
   assert.equal(line({ context_length: 128000 }), bolded("128K"));
   assert.equal(line({}), "未上报");
+});
+
+// 档位必须可点：点哪一档就切到哪一档。这里守的是"按钮形状 + 生效标记"两件事——
+// 生效标记不能只靠加粗（视觉信号对读屏不可见），所以另发一个 aria-pressed。
+test("each context tier is a clickable button carrying its own model id and tokens", () => {
+  const { context } = loadPanel();
+  const html = context.regionCell(
+    {
+      cn: {
+        status: "present",
+        present: true,
+        context_length: 200000,
+        context_tiers: [
+          { label: "200K", tokens: 200000, is_default: true },
+          { label: "400K", tokens: 400000 },
+          { label: "1M", tokens: 1000000 },
+        ],
+      },
+    },
+    "cn",
+    "qmodel_latest",
+  );
+  // Every tier is a real <button>, so it is focusable and keyboard-reachable.
+  assert.equal((html.match(/<button type="button" class="ctx-tier/g) || []).length, 3);
+  // Each carries the model id and its own token count — the click handler reads
+  // both from the DOM, so losing either silently breaks switching.
+  for (const tokens of [200000, 400000, 1000000]) {
+    assert.match(html, new RegExp(`data-ctx-tier="qmodel_latest" data-ctx-tokens="${tokens}"`));
+  }
+  // Exactly one tier is marked live, and it is the advertised one.
+  assert.equal((html.match(/aria-pressed="true"/g) || []).length, 1);
+  assert.match(html, /class="ctx-tier ctx-tier-on"[^>]*data-ctx-tokens="200000"[^>]*aria-pressed="true"/);
+  // The live tier must not be rendered as a bare <b>: a <b> is not clickable, so
+  // a regression back to the old shape would leave no way to change the tier.
+  assert.doesNotMatch(html, /<b class="ctx-default"/);
+  // No inline handlers (the panel's CSP forbids them and the rest of the panel
+  // binds through data-* attributes).
+  assert.doesNotMatch(html, /onclick=/);
 });
 
 // -------------------------------------------------- 6. 操作列 nowrap / 宽度
@@ -396,10 +480,16 @@ test("model action column never wraps and keeps a content-sized track", () => {
   assert.match(rule(".model-actions>*"), /white-space:nowrap/);
   assert.match(rule(".badge"), /white-space:nowrap/);
   assert.match(rule(".ftag"), /white-space:nowrap/);
-  // .ctx-default is a descendant of .realm-facts (same shape as WorkBuddy's),
-  // so the rule lookup has to spell out the full selector.
+  // .ctx-default 是"没有档位表可点"时的兜底加粗文本；.ctx-tier-on 是可点按钮里
+  // 生效的那一档。两者都得带上主色与加粗，否则"当前用的是哪一档"就没有视觉落点。
   assert.match(rule(".realm-facts .ctx-default"), /font-weight:700/);
   assert.match(rule(".realm-facts .ctx-default"), /color:var\(--acc\)/);
+  assert.match(rule(".ctx-tier-on"), /font-weight:700/);
+  assert.match(rule(".ctx-tier-on"), /color:var\(--acc\)/);
+  // 档位按钮所在的 span 必须放行溢出：上面 .realm-facts>span 的 overflow:hidden 会
+  // 把按钮裁掉半个，半个按钮点不到、看着还像渲染坏了。
+  assert.match(rule(".realm-facts>span.realm-facts-ctx"), /overflow:visible/);
+  assert.match(rule(".realm-facts>span.realm-facts-ctx"), /white-space:normal/);
 
   const tracks = rule(".model-head,.model-row").match(/grid-template-columns:([^;]+);/);
   assert.ok(tracks, "grid-template-columns must be declared for the model table");
@@ -408,19 +498,14 @@ test("model action column never wraps and keeps a content-sized track", () => {
   assert.equal(columns.length, 6, `expected 6 tracks, got ${columns.join(" | ")}`);
   const last = columns[5];
   assert.doesNotMatch(last, /1fr|fit-content/);
-  // 290px is the shared panel layout's floor, kept so Qoder matches WorkBuddy.
-  // It is not a guess for Qoder either: the widest action set Qoder can emit
-  // (移除/恢复 + 自定义 + 冷却 999 + 已隐藏) measures 235.4px in headless
-  // Chrome, so the floor sits comfortably above it. `max-content` lets an
-  // unusually wide row grow instead of clipping, while ordinary rows all share
-  // one width and stay column-aligned.
-  const WIDEST_ACTION_SET_PX = 236;
-  const floor = last.match(/^minmax\(\s*(\d+)px\s*,\s*max-content\s*\)$/);
-  assert.ok(floor, `last track must be minmax(<px>,max-content), got ${last}`);
-  assert.ok(
-    Number(floor[1]) >= WIDEST_ACTION_SET_PX,
-    `action track floor ${floor[1]}px is below the widest action set (${WIDEST_ACTION_SET_PX}px)`,
-  );
+  // The action track is sized to its content, with no px floor. A floor sounds
+  // safer but is measured against the *theoretical* widest set (移除/恢复 +
+  // 自定义 + 冷却 999 + 已隐藏 = 235.4px in headless Chrome), which a real
+  // account rarely hits; the common widest is 174px. The unused pixels are
+  // subtracted from CN / Intl, which is what truncated the thinking-tier list.
+  // max-content takes the widest row actually present: it never over-reserves,
+  // and it still grows for a four-tag row instead of squeezing the buttons.
+  assert.equal(last, "max-content", `the action track must be max-content, got ${last}`);
   // The ID and display-name tracks are fixed-width on purpose: both wrap through
   // overflow-wrap:anywhere, so nothing is clipped, and every leftover pixel goes
   // to the CN / Intl fact columns — which do NOT wrap and therefore need the
@@ -434,8 +519,13 @@ test("model action column never wraps and keeps a content-sized track", () => {
     const value = track.match(/(\d+)px/);
     return sum + (value ? Number(value[1]) : 0);
   }, 0);
-  assert.ok(minWidth >= floorSum, `.model-table min-width ${minWidth}px cannot fit the track floors (${floorSum}px)`);
   assert.ok(padding > 0, "row padding must be declared for the track sum to be meaningful");
+  assert.ok(
+    minWidth >= floorSum,
+    `.model-table min-width ${minWidth}px cannot fit the declared track floors (${floorSum}px)`,
+  );
+  // The action column has no declared floor, so it needs its own worst case.
+  const WIDEST_ACTION_SET_PX = 236;
 
   // The table must also fit the panel it lives in. Checking only
   // `min-width >= floorSum` (above) is exactly what let a 1090px table ship into
@@ -452,22 +542,32 @@ test("model action column never wraps and keeps a content-sized track", () => {
   const wrapPad = Number((rule(".wrap").match(/padding:\d+px (\d+)px/) || [])[1] || 0);
   const cardPad = Number((rule(".card").match(/padding:(\d+)px/) || [])[1] || 0);
   assert.ok(wrapMax && wrapPad, "could not derive the panel's available width from CSS");
-  const wrapWidth = Math.min(wrapMax, MIN_DESKTOP_VIEWPORT);
+  // A 1024px *window* is not a 1024px *viewport*: the page scrolls, so the
+  // browser's vertical scrollbar takes ~15px of layout width. Omitting it is how
+  // a 948px table came to scroll inside a container this test called 958px wide —
+  // the guard passed while the real window showed a horizontal scrollbar.
+  const SCROLLBAR_PX = 15;
+  const wrapWidth = Math.min(wrapMax, MIN_DESKTOP_VIEWPORT - SCROLLBAR_PX);
   const available = wrapWidth - wrapPad * 2 - cardPad * 2 - 2;
   // Grid gaps and the row's own horizontal padding sit inside the table too.
   const gap = Number((rule(".model-head,.model-row").match(/gap:(\d+)px/) || [])[1] || 0);
   const inlinePad = Number((rule(".model-head,.model-row").match(/padding:\d+px (\d+)px/) || [])[1] || 0);
-  const needed = floorSum + gap * (columns.length - 1) + inlinePad * 2;
+  const needed = floorSum + WIDEST_ACTION_SET_PX + gap * (columns.length - 1) + inlinePad * 2;
   assert.ok(
     needed <= available,
-    `the model table needs ${needed}px (floors ${floorSum} + gaps ${gap * (columns.length - 1)} + padding ${inlinePad * 2}) `
+    `the model table needs ${needed}px (floors ${floorSum} + widest action column ${WIDEST_ACTION_SET_PX} `
+      + `+ gaps ${gap * (columns.length - 1)} + padding ${inlinePad * 2}) `
       + `but only ${available}px is available at a ${MIN_DESKTOP_VIEWPORT}px viewport, so it will always show a horizontal scrollbar`,
   );
   // min-width must not exceed what that same viewport offers either: a table
-  // wider than its container scrolls even when its tracks would have fit.
-  assert.ok(
-    minWidth <= available,
-    `.model-table min-width ${minWidth}px exceeds the ${available}px available at a ${MIN_DESKTOP_VIEWPORT}px viewport`,
+  // wider than its container scrolls even when its tracks would have fit. It
+  // also has to cover the same worst case, or the action column would push the
+  // table past min-width at exactly the moment it is needed most.
+  assert.equal(
+    minWidth,
+    needed,
+    `.model-table min-width ${minWidth}px should equal the worst case ${needed}px `
+      + `(fixed floors + widest action column + gaps + padding)`,
   );
 
   // The CN / Intl columns should have room for the longest fact line they render
@@ -671,7 +771,12 @@ test("region facts escape dynamic values and never use inline handlers", async (
   const rendered = panel2.elements.get("modelList").innerHTML;
   assert.match(rendered, /倍率 0\.34x/);
   assert.match(rendered, /思考 默认 high（low\/high）/);
-  assert.match(rendered, /<b class="ctx-default" title="当前生效档位 — CPA 与客户端看到的就是这一档">600K<\/b>/);
+  // The live tier is a clickable button here (the row carries a model id), not a
+  // bare <b>; it must still be marked as the live one.
+  assert.match(rendered, /class="ctx-tier ctx-tier-on"[^>]*data-ctx-tokens="600000"[^>]*aria-pressed="true"/);
+  // The model id in the button must be HTML-escaped, same as everywhere else —
+  // this fixture's id contains a quote, which would break out of the attribute.
+  assert.match(rendered, /data-ctx-tier="model-&quot;quote&quot;"/);
   assert.match(rendered, /data-model-action="toggle"/);
   assert.doesNotMatch(rendered, /onclick=/);
   assert.doesNotMatch(rendered, /aria-label="上移/);
@@ -703,12 +808,16 @@ test("the bolded context tier follows the advertised value, not is_default", asy
   });
   await panel.context.loadModels(false);
   const rendered = panel.elements.get("modelList").innerHTML;
-  // The live tier is bolded...
-  assert.match(rendered, /<b class="ctx-default"[^>]*>1M<\/b>/);
+  // The live tier is marked as such...
+  assert.match(rendered, /class="ctx-tier ctx-tier-on"[^>]*data-ctx-tokens="1000000"[^>]*aria-pressed="true"/);
   // ...and the provider's default is not, even though is_default says so.
-  assert.doesNotMatch(rendered, /<b[^>]*>\s*200K\s*<\/b>/);
-  // The tier list itself stays complete — bolding shifts, it does not truncate.
-  assert.match(rendered, /200K \/ 400K \/ <b/);
+  assert.doesNotMatch(rendered, /data-ctx-tokens="200000"[^>]*aria-pressed="true"/);
+  // The tier list itself stays complete — the live marker shifts, it does not
+  // truncate: all three tiers are still offered as buttons.
+  assert.equal((rendered.match(/class="ctx-tier(?: ctx-tier-on)?"/g) || []).length, 3);
+  for (const tokens of [200000, 400000, 1000000]) {
+    assert.match(rendered, new RegExp(`data-ctx-tokens="${tokens}"`));
+  }
 });
 
 test("region status is reported in the hint when the backend sends it", async () => {
@@ -739,11 +848,19 @@ async function settle() {
 
 function domNode(dataset) {
   const handlers = new Map();
+  const attributes = {};
   return {
     dataset,
     _bound: false,
     disabled: false,
     draggable: false,
+    // 档位按钮的点击处理器会回读自己的 aria-pressed 来判断"点的就是当前生效档"
+    // （那种情况应当什么都不做）。替身必须真的存属性，否则这条分支测不到。
+    setAttribute(name, value) { attributes[name] = String(value); },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(attributes, name) ? attributes[name] : null;
+    },
+    removeAttribute(name) { delete attributes[name]; },
     addEventListener(type, fn) {
       if (!handlers.has(type)) handlers.set(type, []);
       handlers.get(type).push(fn);
@@ -757,8 +874,8 @@ function domNode(dataset) {
 }
 
 // wireRenderedRows reads the rows back out of the rendered table and builds the
-// node graph bindModelActions() expects: one button per data-model-action, each
-// pointing at its owning .model-row via closest().
+// node graph bindModelActions() expects: one button per data-model-action and one
+// per context-tier button, each pointing at its owning .model-row via closest().
 function wireRenderedRows(panel, html) {
   // The row tag carries an extra class in the degraded table
   // (`class="model-row model-row-flat"`), so split before the attribute's
@@ -774,6 +891,18 @@ function wireRenderedRows(panel, html) {
       button.closest = selector => (selector === ".model-row" ? row : null);
       nodes.push(button);
     }
+    // Context-tier buttons are matched with their tokens and aria-pressed so the
+    // click handler can read both back exactly as it does in the browser.
+    for (const match of chunk.matchAll(
+      /<button type="button" class="(ctx-tier(?: ctx-tier-on)?)" data-ctx-tier="([^"]*)" data-ctx-tokens="(\d+)" aria-pressed="(\w+)"/g,
+    )) {
+      const [, cls, tierId, tokens, pressed] = match;
+      const button = domNode({ ctxTier: tierId, ctxTokens: tokens });
+      button.className = cls;
+      button.setAttribute("aria-pressed", pressed);
+      button.closest = selector => (selector === ".model-row" ? row : null);
+      nodes.push(button);
+    }
   }
   panel.document.querySelectorAll = () => nodes;
   return nodes;
@@ -786,6 +915,90 @@ function fireDrag(panel, nodes, draggedId, targetId, dataTransfer) {
   handle.fire("dragstart", { dataTransfer, preventDefault() {} });
   target.fire("drop", { preventDefault() {} });
 }
+
+test("clicking a context tier switches the effective tier and persists it", async () => {
+  const panel = loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  panel.context.toast = () => {};
+  const nodes = wireRenderedRows(panel, panel.elements.get("modelList").innerHTML);
+  panel.context.bindModelActions();
+
+  const tiers = nodes.filter(n => n.dataset.ctxTier === "auto");
+  assert.equal(tiers.length, 2, "auto should offer both of its tiers");
+  const live = tiers.find(n => n.getAttribute("aria-pressed") === "true");
+  const other = tiers.find(n => n.getAttribute("aria-pressed") === "false");
+  assert.equal(live.dataset.ctxTokens, "200000", "the upstream default tier starts live");
+  assert.equal(other.dataset.ctxTokens, "400000");
+
+  // Click the non-live tier.
+  other.fire("click");
+  await settle();
+
+  // The plugin was told to switch, and the change was persisted to config so it
+  // survives a restart.
+  assert.deepEqual(panel.state.contextCalls, [{ id: "auto", context_length: 400000 }]);
+  const patch = panel.state.patches.find(p => p[0] === "/plugins/qoder/config");
+  assert.ok(patch, "the tier must be persisted through the plugin config");
+  assert.deepEqual(patch[1], { model_context: { auto: 400000 } });
+
+  // After the reload the new tier is the live one — the read-back the panel uses
+  // to tell a real switch from a silently dropped field.
+  const after = wireRenderedRows(panel, panel.elements.get("modelList").innerHTML);
+  const nowLive = after.filter(n => n.dataset.ctxTier === "auto" && n.getAttribute("aria-pressed") === "true");
+  assert.equal(nowLive.length, 1, "exactly one tier is live");
+  assert.equal(nowLive[0].dataset.ctxTokens, "400000", "the clicked tier became live");
+});
+
+// Clicking the tier that is already live must not write anything: a no-op write
+// still produces a request, a config rewrite and a re-render, all of which the
+// operator sees as a flicker for a click that changed nothing.
+test("clicking the already-live tier is a no-op", async () => {
+  const panel = loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  panel.context.toast = () => {};
+  const nodes = wireRenderedRows(panel, panel.elements.get("modelList").innerHTML);
+  panel.context.bindModelActions();
+
+  const live = nodes.find(n => n.dataset.ctxTier === "auto" && n.getAttribute("aria-pressed") === "true");
+  assert.ok(live, "auto must have a live tier");
+  live.fire("click");
+  await settle();
+
+  assert.deepEqual(panel.state.contextCalls, [], "no request for a no-op click");
+  assert.deepEqual(panel.state.patches, [], "no config write for a no-op click");
+});
+
+// A rejected switch must roll the UI back and say so. Silently keeping the old
+// tier while the toast claims success is the failure mode worth guarding: the
+// operator would believe a tier is in effect that the backend never accepted.
+test("a rejected tier switch is reported and leaves the old tier live", async () => {
+  const panel = loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  const toasts = [];
+  panel.context.toast = (title, kind, detail) => toasts.push({ title, kind, detail });
+  panel.context.api = async (path) => {
+    if (path === "/models/context") {
+      return { success: false, error: "context_length is not a supported tier for this model" };
+    }
+    return CATALOG;
+  };
+  const nodes = wireRenderedRows(panel, panel.elements.get("modelList").innerHTML);
+  panel.context.bindModelActions();
+
+  const other = nodes.find(n => n.dataset.ctxTier === "auto" && n.getAttribute("aria-pressed") === "false");
+  other.fire("click");
+  await settle();
+
+  const failure = toasts.find(t => t.kind === "err");
+  assert.ok(failure, "a rejected switch must surface an error toast");
+  assert.match(failure.detail, /not a supported tier/);
+  // Nothing was persisted, so the old tier is still the live one.
+  assert.deepEqual(panel.state.patches, []);
+  const live = wireRenderedRows(panel, panel.elements.get("modelList").innerHTML)
+    .filter(n => n.dataset.ctxTier === "auto" && n.getAttribute("aria-pressed") === "true");
+  assert.equal(live.length, 1);
+  assert.equal(live[0].dataset.ctxTokens, "200000", "the previous tier stays live");
+});
 
 test("rendered rows bind through data-* attributes and drag reorders persistently", async () => {
   const panel = loadPanelWithCatalog();
@@ -1139,6 +1352,9 @@ test("an unchanged, still-persisted save reports success without a warning", asy
   assert.equal(toasts.length, 1, `expected only the success toast, got ${JSON.stringify(toasts)}`);
   assert.equal(toasts[0][1], "ok");
 });
+
+
+
 
 
 

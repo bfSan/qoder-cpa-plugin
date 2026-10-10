@@ -55,6 +55,10 @@ type qoderConfigYAML struct {
 	// lost on the next reload: the overlay's Order lived only in process memory
 	// and the panel could not tell the difference.
 	ModelOrder yaml.Node `yaml:"model_order"`
+	// ModelContext is the panel's persisted per-model context-window override,
+	// as {modelID: tokens}. Without it a tier picked in the panel would be lost
+	// on restart and silently revert to the upstream default tier.
+	ModelContext yaml.Node `yaml:"model_context"`
 }
 
 // Default URL tries localhost first (works for both bare-metal and Docker
@@ -80,6 +84,8 @@ func configure(raw []byte) {
 	var nextHiddenModels []string
 	var nextModelOrder []string
 	var modelOrderSet bool
+	var nextModelContext map[string]int64
+	var modelContextSet bool
 	if len(raw) > 0 {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
@@ -134,6 +140,15 @@ func configure(raw []byte) {
 						modelOrderSet = true
 					}
 				}
+				// 同上：键缺失表示这份配置没提覆盖，必须保留现状；显式空映射
+				// 才是"清空所有覆盖"。
+				if configDoc.ModelContext.Kind != 0 {
+					contexts, ctxErr := normalizedContextOverrideConfig(configDoc.ModelContext)
+					if ctxErr == nil {
+						nextModelContext = contexts
+						modelContextSet = true
+					}
+				}
 			}
 		}
 	}
@@ -169,6 +184,11 @@ func configure(raw []byte) {
 	// must leave any in-process order alone rather than clearing it.
 	if modelOrderSet {
 		syncOverlayModelOrder(nextModelOrder)
+	}
+	// Same rule for the context overrides: absent key keeps whatever the panel
+	// has already set in-process; an explicit (possibly empty) map replaces it.
+	if modelContextSet {
+		replaceContextOverrides(nextModelContext)
 	}
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureCheckinLoop()

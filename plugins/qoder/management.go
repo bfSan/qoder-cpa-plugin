@@ -139,6 +139,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/models", Description: "List the effective model catalog plus plugin-owned overlay state. Add ?refresh=1 to re-pull the upstream model list instead of serving the cached one."},
 			{Method: http.MethodPut, Path: base + "/models", Description: "Replace the plugin-owned model overlay."},
 			{Method: http.MethodPost, Path: base + "/models/action", Description: "Apply one model action: hide, restore, move or add."},
+			{Method: http.MethodGet, Path: base + "/models/context", Description: "Get the persistent per-model context-window overrides."},
+			{Method: http.MethodPost, Path: base + "/models/context", Description: "Set or clear one per-model context-window override (body: {id, context_length}; omit or null context_length to clear and fall back to the upstream default tier)."},
 			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start a CN or Intl Qoder device-authorization login (body: {region})."},
 			{Method: http.MethodPost, Path: base + "/oauth/poll", Description: "Poll a plugin-owned Qoder device-authorization login (body: {state})."},
 			{Method: http.MethodPost, Path: base + "/accounts/disabled", Description: "Manually enable or disable one account (body: {auth_index, disabled}). Manual state is recorded so lifecycle automation will not silently re-enable it."},
@@ -389,6 +391,12 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelOverlayWrite(req)))
 	case req.Method == http.MethodPost && path == base+"/models/action":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelOverlayAction(req)))
+	case req.Method == http.MethodGet && path == base+"/models/context":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
+			"model_context": currentContextOverrides(),
+		}))
+	case (req.Method == http.MethodPost || req.Method == http.MethodPut) && path == base+"/models/context":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelContextWrite(req)))
 	case req.Method == http.MethodPost && path == base+"/oauth/start":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManagementOAuthStart(req)))
 	case req.Method == http.MethodPost && path == base+"/oauth/poll":

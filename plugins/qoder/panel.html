@@ -131,34 +131,38 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 .modal-ft button.sec:hover{background:var(--btn-sec-hover)}
 .mut{color:var(--mut)}
 .model-rows{display:flex;flex-direction:column;gap:6px;max-height:560px;overflow:auto;padding-right:2px}
-/* 操作列必须按内容留足宽度：模型 ID 再长也只在自己的列里换行，不能把按钮挤变形。
-   最后一列下限 240px，来自实测而不是估计：Qoder 能出现的最宽一档（隐藏/恢复 +
-   自定义 + 冷却 999 + 已隐藏）在 headless Chrome 里量得 235.4px，240px 在其之上，
-   又比旧值 290px 少 50px —— 那 50px 正是让整表挤不进容器的部分。上限用 max-content
-   兜底，真出现更宽的标签时这一列会变宽而不是裁掉内容。 */
+/* 操作列按内容精确贴合（纯 max-content，不给 px 下限）。给固定下限看似稳妥，实际
+   是拿"理论上最宽的一档"（移除/恢复 + 自定义 + 冷却 999 + 已隐藏，实测 235.4px）
+   去占位，而真实账号很少同时命中这四个标签——常见最宽只到 174px（移除 + 自定义 +
+   冷却 999）。那多出来的 60px 从 CN / Intl 身上扣走，直接导致档位列表被省略号截断。
+   max-content 会取"该列里最宽的那一行"，够宽就不多占，真出现四标签并存时也只会变宽，
+   不会把按钮压变形——两种情形都优于固定下限。 */
 /* 轨道数为 6：排序 / ID / 模型名 / CN / Intl / 操作。轨道数必须与 renderModels
    每行输出的单元格数一致 —— 少一条时多出来的单元格会掉进隐式行，操作按钮被挤到
    第二行。
 
-   ID 与模型名两列取固定宽（130px / 122px）而不是 minmax(...,1fr)，是刻意的：1fr
-   会去分走剩余空间，而事实列才是需要那点空间的地方。这两列的内容都有
-   overflow-wrap:anywhere，超长时换行而不是溢出，所以固定宽不会裁掉任何东西；把
-   余量全部让给 CN / Intl，最长的那行「思考 默认 medium（low/medium/xhigh）」
-   （实测 217.4px）才能在常见窗口里完整显示。
+   ID 与模型名两列取固定宽而不是 minmax(...,1fr)，是刻意的：1fr 会去分走剩余空间，
+   而事实列才是需要那点空间的地方。两列的值取自真实目录的实测宽度——ID 最宽
+   qmodel_latest/kmodel_latest = 98px，模型名最宽 Worst-Case-Model = 104px（各留
+   一点余量取 106 / 110）。这两列都用 overflow-wrap:anywhere，超长时换行而不是溢出，
+   所以贴着实测值取不会裁掉任何东西；省下的每一像素都归 CN / Intl。
 
    下限之和必须装得进面板的可用宽度，否则整表天生比容器宽、永远挂着一条横向滚动条。
-   约束取下限更紧的那档：1024px 宽窗口（桌面最小合理宽度）下容器内宽
-   = 1024 − .wrap 左右 padding 32 − .card padding 32 − 边框 2 = 958px。
-   下限合计 880px + 轨道间隙 50px + 行内边距 20px = 950px ≤ 958px。
-   在 1280px 窗口下容器内宽 1034px，多出的 84px 全部归 CN / Intl，各得 222px，
-   比那行 217.4px 的档位列表宽出 4.6px —— 留这点余量不是随手加的：按 217px 配平
-   时 0.4px 的差就足以触发 text-overflow，省略号会在本可以完整显示时出现。
+   约束取最紧的那档：1024px 窗口是桌面最小合理宽度，减去浏览器纵向滚动条约占的 15px
+   后视口 1009px，再减 .wrap 左右 padding 32 与 .card padding 32 及边框 2，容器内宽
+   约 943px。固定轨道合计 38+106+110+180+180 = 614px，即使操作列取最宽的一档
+   （实测 235.4px），加轨道间隙 50px 与行内边距 20px 共 920px ≤ 943px，余 23px。
+   min-width 正是照这个最坏情形取 920px。
+
+   在 1280px 窗口下容器内宽 1034px：真实数据里操作列通常只有 42–103px，扣掉后
+   CN / Intl 各得 300px 以上，远宽于最长的那行「思考 默认 medium（low/medium/xhigh）」
+   （实测 217.4px），因此不再出现省略号。
 
    再长的档位列表（上游报的档位数不定）由 .realm-facts>span 的省略号收尾。
    改这些数字前先复核不等式，panel.test.js 里有一条守卫盯着它。 */
 .model-table-wrap{overflow-x:auto;max-width:100%}
-.model-table{min-width:950px}
-.model-head,.model-row{display:grid;grid-template-columns:38px 126px 118px minmax(180px,1fr) minmax(180px,1fr) minmax(238px,max-content);align-items:center;gap:10px;padding:8px 10px}
+.model-table{min-width:920px}
+.model-head,.model-row{display:grid;grid-template-columns:38px 106px 110px minmax(180px,1fr) minmax(180px,1fr) max-content;align-items:center;gap:10px;padding:8px 10px}
 .model-head{color:var(--mut);font-size:12px;font-weight:700;border-bottom:1px solid var(--border)}
 .model-row{border:1px solid var(--border);border-radius:8px;background:var(--surface)}
 .drag-handle{cursor:grab;touch-action:none}.drag-handle:active{cursor:grabbing}
@@ -175,8 +179,20 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
    难懂得多。完整档位列表仍在 span 的 title 里。 */
 .realm-facts>span{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .realm-facts span:first-child{color:var(--fg)}
+/* 档位行例外：里面是可点的按钮，绝不能被 overflow:hidden 裁掉半个 —— 半个按钮点不到，
+   看起来还像渲染坏了。它改为允许换行，窄列下按钮折到下一行，每个仍完整可点。 */
+.realm-facts>span.realm-facts-ctx{overflow:visible;text-overflow:clip;white-space:normal}
 /* 当前实际生效的上下文档位：加粗 + 主色，让操作者一眼看出用的是哪一档 */
 .realm-facts .ctx-default{color:var(--acc);font-weight:700}
+/* 档位按钮：不用下拉，平铺成一排可点的档位，点哪个哪个生效。
+   未生效的做成"低调可点"（次要色 + 无边框），生效的用主色加粗 —— 视觉重量差把
+   "哪一档在用"和"还能点哪些"分开，不需要额外图例。 */
+.ctx-tier{display:inline-block;padding:0 3px;margin:0;border:0;background:none;color:var(--mut);font:inherit;font-size:12px;line-height:1.35;cursor:pointer;border-radius:4px}
+.ctx-tier:hover{background:var(--btn-sec-hover);color:var(--fg)}
+.ctx-tier:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.ctx-tier-on{color:var(--acc);font-weight:700;cursor:default}
+.ctx-tier-on:hover{background:none;color:var(--acc)}
+.ctx-sep{color:var(--mut);padding:0 1px}
 .model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow-wrap:anywhere}
 /* 模型名列：上游 display_name 是人类可读名，可能带空格和斜杠。
    与 .model-name 不同，这里不设 white-space:nowrap —— ID 列已经用 anywhere 换行，
@@ -874,7 +890,7 @@ async function loadModels(toastOnError,refresh){
     if(d.persistent) parts.push("隐藏列表保存在插件配置中");
     parts.push("排序保存到插件配置（拖拽 ⠿ 手柄或聚焦手柄后按 ↑ / ↓ 键，改动即时写入）");
     if(hasRegionCatalog){
-      parts.push("上下文为分区的可选档位（加粗项为当前实际生效档位，只读）");
+      parts.push("上下文为分区的可选档位（加粗项为当前实际生效档位，点其它档位即可切换，改动即时保存）");
     }else{
       // 降级时不画分区列，也就没有"未加载"这回事——说清楚是后端没给数据。
       parts.push("后端未返回分区对照数据（region_models），暂不显示 CN / Intl 列");
@@ -955,12 +971,15 @@ function thinkingText(t){
 // contextFactsHTML 渲染分区的上下文档位，并把【真正生效的那一档】加粗高亮。
 //
 // 加粗的依据是 r.context_length，不是 context_tiers 里的 is_default：后者只是上游
-// 自报的默认档，不等于网关实际采用的档位。后端的 effectiveCtx（models.go）已经算好
-// 了真正生效的值——有 default 档时取它，否则取 max_input_tokens——面板与它对齐即可，
-// 与 WorkBuddy 面板的同一函数保持一致的语义（两边本就共享这套布局）。
+// 自报的默认档，不等于网关实际采用的档位。后端算好的生效值（上游默认档，或被操作者
+// 覆盖后的值）就是这个字段，面板与它对齐即可，与 WorkBuddy 面板的同一函数保持一致的
+// 语义（两边本就共享这套布局）。
+//
+// 每个档位是一个可点的按钮：点哪个哪个生效。不用下拉是刻意的 —— 档位通常只有 2~3 个，
+// 平铺出来一眼就能看到全部选项和当前生效项，下拉要展开才知道有什么、选完还要再确认一次。
 // 键名兼容三种历史形状：context_tiers 优先（对象数组，带 is_default），
 // 其次是 context_options / supported_context_lengths（纯数字数组）。
-function contextFactsHTML(r){
+function contextFactsHTML(r,modelId){
   const positive=values=>values.map(v=>Number(v)).filter(v=>Number.isFinite(v)&&v>0);
   let values=[];
   const tiers=Array.isArray(r.context_tiers)?r.context_tiers.filter(t=>t&&typeof t==="object"):[];
@@ -974,43 +993,54 @@ function contextFactsHTML(r){
   const rawEffective=Number(r.context_length);
   const hasEffective=Number.isFinite(rawEffective)&&rawEffective>0;
   const effectiveTitle="当前生效档位 — CPA 与客户端看到的就是这一档";
+  const id=asText(modelId||"");
   if(!values.length){
     if(!hasEffective) return "未上报";
+    // 没有档位表就无从选起：照旧显示生效值，但不可点。
     return `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(contextLabel(rawEffective))}</b>`;
   }
   const label=tiers.length
     ? (t=>asText(t.label||"").trim()||contextLabel(t.tokens))
     : (v=>contextLabel(v));
   const items=tiers.length?tiers:values;
-  // 生效值恰好落在某一档就地加粗；它不在档位表里（上游默认档 > 最大能力这类）
-  // 时在末尾补一个加粗项，而不是静默丢掉——丢掉会让整行没有任何加粗项，看起来
-  // 像是"没生效档位"，恰好抹掉这里最该传达的信息。
-  let bolded=false;
   const parts=items.map(item=>{
     const v=tiers.length?Number(item.tokens):item;
     const text=tiers.length?label(item):label(v);
-    if(hasEffective&&v===rawEffective){
-      bolded=true;
-      return `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(text)}</b>`;
+    const active=hasEffective&&v===rawEffective;
+    if(!id){
+      return active
+        ? `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(text)}</b>`
+        : esc(text);
     }
-    return esc(text);
+    // 生效项带 aria-pressed，屏幕阅读器与测试都能据此判断哪一档在生效，不必
+    // 依赖加粗这一种视觉信号。
+    const cls=active?"ctx-tier ctx-tier-on":"ctx-tier";
+    const hint=active
+      ? `当前生效档位（${text}）。点击可换档。`
+      : `点击改用 ${text} 上下文窗口`;
+    return `<button type="button" class="${cls}" data-ctx-tier="${esc(id)}" data-ctx-tokens="${v}" aria-pressed="${active?"true":"false"}" title="${esc(hint)}">${esc(text)}</button>`;
   });
+  // 生效值不在档位表里（上游默认档 > 最大能力这类）时在末尾补一个加粗项，而不是
+  // 静默丢掉——丢掉会让整行没有任何生效标记，看起来像"没有生效档位"，恰好抹掉这里
+  // 最该传达的信息。
+  let bolded=hasEffective&&items.some(item=>Number(tiers.length?item.tokens:item)===rawEffective);
   if(hasEffective&&!bolded){
     parts.push(`<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(contextLabel(rawEffective))}</b>`);
   }
-  return parts.join(" / ");
+  return parts.join('<span class="ctx-sep">/</span>');
 }
 // regionCell 把一行的某一区渲染成三行事实。
 // present 显示实际值；absent 显示 "—"（该区有目录但没这个模型）；
 // not_loaded 显示 "未加载"（该区没有账号/目录）。两者语义不同，不能混同。
-function regionCell(m, region){
+// modelId 只用于把上下文档位渲染成可点按钮；为空时退化为纯文本（不可点）。
+function regionCell(m, region, modelId){
   const r=m&&m[region];
   if(!r||r.status==="not_loaded"||r.present===null) return "未加载";
   if(r.status==="absent"||r.present===false) return "—";
   if(r.status!=="present"&&r.present!==true) return "未加载";
   const credit=creditText(r.price_factor);
   const think=thinkingText(r.thinking||{});
-  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span title="该分区上报的上下文档位；加粗项为当前实际生效档位">上下文 ${contextFactsHTML(r)}</span></div>`;
+  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span class="realm-facts-ctx" title="该分区上报的上下文档位；加粗项为当前实际生效档位，点其它档位即可切换">上下文 ${contextFactsHTML(r,modelId)}</span></div>`;
 }
 // modelDisplayLabel 回答「这个代号到底是什么模型」。
 //
@@ -1057,7 +1087,7 @@ function renderModels(){
       const actions=m.hidden
         ? `<button type="button" class="ftag" data-model-action="restore" data-model-id="${escId}">恢复</button>`
         : `<button type="button" class="ftag" data-model-action="toggle" data-model-id="${escId}">${m.custom?"移除":"隐藏"}</button>`;
-      return `<div class="model-row" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span>${nameCell}<span class="realm-cell">${regionCell(r,"cn")}</span><span class="realm-cell">${regionCell(r,"intl")}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
+      return `<div class="model-row" data-model-id="${escId}" role="row">${handle}<span class="model-id" title="${escId}">${escId}</span>${nameCell}<span class="realm-cell">${regionCell(r,"cn",id)}</span><span class="realm-cell">${regionCell(r,"intl",id)}</span><span class="model-actions">${actions}${tags.join("")}</span></div>`;
     }).join("")+`</div></div>`;
   bindModelActions();
 }
@@ -1097,6 +1127,21 @@ function modelTags(m){
 // bindModelActions 用 data-* 属性绑定事件，不再使用 inline onclick：
 // 模型 ID 里的引号会破坏内联 HTML，dataset 没有这个问题。
 function bindModelActions(){
+  // 上下文档位按钮：点哪一档就切到哪一档。与隐藏/恢复不同，这里不需要二次确认 ——
+  // 档位是可逆的（再点回原档即可），而每次点击都立即写盘，操作者能看到加粗位置跟着走。
+  document.querySelectorAll("[data-ctx-tier]").forEach(el=>{
+    if(el._ctxBound) return;
+    el._ctxBound=true;
+    el.addEventListener("click",()=>{
+      const id=el.dataset.ctxTier;
+      const tokens=Number(el.dataset.ctxTokens);
+      // 已经是生效档就不重复提交：一次无变化的写盘只会产生一个多余请求，还可能在
+      // 界面上闪一下。直接返回更贴近"点它没有变化"的直觉。
+      if(el.getAttribute("aria-pressed")==="true") return;
+      if(!Number.isFinite(tokens)||tokens<=0) return;
+      return setContextTier(id,tokens);
+    });
+  });
   document.querySelectorAll("[data-model-action]").forEach(el=>{
     if(el._bound) return;
     el._bound=true;
@@ -1214,6 +1259,44 @@ function toggleModel(id){
   modelAction("hide",id);
 }
 function restoreModel(id){modelAction("restore",id)}
+// setContextTier 把某个模型的上下文档位切到 tokens。
+//
+// 与保存排序同一套道理：两条写入缺一不可。POST /models/context 让插件内存里的
+// 覆盖立刻生效（本次会话马上按新档位发请求），PATCH config 把它落到 config.yaml
+// 以便重启后由 reconfigure 恢复。只做前者，重启就悄悄回到旧档位；只做后者，
+// 要等 CPA 重载插件才生效 —— 而它不一定会重载。
+//
+// 写入后必须读回一次再判定成功：后端若还没注册 model_context 配置字段，PATCH 会
+// 返回 200 但字段被丢弃，此时面板显示"已切换"就是假报告，下次渲染又跳回旧档位。
+// 与其让操作者自己发现，不如当场说清楚。
+async function setContextTier(id,tokens){
+  const previous=lastRegionModels.map(m=>Object.assign({},m));
+  try{
+    const d=await api("/models/context",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id:id,context_length:tokens})});
+    if(d&&d.success===false) throw new Error(asText(d.error)||"插件拒绝了这次切换");
+    const overrides=d&&d.model_context?d.model_context:{};
+    const response=await managementAPI("/plugins/qoder/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model_context:overrides})});
+    if(response&&response.error) throw new Error(asText(response.error));
+  }catch(e){
+    lastRegionModels=previous;
+    renderModels();
+    toast("切换上下文档位失败","err",String(e&&e.message||e));
+    return false;
+  }
+  await loadModels(false,false);
+  // 读回确认：生效值真的变成了请求的那一档吗？没变说明后端没接受（例如目录里
+  // 没有这个模型的档位数据），此时必须报出来而不是留着"已切换"的印象。
+  const applied=lastRegionModels.some(m=>String(m.id)===String(id)
+    && ((m.cn&&Number(m.cn.context_length)===tokens)||(m.intl&&Number(m.intl.context_length)===tokens)));
+  if(!applied){
+    toast("档位未生效","warn","插件配置没有保留新的上下文档位，请确认后端已支持 model_context 字段");
+    return false;
+  }
+  toast(`上下文档位已切换到 ${contextLabel(tokens)}`,"ok","该模型的请求窗口与 CPA 对外声明都已更新");
+  return true;
+}
 async function addModel(){
   const input=document.getElementById("modelAddInput");
   const id=String(input.value||"").trim();

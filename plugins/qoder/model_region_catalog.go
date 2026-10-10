@@ -157,6 +157,21 @@ func buildPanelRegionModels() []map[string]any {
 			}
 			row[region] = missingRegionCell(loaded[region])
 		}
+		// 操作者手工选定的档位覆盖的是"这个模型用多大窗口"，与区域无关：面板
+		// 一列展示两区，让同一模型在两区显示同一个生效值，操作者不必理解
+		// "CN 默认 200K、Intl 默认 1M" 这类上游差异。覆盖值按 ID 存，这里统一
+		// 应用到两区；没有覆盖时保持上游默认档，与加这个功能前完全一致。
+		if override, ok := contextOverrideForModel(id); ok {
+			for _, region := range regions {
+				cell, isCell := row[region].(map[string]any)
+				if !isCell || cell["present"] != true {
+					continue
+				}
+				cell["context_length"] = override
+				cell["context_override"] = true
+			}
+		}
+		row["context_options"] = supportedContextTiersFor(id)
 		rows = append(rows, row)
 	}
 	return rows
