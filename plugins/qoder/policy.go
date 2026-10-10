@@ -286,6 +286,13 @@ func displayNoteWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prev
 		} else {
 			parts = append(parts, "积分未知")
 		}
+	case cr.NoAddOnPack && cr.TotalUsed == 0:
+		// The account has no quota at all: the gateway omitted its add-on pack and
+		// reports every balance as zero. Saying "耗尽 · 余0 已用0" here is actively
+		// misleading — it reads as "spent everything", which sends the operator
+		// looking for usage that never happened. Nothing was spent; there is simply
+		// no pack on this account.
+		parts = append(parts, "无可用额度包（上游未下发）")
 	case isCreditsExhausted(cr):
 		parts = append(parts, fmt.Sprintf("耗尽 · 余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
 	default:

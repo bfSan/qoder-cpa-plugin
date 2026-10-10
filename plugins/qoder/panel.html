@@ -370,7 +370,18 @@ function asText(v){if(v==null)return "";if(typeof v==="string")return v;if(typeo
 function progressHTML(c){
   // total uses size when known; remain = spendable, used = cycle spend.
   // Check-in adds packs → size/remain go UP (grant). Chat spend → used goes UP, remain DOWN.
-  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)))return '<div class="pb"><div class="pb-label"><span>可用积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  // 三值全 0 有两种截然不同的含义，必须分开说：
+  //   fetched_at 有值 → 数据已经取回来了，只是这个账号的额度确实为 0；
+  //   fetched_at 缺失 → 还没取到数据，此时才该显示加载中。
+  // 以前一律显示"加载中…"并转圈，于是零额度账号（如额外额度包未下发的 Intl 账号）
+  // 会永远停在转圈状态，看起来像刷新失败。
+  if(!c)return '<div class="pb"><div class="pb-label"><span>可用积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  if(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)){
+    if(!c.fetched_at)return '<div class="pb"><div class="pb-label"><span>可用积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+    // 已取回且为零：上游没给这个账号下发额度包，不是"用完了"。
+    const zeroNote=c.no_addon_pack?'上游未下发额度包':'余额为 0';
+    return `<div class="pb"><div class="pb-label"><span>可用 0</span><span>${esc(zeroNote)}</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div><div class="pb-meta">剩余 0 · 已用 0${c.quota_exceeded?' · 上游标记额度已用尽':''}</div></div>`;
+  }
   const remain=c.total_remain||0, used=c.total_used||0;
   const size=c.total_size||(remain+used);
   const total=size>0?size:(remain+used);
@@ -478,7 +489,9 @@ let oauthGeneration=0;
 // Lazy-load: fetch credits for all cards that lack them, concurrently.
 // Each card fetches independently; failed ones retry once after 2s.
 function lazyLoadCredits(accounts){
-  const need=accounts.filter(a=>!a.disabled);
+  // 已禁用的账号同样要取额度：账号往往正是"因为余额看起来是 0"才被停用的，
+  // 跳过它会让卡片永远停在加载态，操作者也就无从判断该不该重新启用。
+  const need=accounts.slice();
   if(!need.length) return;
   need.forEach(a=>{
     const idx=a.auth_index;
@@ -1461,7 +1474,9 @@ async function loadInitial(){
 function refreshAllCredits(){
   const accounts=lastAccounts||[];
   if(!accounts.length) return;
-  accounts.forEach(a=>{if(!a.disabled) lazyLoadCredits([a])});
+  // 禁用账号也要取：它很可能正是因为余额显示为 0 才被停用，跳过会让卡片
+  // 一直停在加载态，操作者没法判断该不该重新启用。
+  lazyLoadCredits(accounts);
 }
 loadInitial();
 </script>

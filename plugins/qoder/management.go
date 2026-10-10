@@ -42,6 +42,13 @@ type creditsSummary struct {
 	// timestamp — not only the numbers — when diagnosing frozen credits.
 	FetchedAt string           `json:"fetched_at,omitempty"`
 	Packages  []packageSummary `json:"packages"`
+	// QuotaExceeded mirrors the gateway's own isQuotaExceeded verdict. An account
+	// with no quota at all reports every balance as zero, which is
+	// indistinguishable from a spent account if we only look at the numbers.
+	QuotaExceeded bool `json:"quota_exceeded,omitempty"`
+	// NoAddOnPack means the gateway omitted addOnQuota entirely, i.e. this account
+	// has no add-on/sign-in pack rather than an empty one.
+	NoAddOnPack bool `json:"no_addon_pack,omitempty"`
 }
 
 type packageSummary struct {

@@ -132,7 +132,11 @@ type quotaUsageResponse struct {
 		Remaining float64 `json:"remaining"`
 		Unit      string  `json:"unit"`
 	} `json:"userQuota"`
-	AddOnQuota struct {
+	// AddOnQuota is a pointer because the gateway omits it entirely (null) for an
+	// account that has no add-on pack at all. Treating null as a zero-valued pack
+	// makes "this account was never given a pack" indistinguishable from "the pack
+	// is used up", and the two need different wording in the panel.
+	AddOnQuota *struct {
 		Total     float64 `json:"total"`
 		Used      float64 `json:"used"`
 		Remaining float64 `json:"remaining"`
@@ -163,15 +167,32 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
 	if err := json.Unmarshal(resp.Body, &q); err != nil {
 		return nil, fmt.Errorf("quota/usage parse: %w", err)
 	}
+	addOnRemain := int64(0)
+	addOnUsed := int64(0)
+	addOnTotal := int64(0)
+	packCount := 1
+	packages := []packageSummary{
+		{Name: "基础额度", Remain: int64(q.UserQuota.Remaining), Used: int64(q.UserQuota.Used), Size: int64(q.UserQuota.Total)},
+	}
+	if q.AddOnQuota != nil {
+		addOnRemain = int64(q.AddOnQuota.Remaining)
+		addOnUsed = int64(q.AddOnQuota.Used)
+		addOnTotal = int64(q.AddOnQuota.Total)
+		packCount = 2
+		packages = append(packages, packageSummary{
+			Name: "赠送/签到额度", Remain: addOnRemain, Used: addOnUsed, Size: addOnTotal,
+		})
+	}
 	sum := &creditsSummary{
-		TotalRemain: int64(q.UserQuota.Remaining + q.AddOnQuota.Remaining),
-		TotalUsed:   int64(q.UserQuota.Used + q.AddOnQuota.Used),
-		TotalSize:   int64(q.UserQuota.Total + q.AddOnQuota.Total),
-		PackCount:   2,
-		Packages: []packageSummary{
-			{Name: "基础额度", Remain: int64(q.UserQuota.Remaining), Used: int64(q.UserQuota.Used), Size: int64(q.UserQuota.Total)},
-			{Name: "赠送/签到额度", Remain: int64(q.AddOnQuota.Remaining), Used: int64(q.AddOnQuota.Used), Size: int64(q.AddOnQuota.Total)},
-		},
+		TotalRemain: int64(q.UserQuota.Remaining) + addOnRemain,
+		TotalUsed:   int64(q.UserQuota.Used) + addOnUsed,
+		TotalSize:   int64(q.UserQuota.Total) + addOnTotal,
+		PackCount:   packCount,
+		Packages:    packages,
+		// Carry the gateway's own verdict so the panel can say "no quota" instead
+		// of inferring exhaustion from a zero balance.
+		QuotaExceeded: q.IsQuotaExceeded,
+		NoAddOnPack:   q.AddOnQuota == nil,
 	}
 	return sum, nil
 }
@@ -280,10 +301,15 @@ func isCreditsExhausted(cr *creditsSummary) bool {
 	if cr.TotalRemain > 0 {
 		return false
 	}
-	// remain==0: exhausted only when we know there was/is a package total
-	// (used>0, size>0, or packages present). Pure zero with no packages = no data.
-	if cr.TotalUsed > 0 || cr.TotalSize > 0 {
-		return true
+	// An account the gateway reports as having no quota at all — no add-on pack,
+	// nothing ever used and no capacity — has not run out of anything. Every
+	// balance is zero because it was never given a pack, so treating this as
+	// exhaustion parks a valid credential, and the operator cannot tell that
+	// apart from a genuinely spent account.
+	if cr.NoAddOnPack && cr.TotalUsed == 0 && cr.TotalSize == 0 {
+		return false
 	}
-	return len(cr.Packages) > 0
+	// remain==0: exhausted only when we know there was/is a package total
+	// (used>0 or size>0). pure zero with no real total = no data.
+	return cr.TotalUsed > 0 || cr.TotalSize > 0
 }
