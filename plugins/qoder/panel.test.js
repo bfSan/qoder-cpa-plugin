@@ -318,7 +318,7 @@ test("thinking reports the default level, unknown, unsupported and off_only", ()
 
 // ------------------------------------------------------- 5. 上下文默认档高亮
 
-test("the current context tier is bolded, for tiers and both legacy key shapes", () => {
+test("the effective context tier is bolded, for tiers and both legacy key shapes", () => {
   const { context } = loadPanel();
   const line = facts => {
     const html = context.regionCell({ cn: { status: "present", present: true, ...facts } }, "cn");
@@ -326,36 +326,54 @@ test("the current context tier is bolded, for tiers and both legacy key shapes",
     assert.ok(match, `no 上下文 fact in ${html}`);
     return match[1];
   };
+  const bolded = text => `<b class="ctx-default" title="当前生效档位 — CPA 与客户端看到的就是这一档">${text}</b>`;
   // context_tiers is the current key: objects with label/tokens/is_default.
   const tiers = line({
+    context_length: 200000,
     context_tiers: [
       { label: "200K", tokens: 200000, is_default: true },
       { label: "400K", tokens: 400000 },
       { label: "1M", tokens: 1000000 },
     ],
   });
-  assert.equal(
-    tiers,
-    "<b class=\"ctx-default\" title=\"当前默认档位\">200K</b> / 400K / 1M",
-  );
+  assert.equal(tiers, `${bolded("200K")} / 400K / 1M`);
+  // The bold must follow context_length, NOT is_default. The backend advertises
+  // a 1M-capable model at 1M even when the provider's own default tier is 200K
+  // (models.go: effectiveCtx only falls back to the marked default when
+  // max_input_tokens is absent), so bolding is_default would label a tier
+  // nobody is served as the live one — the exact misreport this row exists to
+  // prevent. This fixture is that disagreement, stated explicitly.
+  const disagrees = line({
+    context_length: 1000000,
+    context_tiers: [
+      { label: "200K", tokens: 200000, is_default: true },
+      { label: "1M", tokens: 1000000 },
+    ],
+  });
+  assert.equal(disagrees, `200K / ${bolded("1M")}`);
+  assert.doesNotMatch(disagrees, /<b[^>]*>200K<\/b>/);
   // context_options is the legacy key; supported_context_lengths the older one.
-  const options = line({ context_options: [300000, 600000, 1000000], default_context_length: 600000 });
-  assert.equal(options, "300K / <b class=\"ctx-default\" title=\"当前默认档位\">600K</b> / 1M");
-  const legacy = line({ supported_context_lengths: [300000, 600000], default_context_length: 300000 });
-  assert.equal(legacy, "<b class=\"ctx-default\" title=\"当前默认档位\">300K</b> / 600K");
+  const options = line({ context_length: 600000, context_options: [300000, 600000, 1000000], default_context_length: 600000 });
+  assert.equal(options, `300K / ${bolded("600K")} / 1M`);
+  const legacy = line({ context_length: 300000, supported_context_lengths: [300000, 600000], default_context_length: 300000 });
+  assert.equal(legacy, `${bolded("300K")} / 600K`);
   // context_tiers wins when both are present.
-  assert.equal(line({ context_tiers: [{ label: "128K", tokens: 128000, is_default: true }], context_options: [300000] }), "<b class=\"ctx-default\" title=\"当前默认档位\">128K</b>");
-  // Without a default tier the list renders exactly as before — nothing bolded.
-  const noDefault = line({ context_options: [300000, 600000] });
-  assert.equal(noDefault, "300K / 600K");
-  assert.doesNotMatch(noDefault, /ctx-default/);
-  assert.doesNotMatch(line({ context_options: [300000], default_context_length: 0 }), /ctx-default/);
-  // A default that is not one of the offered tiers must not invent a tier.
-  const foreign = line({ context_options: [300000, 600000], default_context_length: 999999 });
-  assert.equal(foreign, "300K / 600K");
-  assert.doesNotMatch(foreign, /999K|ctx-default/);
+  assert.equal(
+    line({ context_length: 128000, context_tiers: [{ label: "128K", tokens: 128000 }], context_options: [300000] }),
+    bolded("128K"),
+  );
+  // No advertised value at all: the list renders unadorned rather than guessing
+  // one of the tiers. Unknowable must stay visibly unknown.
+  const noEffective = line({ context_options: [300000, 600000] });
+  assert.equal(noEffective, "300K / 600K");
+  assert.doesNotMatch(noEffective, /ctx-default/);
+  // An effective value outside the offered tiers is appended instead of being
+  // dropped: dropping it would leave the row with no bold at all, which reads
+  // as "no tier is live" — the one thing this row must never imply.
+  const foreign = line({ context_length: 750000, context_options: [300000, 600000], default_context_length: 750000 });
+  assert.equal(foreign, `300K / 600K / ${bolded("750K")}`);
   // Single-tier fallback when no option list is reported.
-  assert.equal(line({ context_length: 128000 }), "128K");
+  assert.equal(line({ context_length: 128000 }), bolded("128K"));
   assert.equal(line({}), "未上报");
 });
 
@@ -403,11 +421,13 @@ test("model action column never wraps and keeps a content-sized track", () => {
     Number(floor[1]) >= WIDEST_ACTION_SET_PX,
     `action track floor ${floor[1]}px is below the widest action set (${WIDEST_ACTION_SET_PX}px)`,
   );
-  assert.match(columns[1], /^minmax\(\s*\d+px/);
-  // The display-name track must be able to shrink-or-grow but never collapse:
-  // without a px floor a long model ID beside it squeezes the name to nothing,
-  // which is the exact confusion this column was added to remove.
-  assert.match(columns[2], /^minmax\(\s*\d+px/, "the model-name track needs a px floor");
+  // The ID and display-name tracks are fixed-width on purpose: both wrap through
+  // overflow-wrap:anywhere, so nothing is clipped, and every leftover pixel goes
+  // to the CN / Intl fact columns — which do NOT wrap and therefore need the
+  // room. A minmax(...,1fr) here would compete for exactly that space and
+  // truncate the thinking-tier list.
+  assert.match(columns[1], /^\d+px$/, "the model-ID track must be a fixed width");
+  assert.match(columns[2], /^\d+px$/, "the model-name track must be a fixed width");
   const minWidth = Number((rule(".model-table").match(/min-width:(\d+)px/) || [])[1] || 0);
   const padding = Number((rule(".model-head,.model-row").match(/padding:\d+px (\d+)px/) || [])[1] || 0);
   const floorSum = columns.reduce((sum, track) => {
@@ -416,6 +436,63 @@ test("model action column never wraps and keeps a content-sized track", () => {
   }, 0);
   assert.ok(minWidth >= floorSum, `.model-table min-width ${minWidth}px cannot fit the track floors (${floorSum}px)`);
   assert.ok(padding > 0, "row padding must be declared for the track sum to be meaningful");
+
+  // The table must also fit the panel it lives in. Checking only
+  // `min-width >= floorSum` (above) is exactly what let a 1090px table ship into
+  // a 1034px container: the track floors agreed with each other while the whole
+  // table overflowed its parent, so .model-table-wrap's overflow-x:auto produced
+  // a horizontal scrollbar at every window width.
+  //
+  // The binding constraint is the narrowest desktop window we support, 1024px,
+  // not .wrap's 1100px max-width. At 1024px the wrap is narrower than its cap, so
+  // the cap tells us nothing. Every value below is read from the shipped CSS so
+  // this guard keeps working when the padding changes.
+  const MIN_DESKTOP_VIEWPORT = 1024;
+  const wrapMax = Number((rule(".wrap").match(/max-width:(\d+)px/) || [])[1] || 0);
+  const wrapPad = Number((rule(".wrap").match(/padding:\d+px (\d+)px/) || [])[1] || 0);
+  const cardPad = Number((rule(".card").match(/padding:(\d+)px/) || [])[1] || 0);
+  assert.ok(wrapMax && wrapPad, "could not derive the panel's available width from CSS");
+  const wrapWidth = Math.min(wrapMax, MIN_DESKTOP_VIEWPORT);
+  const available = wrapWidth - wrapPad * 2 - cardPad * 2 - 2;
+  // Grid gaps and the row's own horizontal padding sit inside the table too.
+  const gap = Number((rule(".model-head,.model-row").match(/gap:(\d+)px/) || [])[1] || 0);
+  const inlinePad = Number((rule(".model-head,.model-row").match(/padding:\d+px (\d+)px/) || [])[1] || 0);
+  const needed = floorSum + gap * (columns.length - 1) + inlinePad * 2;
+  assert.ok(
+    needed <= available,
+    `the model table needs ${needed}px (floors ${floorSum} + gaps ${gap * (columns.length - 1)} + padding ${inlinePad * 2}) `
+      + `but only ${available}px is available at a ${MIN_DESKTOP_VIEWPORT}px viewport, so it will always show a horizontal scrollbar`,
+  );
+  // min-width must not exceed what that same viewport offers either: a table
+  // wider than its container scrolls even when its tracks would have fit.
+  assert.ok(
+    minWidth <= available,
+    `.model-table min-width ${minWidth}px exceeds the ${available}px available at a ${MIN_DESKTOP_VIEWPORT}px viewport`,
+  );
+
+  // The CN / Intl columns should have room for the longest fact line they render
+  // at an ordinary desktop width, because that text does not wrap: under pressure
+  // it ellipsizes (see .realm-facts>span), which quietly hides tier detail. This
+  // asserts the facts are shown *in full* at 1280px; at 1024px they may ellipsize,
+  // which is the deliberate trade for not having a scrollbar there.
+  // Widest real value, measured in headless Chrome against this stylesheet:
+  // "思考 默认 medium（low/medium/xhigh）" = 217.4px. The requirement is set 2px
+  // above that on purpose: sizing the tracks to land exactly on 217px left the
+  // line 0.4px short, which was enough for text-overflow to fire and print an
+  // ellipsis on text that had room to fit. Sub-pixel shortfalls are real, so the
+  // guard has to demand a margin rather than the bare measured width.
+  const WIDEST_FACT_LINE_PX = 220;
+  const COMFORTABLE_VIEWPORT = 1280;
+  const wrapAtComfort = Math.min(wrapMax, COMFORTABLE_VIEWPORT);
+  const availableAtComfort = wrapAtComfort - wrapPad * 2 - cardPad * 2 - 2;
+  const leftoverAtComfort = availableAtComfort - floorSum - gap * (columns.length - 1) - inlinePad * 2;
+  const factFloors = columns.slice(3, 5).map(track => Number(track.match(/minmax\(\s*(\d+)px/)[1]));
+  const factWidth = Math.min(...factFloors) + leftoverAtComfort / 2;
+  assert.ok(
+    factWidth >= WIDEST_FACT_LINE_PX,
+    `CN/Intl tracks reach only ${factWidth.toFixed(0)}px at a ${COMFORTABLE_VIEWPORT}px viewport, `
+      + `but the longest fact line needs ${WIDEST_FACT_LINE_PX}px and cannot wrap, so it would ellipsize`,
+  );
 });
 
 // ---------------------------------------------- 7. 排序持久化只 PATCH 一个字段
@@ -584,6 +661,7 @@ test("region facts escape dynamic values and never use inline handlers", async (
         present: true,
         price_factor: 0.34,
         thinking: { status: "supported", default: "high", levels: ["low", "high"] },
+        context_length: 600000,
         context_tiers: [{ label: "600K", tokens: 600000, is_default: true }],
       },
       intl: { status: "absent", present: false },
@@ -593,10 +671,44 @@ test("region facts escape dynamic values and never use inline handlers", async (
   const rendered = panel2.elements.get("modelList").innerHTML;
   assert.match(rendered, /倍率 0\.34x/);
   assert.match(rendered, /思考 默认 high（low\/high）/);
-  assert.match(rendered, /<b class="ctx-default" title="当前默认档位">600K<\/b>/);
+  assert.match(rendered, /<b class="ctx-default" title="当前生效档位 — CPA 与客户端看到的就是这一档">600K<\/b>/);
   assert.match(rendered, /data-model-action="toggle"/);
   assert.doesNotMatch(rendered, /onclick=/);
   assert.doesNotMatch(rendered, /aria-label="上移/);
+});
+
+// The bold is the one thing in this row an operator reads as "this is what I
+// get". Guards the semantic against the tempting-but-wrong reading of
+// is_default, which is only the provider's own preference.
+test("the bolded context tier follows the advertised value, not is_default", async () => {
+  const panel = loadPanel();
+  panel.context.api = async () => ({
+    source: "dynamic",
+    models: [{ id: "qmodel_latest", name: "Qwen3.7-Max", hidden: false }],
+    region_models: [{
+      id: "qmodel_latest",
+      cn: {
+        status: "present",
+        present: true,
+        // Advertised 1M while the provider marks 200K as its default tier.
+        context_length: 1000000,
+        context_tiers: [
+          { label: "200K", tokens: 200000, is_default: true },
+          { label: "400K", tokens: 400000 },
+          { label: "1M", tokens: 1000000 },
+        ],
+      },
+      intl: { status: "absent", present: false },
+    }],
+  });
+  await panel.context.loadModels(false);
+  const rendered = panel.elements.get("modelList").innerHTML;
+  // The live tier is bolded...
+  assert.match(rendered, /<b class="ctx-default"[^>]*>1M<\/b>/);
+  // ...and the provider's default is not, even though is_default says so.
+  assert.doesNotMatch(rendered, /<b[^>]*>\s*200K\s*<\/b>/);
+  // The tier list itself stays complete — bolding shifts, it does not truncate.
+  assert.match(rendered, /200K \/ 400K \/ <b/);
 });
 
 test("region status is reported in the hint when the backend sends it", async () => {
@@ -1027,3 +1139,8 @@ test("an unchanged, still-persisted save reports success without a warning", asy
   assert.equal(toasts.length, 1, `expected only the success toast, got ${JSON.stringify(toasts)}`);
   assert.equal(toasts[0][1], "ok");
 });
+
+
+
+
+

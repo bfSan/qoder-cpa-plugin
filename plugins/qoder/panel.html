@@ -132,26 +132,50 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 .mut{color:var(--mut)}
 .model-rows{display:flex;flex-direction:column;gap:6px;max-height:560px;overflow:auto;padding-right:2px}
 /* 操作列必须按内容留足宽度：模型 ID 再长也只在自己的列里换行，不能把按钮挤变形。
-   最后一列下限 290px：Qoder 走的就是 WorkBuddy 那一套共享面板布局，沿用同一个
-   下限值，跨插件观感一致。对 Qoder 这其实是偏大的余量——Qoder 能出现的最宽一档
-   （移除/恢复 + 自定义 + 冷却 999 + 已隐藏）用 headless Chrome 实测只有 235.4px，
-   290px 比它宽 55px，所以只会更不容易换行。上限用 max-content 兜底，超过下限时
-   列只会变宽不会裁切内容。整表最小宽度由这些轨道加总决定。 */
+   最后一列下限 240px，来自实测而不是估计：Qoder 能出现的最宽一档（隐藏/恢复 +
+   自定义 + 冷却 999 + 已隐藏）在 headless Chrome 里量得 235.4px，240px 在其之上，
+   又比旧值 290px 少 50px —— 那 50px 正是让整表挤不进容器的部分。上限用 max-content
+   兜底，真出现更宽的标签时这一列会变宽而不是裁掉内容。 */
 /* 轨道数为 6：排序 / ID / 模型名 / CN / Intl / 操作。轨道数必须与 renderModels
    每行输出的单元格数一致 —— 少一条时多出来的单元格会掉进隐式行，操作按钮被挤到
-   第二行。模型名列取 minmax(150px,.9fr)：名字是给人看的短标签（"DeepSeek V4.1
-   Flash"），比 ID 短，但不设下限会在窄窗口被压成一两个字。 */
-.model-table-wrap{overflow-x:auto;max-width:100%}.model-table{min-width:1090px}
-.model-head,.model-row{display:grid;grid-template-columns:38px minmax(140px,1.1fr) minmax(150px,.9fr) minmax(200px,1fr) minmax(200px,1fr) minmax(290px,max-content);align-items:center;gap:10px;padding:8px 10px}
+   第二行。
+
+   ID 与模型名两列取固定宽（130px / 122px）而不是 minmax(...,1fr)，是刻意的：1fr
+   会去分走剩余空间，而事实列才是需要那点空间的地方。这两列的内容都有
+   overflow-wrap:anywhere，超长时换行而不是溢出，所以固定宽不会裁掉任何东西；把
+   余量全部让给 CN / Intl，最长的那行「思考 默认 medium（low/medium/xhigh）」
+   （实测 217.4px）才能在常见窗口里完整显示。
+
+   下限之和必须装得进面板的可用宽度，否则整表天生比容器宽、永远挂着一条横向滚动条。
+   约束取下限更紧的那档：1024px 宽窗口（桌面最小合理宽度）下容器内宽
+   = 1024 − .wrap 左右 padding 32 − .card padding 32 − 边框 2 = 958px。
+   下限合计 880px + 轨道间隙 50px + 行内边距 20px = 950px ≤ 958px。
+   在 1280px 窗口下容器内宽 1034px，多出的 84px 全部归 CN / Intl，各得 222px，
+   比那行 217.4px 的档位列表宽出 4.6px —— 留这点余量不是随手加的：按 217px 配平
+   时 0.4px 的差就足以触发 text-overflow，省略号会在本可以完整显示时出现。
+
+   再长的档位列表（上游报的档位数不定）由 .realm-facts>span 的省略号收尾。
+   改这些数字前先复核不等式，panel.test.js 里有一条守卫盯着它。 */
+.model-table-wrap{overflow-x:auto;max-width:100%}
+.model-table{min-width:950px}
+.model-head,.model-row{display:grid;grid-template-columns:38px 126px 118px minmax(180px,1fr) minmax(180px,1fr) minmax(238px,max-content);align-items:center;gap:10px;padding:8px 10px}
 .model-head{color:var(--mut);font-size:12px;font-weight:700;border-bottom:1px solid var(--border)}
 .model-row{border:1px solid var(--border);border-radius:8px;background:var(--surface)}
 .drag-handle{cursor:grab;touch-action:none}.drag-handle:active{cursor:grabbing}
 /* 隐藏行的排序轨占位：不可拖拽，但要占住轨道宽度，免得整行左移一格。 */
 .drag-gap{display:block;width:100%}
 .realm-cell{min-width:0}
-.realm-facts{display:flex;flex-direction:column;gap:2px;color:var(--mut);font-size:12px;white-space:nowrap}
+/* nowrap 挂在每个 span 上，不挂在容器上。容器是 stretch 的纵向 flex，把 nowrap
+   挂在容器上时这三行会连成一条不换行的长文本，文字墨水越过轨道边界压到邻列——
+   CN 的「（low/medium/xhigh）」压住 Intl 的「默认 high」就是这么来的。挂到 span
+   之后每行各自独立，并能在轨道内以省略号收尾。 */
+.realm-facts{display:flex;flex-direction:column;gap:2px;color:var(--mut);font-size:12px}
+/* 档位明细的长度取决于上游报了几个档位，轨道里没法预留一个"绝对够宽"的值。窄下去
+   时省略号收尾，好过让文字溢出到邻列：溢出看起来像两列的数据串在一起，比缺几个字
+   难懂得多。完整档位列表仍在 span 的 title 里。 */
+.realm-facts>span{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .realm-facts span:first-child{color:var(--fg)}
-/* 当前默认上下文档位：加粗 + 主色，让操作者一眼看出用的是哪一档 */
+/* 当前实际生效的上下文档位：加粗 + 主色，让操作者一眼看出用的是哪一档 */
 .realm-facts .ctx-default{color:var(--acc);font-weight:700}
 .model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow-wrap:anywhere}
 /* 模型名列：上游 display_name 是人类可读名，可能带空格和斜杠。
@@ -850,7 +874,7 @@ async function loadModels(toastOnError,refresh){
     if(d.persistent) parts.push("隐藏列表保存在插件配置中");
     parts.push("排序保存到插件配置（拖拽 ⠿ 手柄或聚焦手柄后按 ↑ / ↓ 键，改动即时写入）");
     if(hasRegionCatalog){
-      parts.push("上下文为分区原始档位（加粗即当前默认档位，只读）");
+      parts.push("上下文为分区的可选档位（加粗项为当前实际生效档位，只读）");
     }else{
       // 降级时不画分区列，也就没有"未加载"这回事——说清楚是后端没给数据。
       parts.push("后端未返回分区对照数据（region_models），暂不显示 CN / Intl 列");
@@ -912,7 +936,9 @@ function creditText(factor){
   return String(n)+"x";
 }
 // thinkingText 把分区 thinking 能力翻成一句人话。
-// supported 时带上当前默认档位；unknown 表示上游没报；unsupported 表示不支持。
+// supported 时带上上游自报的默认档位与可选档位；unknown 表示上游没报；unsupported
+// 表示不支持。这里说的是「上游的默认档」，与上下文档位的「实际生效档」是两个概念，
+// 不要混用同一个措辞。
 function thinkingText(t){
   const think=t||{};
   const status=String(think.status||"unknown").toLowerCase();
@@ -926,39 +952,53 @@ function thinkingText(t){
   }
   return "未上报";
 }
-// contextFactsHTML 渲染分区的上下文档位，并把当前默认档位加粗高亮，
-// 这样操作者一眼能看出上游现在用的是哪一档。
+// contextFactsHTML 渲染分区的上下文档位，并把【真正生效的那一档】加粗高亮。
+//
+// 加粗的依据是 r.context_length，不是 context_tiers 里的 is_default：后者只是上游
+// 自报的默认档，不等于网关实际采用的档位。后端的 effectiveCtx（models.go）已经算好
+// 了真正生效的值——有 default 档时取它，否则取 max_input_tokens——面板与它对齐即可，
+// 与 WorkBuddy 面板的同一函数保持一致的语义（两边本就共享这套布局）。
 // 键名兼容三种历史形状：context_tiers 优先（对象数组，带 is_default），
 // 其次是 context_options / supported_context_lengths（纯数字数组）。
 function contextFactsHTML(r){
   const positive=values=>values.map(v=>Number(v)).filter(v=>Number.isFinite(v)&&v>0);
-  let values=[], rawDefault=null;
+  let values=[];
   const tiers=Array.isArray(r.context_tiers)?r.context_tiers.filter(t=>t&&typeof t==="object"):[];
   if(tiers.length){
     values=positive(tiers.map(t=>t.tokens));
-    const marked=tiers.find(t=>t.is_default===true);
-    if(marked) rawDefault=Number(marked.tokens);
   }else{
     const options=Array.isArray(r.context_options)?positive(r.context_options):[];
     const supported=Array.isArray(r.supported_context_lengths)?positive(r.supported_context_lengths):[];
     values=options.length?options:supported;
-    rawDefault=Number(r.default_context_length);
   }
-  const hasDefault=Number.isFinite(rawDefault)&&rawDefault>0&&values.indexOf(rawDefault)>=0;
+  const rawEffective=Number(r.context_length);
+  const hasEffective=Number.isFinite(rawEffective)&&rawEffective>0;
+  const effectiveTitle="当前生效档位 — CPA 与客户端看到的就是这一档";
   if(!values.length){
-    return Number(r.context_length)>0?esc(contextLabel(r.context_length)):"未上报";
+    if(!hasEffective) return "未上报";
+    return `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(contextLabel(rawEffective))}</b>`;
   }
   const label=tiers.length
     ? (t=>asText(t.label||"").trim()||contextLabel(t.tokens))
     : (v=>contextLabel(v));
   const items=tiers.length?tiers:values;
-  return items.map(item=>{
+  // 生效值恰好落在某一档就地加粗；它不在档位表里（上游默认档 > 最大能力这类）
+  // 时在末尾补一个加粗项，而不是静默丢掉——丢掉会让整行没有任何加粗项，看起来
+  // 像是"没生效档位"，恰好抹掉这里最该传达的信息。
+  let bolded=false;
+  const parts=items.map(item=>{
     const v=tiers.length?Number(item.tokens):item;
     const text=tiers.length?label(item):label(v);
-    return hasDefault&&v===rawDefault
-      ? `<b class="ctx-default" title="当前默认档位">${esc(text)}</b>`
-      : esc(text);
-  }).join(" / ");
+    if(hasEffective&&v===rawEffective){
+      bolded=true;
+      return `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(text)}</b>`;
+    }
+    return esc(text);
+  });
+  if(hasEffective&&!bolded){
+    parts.push(`<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(contextLabel(rawEffective))}</b>`);
+  }
+  return parts.join(" / ");
 }
 // regionCell 把一行的某一区渲染成三行事实。
 // present 显示实际值；absent 显示 "—"（该区有目录但没这个模型）；
@@ -970,7 +1010,7 @@ function regionCell(m, region){
   if(r.status!=="present"&&r.present!==true) return "未加载";
   const credit=creditText(r.price_factor);
   const think=thinkingText(r.thinking||{});
-  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span title="分区原始上下文档位，只读">上下文 ${contextFactsHTML(r)}</span></div>`;
+  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span title="该分区上报的上下文档位；加粗项为当前实际生效档位">上下文 ${contextFactsHTML(r)}</span></div>`;
 }
 // modelDisplayLabel 回答「这个代号到底是什么模型」。
 //
