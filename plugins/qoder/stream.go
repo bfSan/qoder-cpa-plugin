@@ -442,6 +442,9 @@ func pumpUpstreamAttempt(httpReq *http.Request, cancel context.CancelFunc, strea
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
 		body := string(errPayload)
+		// TEMP DIAGNOSTIC (remove after root cause confirmed): record what the
+		// retry gate actually sees, so a non-retried 403 can be explained from
+		// the log instead of inferred.
 		if isSoftRateLimit(statusCode, body) && attempt < upstreamRetryMaxAttempts {
 			// Throttling: back off and try again instead of failing the session.
 			return true
@@ -872,7 +875,11 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 		}
 		if envStatus := upstreamEnvelopeStatus(env); envStatus >= 400 {
 			body := envelopeBodyText(env)
-			return nil, upstreamStatusError(envStatus, upstreamEnvelopeError(envStatus, body))
+			// Carry the status on the returned error so the caller's retry
+			// gate can classify it. upstreamEnvelopeError alone is a plain
+			// fmt.Errorf, which made upstreamStatusFromError return 0 and left
+			// a 10605 queue admission unretryable.
+			return nil, &statusError{status: envStatus, err: upstreamEnvelopeError(envStatus, body)}
 		}
 		bodyStr := envelopeBodyText(env)
 		if bodyStr == "" {

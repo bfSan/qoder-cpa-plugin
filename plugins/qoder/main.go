@@ -820,9 +820,15 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		}
 		if foldErr != nil {
 			foldStatus := upstreamStatusFromError(foldErr)
-			// A rate-limited envelope inside an HTTP 200 stream is worth a
-			// backoff retry; anything else is terminal.
-			if foldStatus == http.StatusTooManyRequests && attempt < upstreamRetryMaxAttempts {
+			// 10605 queue admission rides an HTTP 200 stream with the real
+			// status inside the envelope, and it used to be terminal here:
+			// this branch retried only 429, so a 403-coded "you are queued"
+			// refusal failed the request outright. That 403 then reached the
+			// host as AUTH, which is why the client reported a bogus invalid
+			// API key instead of a transient delay. isSoftRateLimit covers
+			// both cases, and the measured admission window (1-5s) fits the
+			// existing backoff schedule.
+			if isSoftRateLimit(foldStatus, foldErr.Error()) && attempt < upstreamRetryMaxAttempts {
 				if waitErr := retrySleep(context.Background(), retryBackoffSchedule(attempt)); waitErr == nil {
 					continue
 				}

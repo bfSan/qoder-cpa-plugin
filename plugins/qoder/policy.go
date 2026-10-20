@@ -100,7 +100,31 @@ func isHardCreditError(status int, body string) bool {
 const httpStatusPaymentRequired = 402
 
 // isSoftRateLimit is pure throttling without hard-credit semantics.
+//
+// ★ 10605 queue admission: the gateway refuses a request that it has ACCEPTED
+// into a short admission queue with HTTP 403 rather than 429, body
+// {"code":"10605","message":"{\"isQueued\":true,\"modelKey\":\"qfmodel\",
+// \"queueType\":\"p3\",\"retryAfterSeconds\":30}"}. Before isQueueAdmission,
+// this fell through every branch and the refusal was terminal. Because the
+// status is 403, the host classified the forwarded message as AUTH, so the
+// client reported a bogus API-key failure and never retried.
+//
+// Measured admission window on qfmodel is 1-5s (not the advertised 30s), so
+// the existing retryBackoffSchedule (0.5-4s per attempt, 3 attempts) absorbs
+// it; the retryAfterSeconds hint is not used as a delay floor on purpose.
 func isSoftRateLimit(status int, body string) bool {
+	// Queue admission is checked BEFORE the credit gate on purpose. The
+	// gateway's 10605 body is a nested document whose tail is truncated in
+	// transit, and on a credential without a quota package it can also carry
+	// credit wording further along. When that happened the credit gate won:
+	// isHardCreditError returned true, this function returned false, and the
+	// queue never retried — the exact 403-then-no-retry seen in production on
+	// the Intl credential. A request that was queued was still accepted, so
+	// "queued" must outrank "looks like a credit fault" here. Genuine credit
+	// rejections never carry queue fields, so they keep their old path.
+	if isQueueAdmission(status, body) {
+		return true
+	}
 	if isHardCreditError(status, body) {
 		return false
 	}
@@ -111,6 +135,31 @@ func isSoftRateLimit(status int, body string) bool {
 	return strings.Contains(lower, "rate limit") ||
 		strings.Contains(lower, "too many requests") ||
 		strings.Contains(lower, "throttl")
+}
+
+// upstreamQueueCode is the gateway's queue-admission business code, in the
+// unescaped form used after backslashes are stripped by isQueueAdmission.
+const upstreamQueueCode = `"code":"10605"`
+
+// isQueueAdmission reports the gateway's HTTP 403 "you are queued" refusal.
+//
+// The body reaches this layer JSON-escaped one or more levels deep (the
+// message field itself contains a JSON document), so the code appears as
+// `"code":"10605"` or as `\"code\":\"10605\"`. Stripping backslashes matches
+// both forms. Gating on 403 is safe because the gateway assigns that status
+// only to this code; a genuine credential rejection carries no queue fields.
+func isQueueAdmission(status int, body string) bool {
+	if status != http.StatusForbidden {
+		return false
+	}
+	flat := strings.ReplaceAll(body, `\`, "")
+	if strings.Contains(flat, upstreamQueueCode) {
+		return true
+	}
+	// Defensive: honour queue semantics even if the numeric code shifts.
+	lower := strings.ToLower(flat)
+	return strings.Contains(lower, `"isqueued":true`) ||
+		strings.Contains(lower, `"queuetype"`)
 }
 
 // lifecycleActionFor chooses disable/none from credits.
