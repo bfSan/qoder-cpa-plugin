@@ -822,7 +822,9 @@ async function load(force, btn){
     lazyLoadCredits(accounts);
     loadModels(false);
     loadPromotions();
-    if(!qPromoTimer) qPromoTimer=setInterval(()=>{renderQPromotions();renderModels()},30000);
+    // 活动列表按小时重算：30 秒一次的重排会把操作者的视线从别处拽回来，
+    // 而活动时段以小时为粒度，一分钟级抖动没有信息量。
+    if(!qPromoTimer) qPromoTimer=setInterval(()=>{renderQPromotions();renderModels()},3600000);
     if(force){
       const errN=accounts.filter(a=>a.error).length;
       const life=(d.lifecycle||[]).length;
@@ -1153,7 +1155,7 @@ function renderQPromotions(){
       :`<span class="promo-state off">未生效 · 生效时段 ${esc(win)}</span>`;
     return `<div class="promo-row ${r.active?'on':'off'}" title="${esc(qPromoTitle(e,r.active))}"><span class="promo-badge ${r.active?'on':'off'}">${esc(qPromoLabel(p))}</span><span class="promo-model">${esc(r.id)}${dup}</span><span class="promo-price">${esc(price)}</span><span class="promo-realm">${esc(realms)}</span>${state}</div>`;
   };
-  const head=`<div class="promo-hd"><div class="promo-title" id="promoToggle" title="点击展开/收起活动明细">Qoder 上游活动 · <span class="promo-live${live.length?'':' zero'}">生效 ${live.length}</span>${later.length?` / 未生效 ${later.length}`:''}</div><div class="promo-meta">活动时钟 ${qPromoClock&&qPromoClock.zone||'UTC'} · 每 30 秒自动刷新</div></div>`;
+  const head=`<div class="promo-hd"><div class="promo-title" id="promoToggle" title="点击展开/收起活动明细">Qoder 上游活动 · <span class="promo-live${live.length?'':' zero'}">生效 ${live.length}</span>${later.length?` / 未生效 ${later.length}`:''}</div><div class="promo-meta">活动时钟 ${qPromoClock&&qPromoClock.zone||'UTC'} · 每 1 小时自动刷新</div></div>`;
   const list=[...live.map(r=>rowHTML(r)),...later.map(r=>rowHTML(r))].join('');
   // 展开态在定时刷新之间保持。
   const wasOpen=box.classList.contains('open');
