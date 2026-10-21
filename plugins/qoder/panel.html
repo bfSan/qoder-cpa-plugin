@@ -297,7 +297,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 <body>
 <div class="wrap">
   <h1>Qoder 账号面板</h1>
-  <div class="sub">积分余额 · CN 每日签到（10:00 与 21:00）· 耗尽自动关</div>
+  <div class="sub">积分余额 · 每日签到（CN 与 Intl，10:00 与 21:00）· 耗尽自动关</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
     <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。错误密钥请勿连点，避免 IP 封禁。</div>
     <div style="display:flex;gap:8px">
@@ -513,12 +513,15 @@ function card(a){
   const disabled=!!a.disabled;
   const isIntl=(a.region||"cn")==="intl";
   const regionBadge=`<span class="badge ${isIntl?"global":"cn"}">${isIntl?"Intl":"CN"}</span>`;
-  // Both regions use the campaign benefit contract. CN's legacy daily-check-in
-  // endpoint only serves as a fallback. Pro upgrade remains CN-only.
+  // 两区都走 campaign 权益领取契约（CN 的旧 daily-check-in 只作兼容兜底）。
+  // 签到按钮是否出现由后端下发的 checkin_supported 决定，不在这里用区域判断：
+  // 上游 2026-10-21 给 Intl 也开了「每天领 100 Credits」，硬编码的区域门控
+  // 会漏掉这类能力变更（这已经是它第二次翻转）。Pro 升级包仍仅限 CN。
   const checked=ci.today_checked_in;
   const ciActive=ci.active!==false; // absent=true (default active)
+  const checkinSupported=a.checkin_supported!==false; // 旧后端无此字段时按支持处理
   let actionHTML="";
-  if(!isIntl){
+  if(checkinSupported){
     const btnClass=checked?"done":(ciActive?"sec":"done");
     const btnText=checked?"已签到":(ciActive?"签到":"不可签");
     const btnDisabled=(checked||!ciActive)?" disabled=\"disabled\"":"";

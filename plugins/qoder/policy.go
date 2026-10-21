@@ -171,8 +171,10 @@ func isQueueAdmission(status int, body string) bool {
 // model down with it: the account kept its catalog in the panel but CPA never
 // offered it as a candidate again, and because a disabled account receives no
 // traffic the balance could never move on its own — a deadlock, not a policy.
-// (Intl has no check-in to restore credits at all, so there the account was
-// parked forever; this is the same defect workbuddy retired in 0.9.10.)
+// (Intl had no check-in to restore credits, so there the account was parked
+// forever; this is the same defect workbuddy retired in 0.9.10. Intl gained the
+// campaign check-in on 2026-10-21 but that only makes the rule less pressing —
+// it does not change it: exhausted credits are still not a reason to disable.)
 //
 // The upstream is the authority on what a drained credential may still call:
 // a refused paid model answers with a hard-credit error, which
@@ -298,6 +300,9 @@ func upstreamReadError(err error) error {
 // actionable copy when the rejection was caused by oversized input so users
 // don't mistake it for an account/quota problem.
 func chatUpstreamError(status int, body string) error {
+	if queued := newQueueAdmissionError(status, body); queued != nil {
+		return queued
+	}
 	trimmed := truncateRedacted(body, 200)
 	if chatInputTooLarge(status, body) {
 		return fmt.Errorf("输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文/清理会话后重试 — upstream %d: %s", status, trimmed)

@@ -11,8 +11,8 @@
 
 - **双区 OAuth / PAT 登录** — CN（`qoder.com.cn`）与 Intl（`qoder.com`）都支持设备码登录，也支持导入 PAT。一个账号一份 `qoder-<region>-<uid>.json` 认证文件，支持多账号并存。
 - **模型目录** — 从 Qoder 网关实时拉取模型列表，按账号分别缓存（CN 与 Intl 各自返回不同的 key，互不串用）；面板可隐藏 / 恢复 / 排序 / 新增模型，点「刷新」会强制重新拉取上游而不是复用缓存。隐藏列表持久化在 `hidden_models`，并在 CPA 返回模型列表前生效。
-- **签到** — CN 与 Intl 都走 campaign 权益领取（`GET /me/campaigns` + `/{campaignId}/claim`）；CN 的旧 `daily-check-in` 只作兼容兜底。每天 10:00 / 21:00 自动执行，也可在面板手动签到。
-- **额度与生命周期** — 面板展示积分、套餐、签到状态；积分耗尽自动禁用 CN 账号，签到补回后自动恢复。
+- **签到** — CN 与 Intl 都走 campaign 权益领取（`GET /me/campaigns` + `/{campaignId}/claim`）；CN 的旧 `daily-check-in` 只作兼容兜底。Intl 自 2026-10-21 起上游也下发了「每天领 100 Credits」（每日 10:00 UTC+8 刷新，领取后 30 天有效），面板与自动调度一并开放。每天 10:00 / 21:00 自动执行，也可在面板手动签到。
+- **额度与生命周期** — 面板展示积分、套餐、签到状态；积分耗尽可能来自免费模型仍在服务，因此耗尽不再停用账号（停用会连免费模型一起下线，且被停用的凭证收不到流量、余额再也回不来）。签到补回积分后账号自然恢复可用。
 - **按模型冷却** — 单个模型触发限流时只冷却该 (账号, 模型) 组合，不冻结整个账号；面板可手动解除。
 - **Token keepalive** — 定时刷新 access token，避免 Keycloak / device token 会话过期。
 - **流式与工具调用** — COSY 签名的 OpenAI 兼容执行器，支持 SSE 流式输出与 tool calling。

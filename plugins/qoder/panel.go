@@ -18,21 +18,26 @@ var (
 
 // wbAccount is one row of the dashboard.
 type wbAccount struct {
-	AuthIndex string           `json:"auth_index"`
-	AuthID    string           `json:"auth_id,omitempty"`
-	Name      string           `json:"name"`
-	Label     string           `json:"label"`
-	Nickname  string           `json:"nickname"`
-	UID       string           `json:"uid"`
-	Region    string           `json:"region"` // "cn" or "global"
-	Plan      string           `json:"plan"`
-	Status    string           `json:"status"`
-	Disabled  bool             `json:"disabled"`
-	Exhausted bool             `json:"exhausted"`
-	Credits   *creditsSummary  `json:"credits,omitempty"`
-	Checkin   *checkinSummary  `json:"checkin,omitempty"`
-	Cooling   []map[string]any `json:"cooling,omitempty"`
-	Error     string           `json:"error,omitempty"`
+	AuthIndex string          `json:"auth_index"`
+	AuthID    string          `json:"auth_id,omitempty"`
+	Name      string          `json:"name"`
+	Label     string          `json:"label"`
+	Nickname  string          `json:"nickname"`
+	UID       string          `json:"uid"`
+	Region    string          `json:"region"` // "cn" or "intl"
+	Plan      string          `json:"plan"`
+	Status    string          `json:"status"`
+	Disabled  bool            `json:"disabled"`
+	Exhausted bool            `json:"exhausted"`
+	Credits   *creditsSummary `json:"credits,omitempty"`
+	Checkin   *checkinSummary `json:"checkin,omitempty"`
+	// CheckinSupported carries the region capability to the panel. The panel
+	// used to hard-code "Intl has no check-in"; that upstream fact flipped on
+	// 2026-10-21, so the capability now travels with the row instead of being
+	// restated (and getting stale) in the HTML.
+	CheckinSupported bool             `json:"checkin_supported"`
+	Cooling          []map[string]any `json:"cooling,omitempty"`
+	Error            string           `json:"error,omitempty"`
 }
 
 // On a light load we return the last cached plan/checkin/credits snapshot
@@ -101,6 +106,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 			acct.Label = labelForAuth(sa)
 			acct.UID = sa.Account.UID
 			acct.Region = authRegion(sa)
+			acct.CheckinSupported = supportsCheckin(sa)
 			acct.Cooling = cooldownSnapshotFor(f.ID)
 			if fetchCredits {
 				plan, ci, cr, errs := cachedAccountDetails(f.ID, sa, force)

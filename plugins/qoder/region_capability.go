@@ -13,6 +13,14 @@
 // /me/campaigns. The desktop client already polls campaigns for CN, so the
 // legacy contract is kept only as a fallback for older credentials.
 //
+// Intl also gained the campaign benefit contract (verified live 2026-10-21):
+// the Intl account reports a CLAIM_BENEFIT campaign "每天领 100 Credits"
+// (`act-2026MMDD-*`, daily reset 10:00 UTC+8, 30-day validity) through the same
+// /me/campaigns pair, and POST /campaigns/{id}/claim answers
+// `{"status":"CLAIMED","replayed":...}`. So both regions advertise Checkin —
+// the per-region flag is kept because it is a real capability fact that has
+// already flipped once, and the panel reads it instead of hard-coding a region.
+//
 // Intl has no Pro-upgrade contract. That absence is a capability fact, not a
 // transient failure: the plugin must skip it instead of retrying a 404.
 package main
@@ -42,7 +50,7 @@ func capabilitiesForRegion(region string) regionCapabilities {
 	switch normalizeRegion(region) {
 	case regionIntl:
 		return regionCapabilities{
-			Checkin:    false,
+			Checkin:    true,
 			ProUpgrade: false,
 			Quota:      true,
 			Plan:       true,

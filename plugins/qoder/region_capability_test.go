@@ -14,8 +14,8 @@ func TestRegionCapabilitiesMatchObservedUpstream(t *testing.T) {
 		t.Fatalf("CN contract = %v, want campaign", cn.Contract)
 	}
 	intl := capabilitiesForRegion(regionIntl)
-	if intl.Checkin {
-		t.Fatalf("Intl capabilities = %#v, want check-in removed", intl)
+	if !intl.Checkin {
+		t.Fatalf("Intl capabilities = %#v, want check-in support (campaign live since 2026-10-21)", intl)
 	}
 	if intl.Contract != checkinContractCampaign {
 		t.Fatalf("Intl contract = %v, want campaign", intl.Contract)
@@ -25,6 +25,25 @@ func TestRegionCapabilitiesMatchObservedUpstream(t *testing.T) {
 	}
 	if !intl.Quota || !intl.Plan || !intl.Refresh {
 		t.Fatalf("Intl capabilities = %#v, want quota/plan/refresh", intl)
+	}
+}
+
+// supportsCheckin is the single gate used by runAutoCheckin, checkinOneAccount
+// and the panel's detail cache. An Intl credential must pass it, otherwise the
+// 10:00/21:00 timer silently skips the account and its daily campaign is never
+// claimed.
+func TestIntlCredentialSupportsCheckin(t *testing.T) {
+	intl := &storedAuth{Auth: storedTokens{Region: regionIntl, Domain: domainIntl, AccessToken: "dt-test"}}
+	if !supportsCheckin(intl) {
+		t.Fatal("Intl account must support check-in")
+	}
+	// Legacy Intl credential without auth.region, identified by domain alone.
+	legacy := &storedAuth{Auth: storedTokens{Domain: domainIntl, AccessToken: "dt-test"}}
+	if !supportsCheckin(legacy) {
+		t.Fatal("domain-only Intl credential must support check-in")
+	}
+	if authRegion(legacy) != regionIntl {
+		t.Fatalf("authRegion(legacy) = %q, want intl", authRegion(legacy))
 	}
 }
 
