@@ -333,7 +333,9 @@ func recordUpstreamFailure(authID, model string, status int, body string) {
 	if model == "" {
 		return
 	}
-	if isHardCreditError(status, body) {
+	// Queue admission outranks incidental credit wording, just as it does in
+	// the retry classifier. It is a model delay, not an account credit fault.
+	if !isQueueAdmission(status, body) && isHardCreditError(status, body) {
 		return
 	}
 	if status == 429 || isSoftRateLimit(status, body) {

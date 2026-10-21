@@ -284,6 +284,9 @@ func looksLikeErrorBody(body string) bool {
 // upstreamStatusError, so the host classifies the failure from the HTTP status
 // that crosses the RPC boundary — not from the message text.
 func upstreamEnvelopeError(status int, body string) error {
+	if queued := newQueueAdmissionError(status, body); queued != nil {
+		return queued
+	}
 	trimmed := truncateRedacted(body, 200)
 	if trimmed == "" {
 		trimmed = "empty error body"
@@ -299,6 +302,9 @@ func upstreamEnvelopeError(status int, body string) error {
 // EOF)" is that marker. Rate limiting is a model-scoped, short-lived condition
 // — it must cool the (account, model) pair, never the whole credential.
 func streamEnvelopeError(status int, body string) string {
+	if queued := newQueueAdmissionError(status, body); queued != nil {
+		return queued.Error()
+	}
 	trimmed := truncateRedacted(body, 300)
 	if trimmed == "" {
 		trimmed = "empty error body"

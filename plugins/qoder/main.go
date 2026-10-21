@@ -356,7 +356,7 @@ type registrationCapability struct {
 // `make build` feeds from the VERSION file. This literal is the fallback for a
 // bare `go build`; keep it in step with VERSION so a stray build never
 // under-reports the plugin version.
-var version = "0.9.18"
+var version = "0.9.19"
 
 func wbRegistration() registration {
 	return registration{
@@ -836,7 +836,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, foldStatus, foldErr.Error())
 			recordUpstreamFailure(req.AuthID, cooldownModel, foldStatus, foldErr.Error())
 			reconcileAfterExecutorError(req.AuthID, foldStatus, foldErr.Error())
-			return nil, foldErr
+			return nil, queueErrorForClient(foldErr)
 		}
 		publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
 		invalidateAccountCredits(req.AuthID, authUID)
@@ -990,6 +990,10 @@ func errorEnvelope(code, message string) []byte {
 // http_status field and drives the host's real per-status credential
 // cooldown (see envelopeError.HTTPStatus).
 func errorEnvelopeFor(err error) []byte {
+	err = queueErrorForClient(err)
+	if _, queued := err.(*queueAdmissionError); queued {
+		return errorEnvelope("rate_limit", err.Error())
+	}
 	var sc interface{ StatusCode() int }
 	if errors.As(err, &sc) && sc.StatusCode() > 0 {
 		raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{
