@@ -1442,14 +1442,28 @@ async function addModel(){
   input.value="";
   await modelAction("add",id);
 }
+function fmtClaimedAt(v){
+  if(!v) return "";
+  const d=new Date(v);
+  if(isNaN(d.getTime())) return String(v);
+  const p=n=>String(n).padStart(2,"0");
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());
+}
 function checkinResultToast(res, who){
   const name=res.nickname||who||"账号";
   if(res.error){toast(name+"：签到失败","err",asText(res.error));return}
   if(res.reason==="none"){
     toast(name+"："+(asText(res.message)||"今日暂无可领取权益"),"warn");return;
   }
-  if(res.reason==="already"||(res.skipped&&/already|已签|今日/.test(asText(res.message)))){
-    toast(name+"：今日已签到","ok",asText(res.message));return;
+  if(res.reason==="already"||(res.skipped&&/already|已签|今日|已领取/.test(asText(res.message)))){
+    // 后端区分"插件刚签的"与"别的客户端已领的"（replayed），此处必须透传它的
+    // message；写死"今日已签到"会把"桌面端领取"这件事盖掉，让人以为插件生效了。
+    const extra=[];
+    const at=fmtClaimedAt(res.claimed_at);
+    if(at) extra.push("领取时间 "+at);
+    if(res.reward_credits) extra.push("+"+res.reward_credits+" 积分");
+    toast(name+"："+(asText(res.message)||"今日已签到"),"ok",extra.join(" · "));
+    return;
   }
   if(res.success){toast(name+"：签到成功","ok","+"+(res.credit??res.daily_credit??"")+" 积分 · 连续 "+(res.streak_days??"?")+" 天");return}
   toast(name+"："+(asText(res.message)||"未知结果"),"warn");

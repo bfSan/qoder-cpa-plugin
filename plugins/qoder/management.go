@@ -71,6 +71,11 @@ type checkinSummary struct {
 	ActivityName    string   `json:"activity_name"`
 	Season          int64    `json:"season"`
 	CheckinDates    []string `json:"checkin_dates,omitempty"`
+	// ClaimedAt is the upstream receipt timestamp for campaign-contract
+	// regions. It lets the panel answer "did the plugin claim this, or did
+	// another client (the desktop app) claim it first?" — a distinction the
+	// bare today_checked_in flag can never express.
+	ClaimedAt string `json:"claimed_at,omitempty"`
 }
 
 // -----------------------------------------------------------------------------

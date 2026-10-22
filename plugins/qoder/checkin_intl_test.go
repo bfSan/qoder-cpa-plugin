@@ -130,8 +130,13 @@ func TestCheckinOneAccountIntlReplayedIsAlready(t *testing.T) {
 	if out["success"] != true || out["reason"] != "already" {
 		t.Fatalf("replayed claim = %#v, want success + reason=already", out)
 	}
-	if msg, _ := out["message"].(string); msg != "今日已签到" {
-		t.Fatalf("message = %q, want 今日已签到", msg)
+	// replayed=true 说明这次调用没有真正领取（凭证早已存在），可能是桌面端
+	// 领取的。文案必须点明这一点，不能再笼统说"今日已签到"。
+	if msg, _ := out["message"].(string); msg != "今日已领取（由其他客户端领取）" {
+		t.Fatalf("message = %q, want 今日已领取（由其他客户端领取）", msg)
+	}
+	if out["claimed_by_other"] != true {
+		t.Fatalf("claimed_by_other = %#v, want true", out["claimed_by_other"])
 	}
 }
 

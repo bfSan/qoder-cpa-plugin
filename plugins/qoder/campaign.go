@@ -23,13 +23,17 @@ type campaignStatusResponse struct {
 }
 
 type campaign struct {
-	CampaignID  string       `json:"campaignId"`
-	CampaignKey string       `json:"campaignKey"`
-	ActionType  string       `json:"actionType"`
-	StartAt     int64        `json:"startAt"`
-	EndAt       int64        `json:"endAt"`
-	ClaimStatus string       `json:"claimStatus"`
-	Benefit     *campaignBen `json:"benefit,omitempty"`
+	CampaignID  string `json:"campaignId"`
+	CampaignKey string `json:"campaignKey"`
+	ActionType  string `json:"actionType"`
+	StartAt     int64  `json:"startAt"`
+	EndAt       int64  `json:"endAt"`
+	ClaimStatus string `json:"claimStatus"`
+	// ClaimedAt is only present on /claim responses; the /me/campaigns list
+	// omits it (verified live 2026-10-22). Kept here so a listing that starts
+	// returning it needs no further plumbing.
+	ClaimedAt string       `json:"claimedAt,omitempty"`
+	Benefit   *campaignBen `json:"benefit,omitempty"`
 }
 
 type campaignBen struct {
@@ -83,15 +87,39 @@ func claimableCampaign(status *campaignStatusResponse) *campaign {
 	return nil
 }
 
+// claimedCampaign returns the first CLAIM_BENEFIT campaign that has already
+// been claimed AND is still inside its own activity window.
+//
+// The window filter is essential, not cosmetic: the upstream /me/campaigns
+// list keeps historical CLAIM_BENEFIT entries around after they expire, so an
+// unfiltered scan matches yesterday's (or last week's) campaign forever. That
+// made campaignCheckinSummary report TodayCheckedIn=true permanently, which in
+// turn short-circuited checkinOneAccount into the "今日已签到" branch before it
+// ever issued a POST /claim — the panel's manual check-in silently did nothing
+// while the daily grant was in fact never claimed (2026-10-22 field report).
+//
+// This mirrors claimableCampaign's own StartAt/EndAt handling so the two
+// halves of the decision agree on what "today" means.
 func claimedCampaign(status *campaignStatusResponse) *campaign {
 	if status == nil {
 		return nil
 	}
+	now := time.Now().Unix()
 	for i := range status.Campaigns {
 		c := &status.Campaigns[i]
-		if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
-			return c
+		if !strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") {
+			continue
 		}
+		if !strings.EqualFold(c.ClaimStatus, "CLAIMED") {
+			continue
+		}
+		if c.StartAt > 0 && now < c.StartAt {
+			continue
+		}
+		if c.EndAt > 0 && now > c.EndAt {
+			continue
+		}
+		return c
 	}
 	return nil
 }
@@ -121,6 +149,7 @@ func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
 		sum.TodayCheckedIn = true
 		sum.DailyCredit = campaignCredit(c)
 		sum.TodayCredit = campaignCredit(c)
+		sum.ClaimedAt = c.ClaimedAt
 	}
 	return sum
 }
@@ -175,11 +204,25 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 		return map[string]any{"success": false, "upstream": m}, nil
 	}
 	if replayed, _ := body["replayed"].(bool); replayed {
-		return map[string]any{
-			"success":       false,
-			"result":        "ALREADY_CLAIMED",
-			"rewardCredits": float64(campaignCredit(c)),
-		}, nil
+		// replayed=true means the grant already existed upstream — this call
+		// did not create it. Surface WHO/WHEN so the panel can tell "the
+		// plugin just claimed it" apart from "the desktop client claimed it
+		// and we merely replayed the receipt" (2026-10-22 field report: the
+		// client was the real claimer while the plugin reported success).
+		out := map[string]any{
+			"success":          false,
+			"result":           "ALREADY_CLAIMED",
+			"rewardCredits":    float64(campaignCredit(c)),
+			"campaign_id":      c.CampaignID,
+			"campaign_key":     c.CampaignKey,
+			"campaign_title":   c.CampaignKey,
+			"replayed":         true,
+			"claimed_by_other": true,
+		}
+		if claimedAt, ok := body["claimedAt"].(string); ok && claimedAt != "" {
+			out["claimed_at"] = claimedAt
+		}
+		return out, nil
 	}
 	return map[string]any{
 		"success":        true,

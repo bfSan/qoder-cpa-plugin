@@ -301,6 +301,9 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		out["message"] = "今日已签到"
 		out["streak_days"] = ci.StreakDays
 		out["total_credits"] = ci.TotalCredits
+		if ci.ClaimedAt != "" {
+			out["claimed_at"] = ci.ClaimedAt
+		}
 		return out
 	}
 	// Campaign regions drop a claimed campaign from /me/campaigns entirely, so
@@ -328,9 +331,21 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		out["success"] = true
 		out["skipped"] = true
 		out["reason"] = "already"
-		out["message"] = "今日已签到"
+		// replayed=true means the grant already existed upstream before THIS
+		// call — normally the desktop client claimed it. Say so instead of the
+		// ambiguous "今日已签到", which previously made the plugin look like it
+		// had done work it never did (2026-10-22 field report).
+		if replayed, _ := res["replayed"].(bool); replayed {
+			out["message"] = "今日已领取（由其他客户端领取）"
+			out["claimed_by_other"] = true
+		} else {
+			out["message"] = "今日已签到"
+		}
 		if rc, ok := res["rewardCredits"].(float64); ok {
 			out["reward_credits"] = int64(rc)
+		}
+		if claimedAt, ok := res["claimed_at"].(string); ok && claimedAt != "" {
+			out["claimed_at"] = claimedAt
 		}
 		rememberCheckinMoment(f.ID)
 		return out
