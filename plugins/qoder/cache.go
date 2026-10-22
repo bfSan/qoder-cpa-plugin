@@ -19,7 +19,12 @@ type accountCacheEntry struct {
 	// v0.8.8: 最近一次签到成功时刻（本地时钟）。lifecycle 在
 	// checkinGraceWindow 内跳过 disable —— 签到后积分池刷新有延迟，
 	// 立即 reconcile 可能读到 remain=0 的旧快照而误禁用刚签到的账号。
-	checkinAt time.Time
+	checkinAt      time.Time
+	checkinFetched time.Time // beginning of the authoritative read, not completion
+	creditsFetched time.Time
+	planFetched    time.Time
+	confirmedAt    time.Time // receipt/status confirmation; distinct from grace
+	invalidate     bool      // snapshot-local explicit authentication rejection
 }
 
 var (
@@ -88,6 +93,7 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		accountDetailFlight.Delete(authID)
 	}()
 
+	started := time.Now()
 	var (
 		wg      sync.WaitGroup
 		errMu   sync.Mutex
@@ -141,29 +147,97 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		}
 	}()
 	wg.Wait()
-	// Stale-while-error: carry over previous values for fields that failed.
-	// Skipped wholesale when upstream rejected the credential — a stale
-	// "已签到" would be indistinguishable from a real one.
-	if prev != nil && !authRejected {
-		if ci == nil {
-			ci = prev.checkin
-		}
-		if cr == nil {
-			cr = prev.credits
-		}
-		if plan == "" {
-			plan = prev.plan
-		}
-	}
+	// Merge against the latest entry at commit, not the pre-flight snapshot.
+	// Failed fields retain their own timestamps; a fallback balance is NOT fresh.
 	now := time.Now()
-	if cr != nil {
-		// Stamp snapshot time for panel/API consumers (A-09 observability).
-		cr.FetchedAt = now.UTC().Format(time.RFC3339)
+	snapshot := &accountCacheEntry{checkin: ci, credits: cr, plan: plan}
+	if ci != nil {
+		snapshot.checkinFetched = started
 	}
-	accountCache.Store(authID, &accountCacheEntry{checkin: ci, credits: cr, plan: plan, fetched: now})
-	// Soft cap: if map is huge, drop oldest-looking entries beyond bound.
+	if cr != nil {
+		copy := *cr
+		copy.FetchedAt = now.UTC().Format(time.RFC3339)
+		snapshot.credits, snapshot.creditsFetched = &copy, started
+	}
+	if plan != "" {
+		snapshot.planFetched = started
+	}
+	if len(errList) == 0 && cr != nil && plan != "" && (!supportsCheckin(sa) || ci != nil) {
+		snapshot.fetched = started
+	}
+	if authRejected {
+		snapshot.invalidate = true
+		snapshot.checkinFetched, snapshot.creditsFetched, snapshot.planFetched = started, started, started
+		snapshot.checkin, snapshot.credits, snapshot.plan = nil, nil, ""
+	}
+	if !authRejected && cr != nil {
+		observePositiveCreditsAt(authID, cr, started)
+	}
+	merged := storeAccountSnapshot(authID, snapshot)
 	pruneAccountCacheSoftCap(accountCacheSoftCap)
-	return plan, ci, cr, errList
+	return merged.plan, merged.checkin, merged.credits, errList
+}
+
+// CAS merge prevents an older dashboard flight from wiping a confirmation,
+// grace timestamp, or a post-claim credits read. All cached objects immutable.
+func storeAccountSnapshot(authID string, snapshot *accountCacheEntry) *accountCacheEntry {
+	for {
+		old, exists := accountCache.Load(authID)
+		next := accountCacheEntry{}
+		if exists {
+			if p, ok := old.(*accountCacheEntry); ok && p != nil {
+				next = *p
+			}
+		}
+		if snapshot.checkinAt.After(next.checkinAt) {
+			next.checkinAt = snapshot.checkinAt
+		}
+		if snapshot.confirmedAt.After(next.confirmedAt) {
+			next.confirmedAt = snapshot.confirmedAt
+		}
+		if !snapshot.checkinFetched.IsZero() && !snapshot.checkinFetched.Before(next.checkinFetched) {
+			// A receipt remains valid when the campaign disappears from the listing.
+			// Auth rejection may invalidate older evidence, but never a newer receipt.
+			keepConfirmed := !snapshot.invalidate && next.checkin != nil && next.checkin.TodayCheckedIn && !next.confirmedAt.IsZero() && next.confirmedAt.Format("2006-01-02") == time.Now().Format("2006-01-02") && (snapshot.checkin == nil || !snapshot.checkin.TodayCheckedIn)
+			if !keepConfirmed {
+				next.checkin, next.checkinFetched = snapshot.checkin, snapshot.checkinFetched
+				if snapshot.invalidate {
+					next.confirmedAt = time.Time{}
+				}
+			}
+		}
+		if !snapshot.creditsFetched.IsZero() && !snapshot.creditsFetched.Before(next.creditsFetched) && !snapshot.creditsFetched.Before(next.checkinAt) {
+			next.credits, next.creditsFetched = snapshot.credits, snapshot.creditsFetched
+		}
+		if !snapshot.planFetched.IsZero() && !snapshot.planFetched.Before(next.planFetched) {
+			next.plan, next.planFetched = snapshot.plan, snapshot.planFetched
+		}
+		if snapshot.invalidate {
+			next.fetched = time.Time{}
+		} else if snapshot.fetched.After(next.fetched) && !snapshot.fetched.Before(next.checkinAt) {
+			next.fetched = snapshot.fetched
+		}
+		next.invalidate = false
+		if exists {
+			if accountCache.CompareAndSwap(authID, old, &next) {
+				return &next
+			}
+		} else if _, loaded := accountCache.LoadOrStore(authID, &next); !loaded {
+			return &next
+		}
+	}
+}
+
+func storeCheckinConfirmation(authID string, ci *checkinSummary, now time.Time) {
+	if authID == "" {
+		return
+	}
+	snapshot := &accountCacheEntry{checkinAt: now, confirmedAt: now}
+	if ci != nil {
+		copy := *ci
+		snapshot.checkin, snapshot.checkinFetched = &copy, now
+	}
+	storeAccountSnapshot(authID, snapshot)
 }
 
 // accountCacheSoftCap limits concurrent cache entries (auth churn / index thrash).
@@ -191,8 +265,9 @@ func pruneAccountCacheSoftCap(capN int) {
 		return
 	}
 	type item struct {
-		key string
-		at  time.Time
+		key   string
+		at    time.Time
+		entry *accountCacheEntry
 	}
 	var items []item
 	accountCache.Range(func(key, value any) bool {
@@ -202,7 +277,7 @@ func pruneAccountCacheSoftCap(capN int) {
 			accountCache.Delete(key)
 			return true
 		}
-		items = append(items, item{key: k, at: e.fetched})
+		items = append(items, item{key: k, at: e.fetched, entry: e})
 		return true
 	})
 	if len(items) <= capN {
@@ -211,7 +286,12 @@ func pruneAccountCacheSoftCap(capN int) {
 	// Sort oldest first (was O(n²) bubble — sort.Slice is O(n log n)).
 	sort.Slice(items, func(i, j int) bool { return items[i].at.Before(items[j].at) })
 	drop := len(items) - capN
-	for i := 0; i < drop; i++ {
-		accountCache.Delete(items[i].key)
+	for i := 0; i < len(items) && drop > 0; i++ {
+		if !items[i].entry.checkinAt.IsZero() && time.Since(items[i].entry.checkinAt) < checkinGraceWindow {
+			continue
+		}
+		if accountCache.CompareAndDelete(items[i].key, items[i].entry) {
+			drop--
+		}
 	}
 }

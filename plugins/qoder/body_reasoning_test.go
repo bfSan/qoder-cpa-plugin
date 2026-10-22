@@ -180,7 +180,7 @@ func TestStaticModelsIncludeQwen38Flash(t *testing.T) {
 			if m.Name != "Qwen3.8-Flash" {
 				t.Errorf("qfmodel name = %q, want Qwen3.8-Flash", m.Name)
 			}
-			if m.ContextLength != 180000 {
+			if m.ContextLength != 0 {
 				t.Errorf("qfmodel context = %d", m.ContextLength)
 			}
 		}

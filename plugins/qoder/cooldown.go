@@ -1,4 +1,5 @@
-// cooldown.go implements per-(account, model) throttling for Qoder.
+// cooldown.go implements scoped Qoder throttling. Only explicit shared-credit
+// exhaustion may use an account-wide entry (empty model).
 //
 // An upstream failure on one model says nothing about the rest of the
 // account's catalog. Cooling the whole credential would turn a single
@@ -49,6 +50,7 @@ type modelCooldownEntry struct {
 	Reason    cooldownReason
 	Until     time.Time
 	UpdatedAt time.Time
+	Hint      quotaHint
 }
 
 // requestModelForCooldown resolves the model key used for per-(auth, model)
@@ -127,7 +129,7 @@ func markModelCooldown(authID, model string, reason cooldownReason) {
 	cooldownSweepLocked(now)
 	// An older in-flight request must not downgrade a newly discovered daily cap.
 	key := modelCooldownKey{AuthID: authID, ModelID: model}
-	if entry, ok := cooldownTable[key]; ok && entry.Reason == cooldownReasonDailyQuota {
+	if entry, ok := cooldownTable[key]; ok && isQuotaCooldownReason(entry.Reason) {
 		return
 	}
 	if len(cooldownTable) >= modelCooldownMaxEntries {
@@ -231,7 +233,7 @@ func coolingModelSetFor(authID string) map[string]struct{} {
 		// Daily quotas are enforced at execution, not by removing capability.
 		// The host caches this catalog and need not refresh at TTL expiry;
 		// removing a daily-limited model could strand it after recovery.
-		if entry.Reason == cooldownReasonDailyQuota {
+		if isQuotaCooldownReason(entry.Reason) {
 			continue
 		}
 		if out == nil {
@@ -255,13 +257,7 @@ func cooldownSnapshotFor(authID string) []map[string]any {
 		if k.AuthID != authID || !v.Until.After(now) {
 			continue
 		}
-		out = append(out, map[string]any{
-			"model":      k.ModelID,
-			"reason":     string(v.Reason),
-			"until":      v.Until.UTC().Format(time.RFC3339),
-			"seconds":    int(v.Until.Sub(now).Round(time.Second) / time.Second),
-			"updated_at": v.UpdatedAt.UTC().Format(time.RFC3339),
-		})
+		out = append(out, quotaEntryFields(k, v, now))
 	}
 	cooldownMu.Unlock()
 	sortCooldownSnapshot(out)
@@ -277,14 +273,9 @@ func cooldownSnapshotAll() []map[string]any {
 		if !v.Until.After(now) {
 			continue
 		}
-		out = append(out, map[string]any{
-			"auth_id":    k.AuthID,
-			"model":      k.ModelID,
-			"reason":     string(v.Reason),
-			"until":      v.Until.UTC().Format(time.RFC3339),
-			"seconds":    int(v.Until.Sub(now).Round(time.Second) / time.Second),
-			"updated_at": v.UpdatedAt.UTC().Format(time.RFC3339),
-		})
+		row := quotaEntryFields(k, v, now)
+		row["auth_id"] = k.AuthID
+		out = append(out, row)
 	}
 	cooldownMu.Unlock()
 	sortCooldownSnapshotByAuth(out)
@@ -342,9 +333,13 @@ func cooldownSweepLocked(now time.Time) {
 // request and then close the SSE stream before the first payload, which the
 // plugin observes as empty_stream with status 0. Record that against the
 // specific model so the panel exposes the degraded pair. Account-level
-// failures (hard credit exhaustion, invalid credentials) stay with the
-// existing lifecycle/status handling.
+// credit failures are first interpreted by the narrow observation classifier;
+// invalid credentials stay with existing auth/status handling.
 func recordUpstreamFailure(authID, model string, status int, body string) {
+	recordUpstreamFailureWithHeaders(authID, model, status, body, nil)
+}
+
+func recordUpstreamFailureLegacy(authID, model string, status int, body string) {
 	model = normalizeCooldownModel(model)
 	if model == "" {
 		return
@@ -417,7 +412,7 @@ func handleCooldownClear(req pluginapi.ManagementRequest) map[string]any {
 	if authID == "" {
 		return map[string]any{"success": false, "error": "auth_id is required"}
 	}
-	removed := clearModelCooldown(authID, model)
+	removed := clearQuotaObservations(authID, model)
 	return map[string]any{
 		"success":    true,
 		"auth_id":    authID,

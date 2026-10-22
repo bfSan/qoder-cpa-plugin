@@ -15,6 +15,7 @@ import (
 // errors intentionally retain only the safe retry hint, not the raw body.
 type queueAdmissionError struct {
 	retryAfterSeconds int
+	hint              quotaHint
 }
 
 func (e *queueAdmissionError) Error() string {
@@ -34,8 +35,10 @@ func queueErrorForClient(err error) error {
 	if errors.As(err, &queued) {
 		return queued
 	}
-	return err
+	return quotaErrorForClient(err)
 }
+
+var queueCodePattern = regexp.MustCompile(`"code"\s*:\s*(?:"10605"|10605)\s*[,}]`)
 
 var queueRetryAfterPattern = regexp.MustCompile(`"retryAfterSeconds"\s*:\s*"?([0-9]+)`)
 
@@ -58,5 +61,5 @@ func newQueueAdmissionError(status int, body string) *queueAdmissionError {
 	if seconds > 300 {
 		seconds = 300
 	}
-	return &queueAdmissionError{retryAfterSeconds: seconds}
+	return &queueAdmissionError{retryAfterSeconds: seconds, hint: parseQuotaHint(nil, body, cooldownNowFn())}
 }

@@ -297,7 +297,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 <body>
 <div class="wrap">
   <h1>Qoder 账号面板</h1>
-  <div class="sub">积分余额 · 每日签到（CN 与 Intl，10:00 与 21:00）· 耗尽自动关</div>
+  <div class="sub">积分余额 · 每日签到（CN 与 Intl，10:00 与 21:00）· 配额状态与模型冷却</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
     <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。错误密钥请勿连点，避免 IP 封禁。</div>
     <div style="display:flex;gap:8px">
@@ -308,6 +308,8 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
   <div class="bar">
     <button class="sec" id="oauthBtn" onclick="startOAuthLogin(this,'cn')">登录 CN 账号</button>
     <button class="sec" id="importIntlBtn" onclick="startOAuthLogin(this,'intl')" title="登录国际账号（qoder.com）。国际账号的模型目录与国内不同。">登录 Intl 账号</button>
+    <select id="oauthPendingSelect" hidden aria-label="待完成登录会话" onchange="selectPendingLogin(this.value)"></select>
+    <button class="sec" id="oauthResumeBtn" hidden onclick="resumeOAuthLogin()">恢复登录查询</button>
     <button class="sec" id="importBtn" onclick="openImportModal()">导入 PAT 凭证</button>
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
@@ -517,7 +519,7 @@ function card(a){
   // 签到按钮是否出现由后端下发的 checkin_supported 决定，不在这里用区域判断：
   // 上游 2026-10-21 给 Intl 也开了「每天领 100 Credits」，硬编码的区域门控
   // 会漏掉这类能力变更（这已经是它第二次翻转）。Pro 升级包仍仅限 CN。
-  const checked=ci.today_checked_in;
+  const checked=Object.prototype.hasOwnProperty.call(ci,"confirmed")?ci.confirmed===true:ci.today_checked_in===true;
   const ciActive=ci.active!==false; // absent=true (default active)
   const checkinSupported=a.checkin_supported!==false; // 旧后端无此字段时按支持处理
   let actionHTML="";
@@ -532,10 +534,13 @@ function card(a){
   const coolingBadge=cooling.length?`<span class="badge cooling" title="按模型维度的临时冷却">冷却 ${cooling.length}</span>`:"";
   const badges=(disabled?`<span class="badge disabled">已禁用</span>`:"")+(exhausted?`<span class="badge exhausted">耗尽</span>`:"")+regionBadge+`<span class="badge ${esc(plan)}">${esc(a.plan||"-")}</span>`;
   const coolingHTML=cooling.length?`<div class="cooldown-list">`+cooling.map(c=>{
-    const model=asText(c.model);
+    const model=asText(c.model),account=c.scope==="account",label=account?"账号共享积分":model;
     const left=Number(c.seconds)||0;
     const leftText=left>=60?Math.ceil(left/60)+" 分钟":left+" 秒";
-    return `<div class="cooldown-row"><span class="cd-model">${esc(model)}</span><span class="cd-left">${leftText}</span><button type="button" class="ftag" data-action="cooldown-clear" data-auth-index="${esc(a.auth_index)}" data-auth-id="${esc(a.auth_id||a.auth_index)}" data-model="${esc(model)}" aria-label="解除 ${esc(model)} 的冷却">解除</button></div>`;
+    const reason=({daily_quota:"每日调用上限",rate_limit:"临时限流",model_quota:"模型额度受限",model_credit_exhausted:"模型积分受限",shared_credit_exhausted:"共享积分耗尽",upstream_error:"上游暂时故障"})[c.reason]||"额度暂时受限";
+    const recovery=c.reset_at?"上游明确重置："+asText(c.reset_at):(account?"新余额到账或到期后探测":"到期后允许下一次请求探测");
+    const detail=(account?"账号范围":"仅此账号的该模型")+" · "+reason+" · "+recovery+" · 仅当前进程保存；解除不改变手动禁用";
+    return `<div class="cooldown-row" title="${esc(detail)}"><span class="cd-model">${esc(label)} · ${esc(reason)}</span><span class="cd-left">${leftText}</span><button type="button" class="ftag" data-action="cooldown-clear" data-auth-index="${esc(a.auth_index)}" data-auth-id="${esc(a.auth_id||a.auth_index)}" data-model="${account?"":esc(model)}" aria-label="解除 ${esc(label)} 的冷却">解除</button></div>`;
   }).join("")+`</div>`:"";
   const display=(a.nickname||a.label||a.name||"").replace(/^qoderwork-?/i,"");
   const nick=display||("u"+(a.uid||"").slice(-8));
@@ -990,13 +995,16 @@ function thinkingText(t){
   const status=String(think.status||"unknown").toLowerCase();
   const levels=Array.isArray(think.levels)?think.levels.map(v=>asText(v).trim()).filter(Boolean):[];
   const rawDefault=think.default==null?"":asText(think.default).trim();
-  if(status==="unsupported") return "不支持";
-  if(status==="off_only") return levels.length?`仅可关闭（${levels.join("/")}）`:"仅可关闭";
+  if(status==="unsupported") return "目录：不支持（插件仍保留固定请求字段）";
+  if(status==="account_variance") return "账号目录不同；插件可转发 low/medium/xhigh";
+  if(status==="off_only") return `目录：开关模式${rawDefault?`（默认 ${rawDefault}）`:"（默认未上报）"}；插件不转发关闭值`;
+  const accepted=Array.isArray(think.supported_by_adapter)?think.supported_by_adapter:levels.filter(v=>["low","medium","xhigh"].includes(v));
+  const unsupported=Array.isArray(think.unsupported_by_adapter)?think.unsupported_by_adapter:levels.filter(v=>!["low","medium","xhigh"].includes(v));
+  const catalog=rawDefault?`目录默认 ${rawDefault}`:"目录默认未上报";
   if(status==="supported"||levels.length){
-    if(rawDefault) return `默认 ${rawDefault}${levels.length?`（${levels.join("/")}）`:""}`;
-    return levels.length?levels.join(" / "):"未上报";
+    return `${catalog}（${levels.join("/")}）；插件可转发 ${accepted.length?accepted.join("/"):"无已知目录交集"}${unsupported.length?`；未支持 ${unsupported.join("/")}`:""}`;
   }
-  return "未上报";
+  return "目录未上报；插件仅转发 low/medium/xhigh（不注入默认）";
 }
 // contextFactsHTML 渲染分区的上下文档位，并把【真正生效的那一档】加粗高亮。
 //
@@ -1010,54 +1018,32 @@ function thinkingText(t){
 // 键名兼容三种历史形状：context_tiers 优先（对象数组，带 is_default），
 // 其次是 context_options / supported_context_lengths（纯数字数组）。
 function contextFactsHTML(r,modelId){
-  const positive=values=>values.map(v=>Number(v)).filter(v=>Number.isFinite(v)&&v>0);
-  let values=[];
-  const tiers=Array.isArray(r.context_tiers)?r.context_tiers.filter(t=>t&&typeof t==="object"):[];
-  if(tiers.length){
-    values=positive(tiers.map(t=>t.tokens));
-  }else{
-    const options=Array.isArray(r.context_options)?positive(r.context_options):[];
-    const supported=Array.isArray(r.supported_context_lengths)?positive(r.supported_context_lengths):[];
-    values=options.length?options:supported;
-  }
-  const rawEffective=Number(r.context_length);
-  const hasEffective=Number.isFinite(rawEffective)&&rawEffective>0;
-  const effectiveTitle="当前生效档位 — CPA 与客户端看到的就是这一档";
+  const tiers=Array.isArray(r.context_tiers)?r.context_tiers.filter(t=>t&&Number(t.tokens)>0):[];
+  const options=Array.isArray(r.context_options)?r.context_options.map(Number):[];
+  const fallback=Array.isArray(r.supported_context_lengths)?r.supported_context_lengths:options;
+  const items=tiers.length?tiers:fallback.filter(v=>Number(v)>0).map(v=>({tokens:Number(v)}));
+  const effective=Number(r.context_length), hasEffective=Number.isFinite(effective)&&effective>0;
   const id=asText(modelId||"");
-  if(!values.length){
-    if(!hasEffective) return "未上报";
-    // 没有档位表就无从选起：照旧显示生效值，但不可点。
-    return `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(contextLabel(rawEffective))}</b>`;
-  }
-  const label=tiers.length
-    ? (t=>asText(t.label||"").trim()||contextLabel(t.tokens))
-    : (v=>contextLabel(v));
-  const items=tiers.length?tiers:values;
-  const parts=items.map(item=>{
-    const v=tiers.length?Number(item.tokens):item;
-    const text=tiers.length?label(item):label(v);
-    const active=hasEffective&&v===rawEffective;
-    if(!id){
-      return active
-        ? `<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(text)}</b>`
-        : esc(text);
-    }
-    // 生效项带 aria-pressed，屏幕阅读器与测试都能据此判断哪一档在生效，不必
-    // 依赖加粗这一种视觉信号。
-    const cls=active?"ctx-tier ctx-tier-on":"ctx-tier";
-    const hint=active
-      ? `当前生效档位（${text}）。点击可换档。`
-      : `点击改用 ${text} 上下文窗口`;
-    return `<button type="button" class="${cls}" data-ctx-tier="${esc(id)}" data-ctx-tokens="${v}" aria-pressed="${active?"true":"false"}" title="${esc(hint)}">${esc(text)}</button>`;
+  const hint="本账号/分区的插件请求窗口；CPA 静态目录使用已知账号保守值";
+  const parts=items.map(t=>{
+    const v=Number(t.tokens), active=hasEffective&&v===effective;
+    const text=asText(t.label||"").trim()||contextLabel(v);
+    const label=text+(t.is_default?"（目录默认）":"");
+    if(!id) return active?`<b class="ctx-default" title="${esc(hint)}">${esc(label)}</b>`:esc(label);
+    const allowed=options.includes(v);
+    return `<button type="button" class="ctx-tier${active?" ctx-tier-on":""}" data-ctx-tier="${esc(id)}" data-ctx-tokens="${v}" aria-pressed="${active?"true":"false"}" ${allowed?"":"disabled"} title="${esc(allowed?hint:"此档不是所有已知服务账号的共同档位，不能设为全局覆盖")}">${esc(label)}</button>`;
   });
-  // 生效值不在档位表里（上游默认档 > 最大能力这类）时在末尾补一个加粗项，而不是
-  // 静默丢掉——丢掉会让整行没有任何生效标记，看起来像"没有生效档位"，恰好抹掉这里
-  // 最该传达的信息。
-  let bolded=hasEffective&&items.some(item=>Number(tiers.length?item.tokens:item)===rawEffective);
-  if(hasEffective&&!bolded){
-    parts.push(`<b class="ctx-default" title="${esc(effectiveTitle)}">${esc(contextLabel(rawEffective))}</b>`);
+  if(hasEffective&&!items.some(t=>Number(t.tokens)===effective)) parts.push(`<b class="ctx-default" title="${esc(hint)}">${esc(contextLabel(effective))}</b>`);
+  if(!hasEffective) parts.push("生效窗口未上报（请求保留受限模板值）");
+  if(!tiers.some(t=>t.is_default)) parts.push("目录默认未上报");
+  if(r.context_status==="override_rejected") parts.push("覆盖不兼容，已回退本账号默认/受限值");
+  if(r.context_status==="account_variance") parts.push("账号目录不同（此处为保守汇总）");
+  if(Array.isArray(r.account_variants)&&(r.context_status==="account_variance"||(r.thinking&&r.thinking.status==="account_variance"))){
+    parts.push(`<details><summary>查看 ${r.account_variants.length} 个账号目录差异</summary>${r.account_variants.map((v,i)=>`<div>账号 ${i+1}：${contextFactsHTML(v,"")}；${esc(thinkingText(v.thinking))}</div>`).join("")}</details>`);
   }
-  return parts.join('<span class="ctx-sep">/</span>');
+  if(Array.isArray(r.account_variants)&&r.account_variants.some(v=>v.catalog_state==="last_good")) parts.push("使用本账号 last-good 目录");
+  if(id&&(r.context_override||Number(r.context_requested)>0)) parts.push(`<button type="button" class="ctx-tier" data-ctx-tier="${esc(id)}" data-ctx-clear="true">恢复各账号默认</button>`);
+  return parts.join('<span class="ctx-sep"> / </span>');
 }
 // regionCell 把一行的某一区渲染成三行事实。
 // present 显示实际值；absent 显示 "—"（该区有目录但没这个模型）；
@@ -1178,7 +1164,7 @@ function regionCell(m, region, modelId){
   // 混进活动价后无法再回答"这个模型原价多少"。要看折扣去上面的活动卡。
   const credit=creditText(r.price_factor);
   const think=thinkingText(r.thinking||{});
-  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span class="realm-facts-ctx" title="该分区上报的上下文档位；加粗项为当前实际生效档位，点其它档位即可切换">上下文 ${contextFactsHTML(r,modelId)}</span></div>`;
+  return `<div class="realm-facts"><span>倍率 ${esc(credit)}</span><span>思考 ${esc(think)}</span><span class="realm-facts-ctx" title="该分区目录与插件请求窗口；仅共同合法档位允许全局覆盖">上下文 ${contextFactsHTML(r,modelId)}</span></div>`;
 }
 // modelDisplayLabel 回答「这个代号到底是什么模型」。
 //
@@ -1272,6 +1258,8 @@ function bindModelActions(){
     el._ctxBound=true;
     el.addEventListener("click",()=>{
       const id=el.dataset.ctxTier;
+      if(el.disabled||setContextTier.saving) return;
+      if(el.dataset.ctxClear==="true") return setContextTier(id,null);
       const tokens=Number(el.dataset.ctxTokens);
       // 已经是生效档就不重复提交：一次无变化的写盘只会产生一个多余请求，还可能在
       // 界面上闪一下。直接返回更贴近"点它没有变化"的直觉。
@@ -1397,43 +1385,37 @@ function toggleModel(id){
   modelAction("hide",id);
 }
 function restoreModel(id){modelAction("restore",id)}
-// setContextTier 把某个模型的上下文档位切到 tokens。
-//
-// 与保存排序同一套道理：两条写入缺一不可。POST /models/context 让插件内存里的
-// 覆盖立刻生效（本次会话马上按新档位发请求），PATCH config 把它落到 config.yaml
-// 以便重启后由 reconfigure 恢复。只做前者，重启就悄悄回到旧档位；只做后者，
-// 要等 CPA 重载插件才生效 —— 而它不一定会重载。
-//
-// 写入后必须读回一次再判定成功：后端若还没注册 model_context 配置字段，PATCH 会
-// 返回 200 但字段被丢弃，此时面板显示"已切换"就是假报告，下次渲染又跳回旧档位。
-// 与其让操作者自己发现，不如当场说清楚。
+// POST validates a proposal only. Host PATCH commits through configure; two
+// independent readbacks verify durable config and the applied runtime snapshot.
 async function setContextTier(id,tokens){
-  const previous=lastRegionModels.map(m=>Object.assign({},m));
+  if(setContextTier.saving) return false;
+  setContextTier.saving=true;
   try{
     const d=await api("/models/context",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({id:id,context_length:tokens})});
-    if(d&&d.success===false) throw new Error(asText(d.error)||"插件拒绝了这次切换");
-    const overrides=d&&d.model_context?d.model_context:{};
+    if(!d||d.success!==true||d.proposal!==true||!d.model_context) throw new Error(asText(d&&d.error)||"插件未返回有效配置提案");
     const response=await managementAPI("/plugins/qoder/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model_context:overrides})});
-    if(response&&response.error) throw new Error(asText(response.error));
+      body:JSON.stringify({model_context:d.model_context})});
+    if(response&&(response.error||response.success===false)) throw new Error(asText(response.error)||"配置写入失败");
+    const saved=await managementAPI("/plugins/qoder/config");
+    const config=saved&&saved.config?saved.config:saved;
+    const committed=config&&config.model_context;
+    const matches=m=>m&&typeof m==="object"&&(tokens==null?!Object.prototype.hasOwnProperty.call(m,id):Number(m[id])===Number(tokens));
+    if(!matches(committed)) throw new Error("持久配置读回不匹配；未确认保存");
+    const readback=await api("/models/context");
+    if(!matches(readback&&readback.model_context)) throw new Error("配置已保存但运行时未确认应用；请刷新检查");
+    const state=readback&&readback.context_states&&readback.context_states[id];
+    if(tokens!=null&&state&&state.status!=="compatible_known_accounts") throw new Error("配置已保存，但账号目录已变化；不兼容账号使用自身默认/受限值，请刷新检查");
+    await loadModels(false,false);
+    toast(tokens==null?"已恢复各账号目录默认":`上下文覆盖已保存 ${contextLabel(tokens)}`,"ok","仅在账号目录支持该档位时转发；静态目录采用保守值");
+    return true;
   }catch(e){
-    lastRegionModels=previous;
-    renderModels();
+    // No optimistic memory mutation exists to roll back. Always reload actual
+    // state: a network error after PATCH may still mean the host committed it.
+    try{await loadModels(false,false)}catch(_){}
     toast("切换上下文档位失败","err",String(e&&e.message||e));
     return false;
-  }
-  await loadModels(false,false);
-  // 读回确认：生效值真的变成了请求的那一档吗？没变说明后端没接受（例如目录里
-  // 没有这个模型的档位数据），此时必须报出来而不是留着"已切换"的印象。
-  const applied=lastRegionModels.some(m=>String(m.id)===String(id)
-    && ((m.cn&&Number(m.cn.context_length)===tokens)||(m.intl&&Number(m.intl.context_length)===tokens)));
-  if(!applied){
-    toast("档位未生效","warn","插件配置没有保留新的上下文档位，请确认后端已支持 model_context 字段");
-    return false;
-  }
-  toast(`上下文档位已切换到 ${contextLabel(tokens)}`,"ok","该模型的请求窗口与 CPA 对外声明都已更新");
-  return true;
+  }finally{setContextTier.saving=false}
 }
 async function addModel(){
   const input=document.getElementById("modelAddInput");
@@ -1449,57 +1431,35 @@ function fmtClaimedAt(v){
   const p=n=>String(n).padStart(2,"0");
   return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());
 }
-function checkinResultToast(res, who){
-  const name=res.nickname||who||"账号";
-  if(res.error){toast(name+"：签到失败","err",asText(res.error));return}
-  if(res.reason==="none"){
-    toast(name+"："+(asText(res.message)||"今日暂无可领取权益"),"warn");return;
-  }
-  if(res.reason==="already"||(res.skipped&&/already|已签|今日|已领取/.test(asText(res.message)))){
-    // 后端区分"插件刚签的"与"别的客户端已领的"（replayed），此处必须透传它的
-    // message；写死"今日已签到"会把"桌面端领取"这件事盖掉，让人以为插件生效了。
-    const extra=[];
-    const at=fmtClaimedAt(res.claimed_at);
-    if(at) extra.push("领取时间 "+at);
-    if(res.reward_credits) extra.push("+"+res.reward_credits+" 积分");
-    toast(name+"："+(asText(res.message)||"今日已签到"),"ok",extra.join(" · "));
-    return;
-  }
-  if(res.success){toast(name+"：签到成功","ok","+"+(res.credit??res.daily_credit??"")+" 积分 · 连续 "+(res.streak_days??"?")+" 天");return}
-  toast(name+"："+(asText(res.message)||"未知结果"),"warn");
-}
 function isCheckinDoneResult(res){
-  if(!res||res.error) return false;
-  if(res.success) return true;
-  const msg=asText(res.message);
-  // already checked in today (backend) — treat as done, not failure
-  if(/already|已签|今日|已领取/.test(msg)) return true;
-  return false;
+  if(!res)return false;
+  if(Object.prototype.hasOwnProperty.call(res,"confirmed"))return res.confirmed===true;
+  return !res.error&&res.success===true&&res.reason==="already";
 }
-async function checkin(idx, btn){
+function checkinResultToast(res,who){
+  const name=res.nickname||who||"账号";
+  if(isCheckinDoneResult(res)){toast(name+"：签到已确认","ok");return}
+  const states={pending_confirmation:"等待上游确认",no_activity:"当前无可领取活动",none:"当前无可领取活动",unsupported:"当前账号不支持签到",disabled:"账号已禁用",failed:"签到失败",cancelled:"重试已取消"};
+  const label=states[res.state]||states[res.reason]||"签到尚未确认";
+  const next=res.next_retry_at&&!String(res.next_retry_at).startsWith("0001-")?fmtClaimedAt(res.next_retry_at):"";
+  toast(name+"："+label,res.error||res.state==="failed"?"err":"warn",next?"下次核实 "+next:"请稍后刷新账号状态");
+}
+function applyCheckinResults(results){
+  for(const res of results){
+    const a=(lastAccounts||[]).find(a=>res.auth_index!=null&&String(a.auth_index)===String(res.auth_index));
+    if(a)a.checkin=Object.assign({},a.checkin||{},{confirmed:isCheckinDoneResult(res),today_checked_in:isCheckinDoneResult(res),state:res.state});
+  }
+}
+async function checkin(idx,btn){
   busy(btn,true);
   try{
     const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
-    const res=(d.results||[])[0]||{};
-    checkinResultToast(res);
-    if(isCheckinDoneResult(res)){
-      // Instant UI — do NOT busy(false) which restores "签到" before load finishes
-      markCheckinDone(btn);
-      // Optimistic local state so partial re-renders stay correct
-      const a=(lastAccounts||[]).find(x=>x.auth_index===idx);
-      if(a){
-        a.checkin=Object.assign({}, a.checkin||{}, {today_checked_in:true});
-      }
-    }else{
-      busy(btn,false);
-    }
-    // Await reload so card matches server; cache was cleared on backend for this account
-    // Use force=true so credits are re-fetched from upstream (not stale cache).
+    if(d.error)throw new Error("checkin failed");
+    const res=(d.results||[]).find(r=>r.auth_index!=null&&String(r.auth_index)===String(idx))||{};
+    checkinResultToast(res);applyCheckinResults([res]);
+    if(isCheckinDoneResult(res))markCheckinDone(btn);else busy(btn,false);
     await load(true);
-  }catch(e){
-    toast("签到请求失败","err",e.message);
-    busy(btn,false);
-  }
+  }catch(_){toast("签到请求失败","err","请检查管理权限或网络后重试");busy(btn,false)}
 }
 // setAccountDisabled parks or restores one account. Manual state is recorded on
 // the auth file so lifecycle automation will not silently re-enable it.
@@ -1552,46 +1512,21 @@ async function refreshCredits(idx, btn){
 async function checkinAll(btn){
   busy(btn,true);
   try{
-    // Backend prefilters: already-checked skipped; only need-checkin accounts run.
     const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-    const rs=d.results||[];
-    const s=d.summary||{};
-    const ok=Number(s.success??rs.filter(x=>x.success&&x.reason!=="already"&&!x.skipped).length)||0;
-    const already=Number(s.already??rs.filter(x=>isCheckinDoneResult(x)&&(x.reason==="already"||x.skipped||!x.success)).length)||0;
-    const fail=Number(s.fail??rs.filter(x=>x.error).length)||0;
-    const skippedCN=Number(s.skipped_cn||0);
-    const eligible=Number(s.eligible??(ok+fail))||0;
-    const detailParts=[];
-    
-    if(already) detailParts.push("今日已签 "+already);
-    if(eligible) detailParts.push("待签 "+eligible);
-    const detail=detailParts.join(" · ");
-    if(d.error){toast("批量签到失败","err",d.error)}
-    else if(fail){
-      const errDetail=rs.filter(x=>x.error).map(x=>(x.nickname||"")+": "+asText(x.error)).join("；");
-      toast("批量签到："+ok+" 成功 / "+fail+" 失败"+(already?" / "+already+" 已签":""),"err",errDetail||detail);
-    }else if(ok){
-      toast("批量签到："+ok+" 成功"+(already?" / "+already+" 今日已签":""),"ok",detail);
-    }else if(already||skippedCN){
-      toast("无需签到","ok",detail||"今日已签");
-    }else if(!rs.length && !eligible){
-      toast("没有需要签到的账号","warn",detail||"");
-    }else{
-      toast("没有需要签到的账号","warn",detail);
-    }
-    // Mark check-in buttons done immediately when any success/already
-    if(ok||already){
-      document.querySelectorAll("#grid .card").forEach(c=>{
-        const b=c.querySelector('[data-action="checkin"]');
-        if(b && /签到|处理中/.test(b.textContent||"")) markCheckinDone(b);
-      });
-    }
+    if(d.error)throw new Error("checkin failed");
+    const rs=d.results||[],confirmed=rs.filter(isCheckinDoneResult).length;
+    const pending=rs.filter(r=>!isCheckinDoneResult(r)&&(r.state==="pending_confirmation"||r.retry_scheduled===true)).length;
+    const failed=rs.filter(r=>!isCheckinDoneResult(r)&&(r.error||r.state==="failed")&&!r.retry_scheduled).length;
+    applyCheckinResults(rs);
+    document.querySelectorAll('#grid [data-action="checkin"]').forEach(b=>{
+      const res=rs.find(r=>r.auth_index!=null&&String(r.auth_index)===String(b.dataset.authIndex));
+      if(isCheckinDoneResult(res))markCheckinDone(b);
+    });
+    toast("批量签到："+confirmed+" 已确认 / "+pending+" 待确认 / "+failed+" 失败",failed?"err":pending||!confirmed?"warn":"ok","仅确认的账号标为已签到");
     await load(true);
-  }catch(e){toast("批量签到失败","err",e.message)}
-  // load() re-renders grid; only restore toolbar button
-  busy(btn,false);
+  }catch(_){toast("批量签到失败","err","请检查管理权限或网络后重试")}
+  finally{busy(btn,false)}
 }
-
 
 async function toggleAuto(on){
   try{const d=await api("/checkin/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:on})});toast("自动签到已"+(d.checkin_auto?"开启 ✅":"关闭 ⏸"),"ok")}catch(e){toast("设置失败","err",e.message)}
@@ -1621,85 +1556,86 @@ function buildLoginURL(d){
   }
   return String(d.url||"").replace(/&amp;/g,"&");
 }
-// startOAuthLogin 是顶部两个登录按钮的唯一入口。区域在点击时就已确定，
-// 不再弹框让操作者二次选择区域——点击即直接打开官方登录页。
-//
-// window.open 必须在点击的同步阶段发起：等 /oauth/start 返回再开窗，会被浏览器
-// 的弹窗拦截器当成"非用户手势触发的弹窗"直接吃掉。所以先开一个空白页占位，
-// 拿到地址后再填进去。
+// Only pending identifiers, expiry and realm are stored in this browser tab.
+// Token/verifier/PAT and authorization URL remain server-side or in the opened page.
+const QODER_PENDING_STORE="qoder-oauth-pending-v1";
+let pendingLogins=[];
+function persistPendingLogins(){
+  try{sessionStorage.setItem(QODER_PENDING_STORE,JSON.stringify(pendingLogins));return true}catch(_){return false}
+}
+function refreshPendingLoginControls(){
+  const now=Date.now();pendingLogins=pendingLogins.filter(r=>r.deadline>now).slice(0,32);
+  const sel=document.getElementById("oauthPendingSelect"),btn=document.getElementById("oauthResumeBtn");
+  sel.hidden=btn.hidden=pendingLogins.length===0;
+  sel.innerHTML=pendingLogins.map((r,i)=>`<option value="${esc(r.state)}">${r.region==="intl"?"Intl":"CN"} · 登录 ${i+1}</option>`).join("");
+  if(oauthState&&pendingLogins.some(r=>r.state===oauthState))sel.value=oauthState;
+}
+function restorePendingLogins(){
+  try{
+    const list=JSON.parse(sessionStorage.getItem(QODER_PENDING_STORE)||"[]"),seen=new Set();
+    pendingLogins=Array.isArray(list)?list.filter(r=>r&&typeof r.state==="string"&&r.state.length>0&&r.state.length<=2048&&typeof r.deadline==="number"&&Number.isFinite(r.deadline)&&r.deadline>Date.now()&&r.deadline<=Date.now()+600000&&["cn","intl"].includes(r.region)&&!seen.has(r.state)&&seen.add(r.state)).slice(0,32).map(r=>({state:r.state,deadline:r.deadline,region:r.region})):[];
+  }catch(_){pendingLogins=[]}
+  persistPendingLogins();refreshPendingLoginControls();
+}
+function rememberPendingLogin(state,deadline,region,select=true){
+  const r={state:String(state),deadline,region:normalizeLoginRegion(region)};
+  pendingLogins=pendingLogins.filter(x=>x.state!==r.state);
+  if(select)pendingLogins.unshift(r);else pendingLogins.push(r);
+  pendingLogins=pendingLogins.slice(0,32);
+  const stored=persistPendingLogins();refreshPendingLoginControls();return stored;
+}
+function forgetPendingLogin(state){pendingLogins=pendingLogins.filter(r=>r.state!==state);persistPendingLogins();refreshPendingLoginControls()}
+function loginDeadline(d,fallback){
+  const v=d&&d.expires_at;
+  const parsed=typeof v==="number"?v*1000:typeof v==="string"?(Number(v)>0?Number(v)*1000:Date.parse(v)):NaN;
+  return Math.min(Number.isFinite(parsed)&&parsed>0?parsed:(fallback||Date.now()+600000),Date.now()+600000);
+}
+function selectPendingLogin(state){stopOAuthPolling();++oauthGeneration;const r=pendingLogins.find(r=>r.state===state);if(r){oauthState=r.state;oauthDeadline=r.deadline;oauthRegion=r.region;rememberPendingLogin(r.state,r.deadline,r.region)}}
+function resumeOAuthLogin(){
+  refreshPendingLoginControls();const state=document.getElementById("oauthPendingSelect").value;
+  const r=pendingLogins.find(r=>r.state===state)||pendingLogins[0];
+  if(!r)return;
+  selectPendingLogin(r.state);toast("继续查询登录结果","warn","请先在已打开的官方页面完成授权；此页关闭后不会后台轮询");
+  return pollOAuth(oauthGeneration);
+}
 async function startOAuthLogin(btn,region){
-  region=normalizeLoginRegion(region);
-  oauthRegion=region;
-  oauthState="";
-  oauthDeadline=0;
-  const generation=++oauthGeneration;
-  const who=region==="intl"?"Intl":"CN";
-  let win=null;
-  try{win=window.open("about:blank","_blank")}catch(_){}
+  region=normalizeLoginRegion(region);stopOAuthPolling();oauthRegion=region;oauthState="";oauthDeadline=0;
+  const generation=++oauthGeneration,who=region==="intl"?"Intl":"CN";
+  let win=null;try{win=window.open("about:blank","_blank")}catch(_){}
+  if(win){try{win.opener=null}catch(_){}}
   busy(btn,true);
   try{
     const d=await api("/oauth/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({region})});
-    if(generation!==oauthGeneration) return;
-    const loginURL=buildLoginURL(d);
-    if(!loginURL||!d.state) throw new Error(d.error||"登录会话创建失败");
-    oauthState=d.state;
-    // 截止时间取服务端的 expires_at（Unix 秒），缺字段时退回 loginTTL 的 10 分钟，
-    // 不再自己编一个比服务端更短的窗口。
-    const exp=Number(d.expires_at);
-    oauthDeadline=exp>0?exp*1000:Date.now()+600000;
-    if(win&&!win.closed){
-      try{win.location.href=loginURL}catch(_){win=null}
-    }
-    if(!win||win.closed){
-      // 占位页被拦截或已关闭：退回当前页跳转，至少让操作者能完成登录。
-      window.location.href=loginURL;
-      return;
-    }
-    toast("已打开 "+who+" 登录页","ok","完成授权后会自动写回账号，无需停留在登录页");
+    const loginURL=buildLoginURL(d),url=new URL(loginURL);
+    if(!["https:","http:"].includes(url.protocol)||!d.state||d.error)throw new Error("login start failed");
+    const deadline=loginDeadline(d);
+    const stored=rememberPendingLogin(String(d.state),deadline,region,generation===oauthGeneration);
+    if(generation!==oauthGeneration){if(win&&!win.closed)win.close();return}
+    oauthState=String(d.state);oauthDeadline=deadline;
+    if(win&&!win.closed){try{win.location.href=url.toString()}catch(_){win=null}}
+    if(!win||win.closed){window.location.href=url.toString();return}
+    toast("已打开 "+who+" 登录页","ok",stored?"完成授权后本页继续查询并保存账号；关闭后可恢复查询":"浏览器禁止保存会话，请保留本页直至完成");
     scheduleOAuthPoll(generation);
-  }catch(e){
-    if(win&&!win.closed){try{win.close()}catch(_){}}
-    if(generation===oauthGeneration) toast("启动登录失败","err",e.message||String(e));
-  }finally{
-    busy(btn,false);
-  }
+  }catch(_){if(win&&!win.closed){try{win.close()}catch(_){}}if(generation===oauthGeneration)toast("启动登录失败","err","请检查管理权限或代理配置后重试")}
+  finally{busy(btn,false)}
 }
-function normalizeLoginRegion(region){
-  return String(region||"").toLowerCase()==="intl"?"intl":"cn";
-}
-// scheduleOAuthPoll 与 pollOAuth 用 generation 校验：重新点击登录后，上一轮
-// 已经排队的定时器会自己退出，不会把过期会话的结果盖到新一轮上。
-function scheduleOAuthPoll(generation){
-  oauthPollTimer=setTimeout(()=>pollOAuth(generation),2000);
-}
-function stopOAuthPolling(){
-  if(oauthPollTimer){clearTimeout(oauthPollTimer);oauthPollTimer=null}
-}
+function normalizeLoginRegion(region){return String(region||"").toLowerCase()==="intl"?"intl":"cn"}
+function scheduleOAuthPoll(generation){oauthPollTimer=setTimeout(()=>pollOAuth(generation),2000)}
+function stopOAuthPolling(){if(oauthPollTimer){clearTimeout(oauthPollTimer);oauthPollTimer=null}}
 async function pollOAuth(generation){
-  if(generation!==oauthGeneration||!oauthState) return;
-  if(Date.now()>=oauthDeadline){
-    stopOAuthPolling();
-    if(generation===oauthGeneration) toast("登录会话已过期","warn","请重新点击登录按钮");
-    return;
-  }
+  if(generation!==oauthGeneration||!oauthState)return;
+  const state=oauthState;
+  if(Date.now()>=oauthDeadline){stopOAuthPolling();forgetPendingLogin(state);toast("登录会话已过期","warn","请重新点击登录按钮");return}
   try{
-    const d=await api("/oauth/poll",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({state:oauthState})});
-    if(generation!==oauthGeneration) return;
-    if(d&&d.status==="ok"){
-      stopOAuthPolling();
-      toast("OAuth 登录成功","ok",d.nickname||((oauthRegion==="intl"?"Intl":"CN")+" 账号已添加"));
-      await load(true);
-      return;
-    }
-    if(d&&d.status==="error"){
-      // 服务端判定的终态：把原因原样显示，不要压成"登录失败"——浏览器那边
-      // 其实成功了、只是落库失败时，压平会把操作者引向错误的排查方向。
-      stopOAuthPolling();
-      toast("OAuth 登录失败","err",d.error||"未知错误");
-      return;
-    }
-  }catch(_){}
-  if(generation===oauthGeneration) scheduleOAuthPoll(generation);
+    const d=await api("/oauth/poll",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({state})});
+    if(generation!==oauthGeneration)return;
+    if(d&&d.expires_at){oauthDeadline=loginDeadline(d,oauthDeadline);rememberPendingLogin(state,oauthDeadline,oauthRegion)}
+    if(d&&d.retryable===true){toast("登录尚未保存完成","warn","已保留会话，可重试查询；不会重新授权");scheduleOAuthPoll(generation);return}
+    if(d&&d.status==="ok"){stopOAuthPolling();forgetPendingLogin(state);oauthState="";toast("OAuth 登录成功","ok",d.nickname||"账号已添加");await load(true);return}
+    if(d&&d.status==="error"){stopOAuthPolling();forgetPendingLogin(state);oauthState="";toast("OAuth 登录失败","err","会话已失效，请重新登录");return}
+    if(!d||d.status!=="wait"){stopOAuthPolling();toast("登录状态未知","warn","会话已保留，请稍后恢复查询");return}
+  }catch(_){stopOAuthPolling();toast("登录查询暂时不可用","warn","会话已保留，请检查权限或网络后恢复查询");return}
+  if(generation===oauthGeneration)scheduleOAuthPoll(generation);
 }
 async function clearCooldown(authId, model, btn){
   busy(btn,true);
@@ -1746,6 +1682,7 @@ if(window.__wbThemeSync)window.__wbThemeSync();
 // 缓存里还没有余额，卡片会一直停在占位状态，必须等操作者手动点"刷新"才出数。
 // load 返回成功后再拉一遍 /credits，卡片就能自己填上。
 async function loadInitial(){
+  restorePendingLogins();
   if(!getKey()){showAuth();return}
   if(await load(false)) refreshAllCredits();
 }

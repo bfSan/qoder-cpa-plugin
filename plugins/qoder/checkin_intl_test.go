@@ -53,6 +53,7 @@ func intlCampaignServer(t *testing.T, claimBody string, claimed *string) {
 
 func intlFixtureAuth(t *testing.T, srvReady bool) *storedAuth {
 	t.Helper()
+	resetCheckinTestState(t)
 	sa := &storedAuth{
 		Account: storedAccount{Nickname: "薄枫2", UID: "01a0bc87-453b-7c60-b164-0f60ebe81258"},
 		Auth:    storedTokens{Region: regionIntl, Domain: domainIntl, AccessToken: "dt-intl-token"},
@@ -113,6 +114,9 @@ func TestAutoCheckinClaimsIntlCampaign(t *testing.T) {
 	if claimPath == "" {
 		t.Fatal("scheduled tick skipped the Intl account; its campaign was never claimed")
 	}
+	if !checkinGraceActive(entry.ID) {
+		t.Fatal("auto reconcile/cache refresh lost checkin grace")
+	}
 }
 
 // 上游已领取时 claim 返回 replayed:true —— 必须读成"今日已签到"，不是失败。
@@ -130,14 +134,14 @@ func TestCheckinOneAccountIntlReplayedIsAlready(t *testing.T) {
 	if out["success"] != true || out["reason"] != "already" {
 		t.Fatalf("replayed claim = %#v, want success + reason=already", out)
 	}
-	// replayed=true 说明这次调用没有真正领取（凭证早已存在），可能是桌面端
-	// 领取的。文案必须点明这一点，不能再笼统说"今日已签到"。
-	if msg, _ := out["message"].(string); msg != "今日已领取（由其他客户端领取）" {
-		t.Fatalf("message = %q, want 今日已领取（由其他客户端领取）", msg)
+	// A replay proves the grant existed, not which client originally claimed.
+	if msg, _ := out["message"].(string); msg != "已领取（权益已存在，无法判断由谁领取）" {
+		t.Fatalf("message = %q", msg)
 	}
-	if out["claimed_by_other"] != true {
-		t.Fatalf("claimed_by_other = %#v, want true", out["claimed_by_other"])
+	if _, exists := out["claimed_by_other"]; exists {
+		t.Fatalf("invented actor: %#v", out)
 	}
+
 }
 
 // 已领取的账号在状态里已被标记为 CLAIMED，手动签到必须直接短路为"已签"，

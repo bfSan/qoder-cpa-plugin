@@ -3,8 +3,8 @@
 //     callable on a zero balance, so only the upstream's own hard-credit error
 //     may sideline a paid model (per-model cooldown + panel badge). See
 //     lifecycleActionFor in policy.go for the full rationale.
-//   - disabled leftovers of the old rule → re-enabled once the balance is
-//     known and the disable was not manual / session-dead
+//   - explicitly proven exhausted leftovers → re-enabled when balance is known
+//   - unknown disabled reasons → never auto-revived
 //   - manual disable & SESSION-DEAD/TOKEN_EXPIRE → always respected, never auto-revived
 //   - Unknown credits → no-op (never mis-kill)
 //   - Soft rate limits → no lifecycle action
@@ -78,37 +78,31 @@ func disableAuth(authIndex, authID string, sa *storedAuth, cr *creditsSummary, r
 	mu.Lock()
 	defer mu.Unlock()
 
-	note := displayNote(sa, cr, true)
-	if reason != "" && !strings.Contains(note, reason) {
-		// keep note short; reason only if room
-		if len(note)+len(reason) < 75 {
-			note = note + " · " + reason
-		}
-	}
-	if lifecycleStateUnchanged(authID, true, note) {
-		return nil
-	}
-	// Prefer live physical file to preserve any extra fields if present.
-	phys, err := hostAuthGetPhysical(authIndex)
-	if err == nil && parseDisabledFromAuthJSON(phys.JSON) {
-		// already disabled; still refresh note if needed
-		if lifecycleStateUnchanged(authID, true, note) {
-			return nil
-		}
-	}
-	name := authFileNameFor(sa)
-	path := ""
-	legacyPath := ""
-	if phys != nil {
-		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
-	}
-	raw, err := buildAuthFileJSON(sa, true, note, nil)
+	phys, err := hostAuthGetPhysicalFn(authIndex)
 	if err != nil {
 		return err
 	}
-	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
+	if phys == nil {
+		return fmt.Errorf("lifecycle: missing physical auth")
+	}
+	// Existing disabled state is operator-owned unless explicitly migrated by
+	// reenableAuthChanged; never replace its reason with an exhaustion guess.
+	if parseDisabledFromAuthJSON(phys.JSON) {
+		return nil
+	}
+	note := displayNote(sa, cr, true)
+	if reason != "" && !strings.Contains(note, reason) && len(note)+len(reason) < 75 {
+		note += " · " + reason
+	}
+	name, path, legacyPath := resolveAuthFileTarget(sa, phys)
+	raw, err := patchLifecyclePhysical(phys, true, note, false)
+	if err != nil {
 		return err
 	}
+	if err := hostAuthPersistMigrateFn(name, path, legacyPath, raw); err != nil {
+		return err
+	}
+
 	rememberLifecycleState(authID, true, note)
 	accountCache.Delete(authID)
 	return nil
@@ -129,36 +123,86 @@ func manualDisableReason(raw []byte) bool {
 	return strings.TrimSpace(m.DisabledReason) == disableReasonManual
 }
 
-// reenableAuth writes disabled:false when CN has credits again.
+// legacyExhaustedDisable accepts only proven old automatic credit disables.
+// Missing or unknown reasons are operator-owned, not evidence of exhaustion.
+func legacyExhaustedDisable(raw []byte) bool {
+	var v struct {
+		Disabled bool   `json:"disabled"`
+		Reason   string `json:"disabled_reason"`
+		Note     string `json:"note"`
+	}
+	if json.Unmarshal(raw, &v) != nil || !v.Disabled {
+		return false
+	}
+	if strings.Contains(v.Note, "SESSION-DEAD") || strings.Contains(v.Note, "TOKEN_EXPIRE") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(v.Reason)) {
+	case "exhausted", "credit_exhausted", "credits_exhausted", "quota_exhausted":
+		return true
+	case "":
+		for _, segment := range strings.Split(v.Note, " · ") {
+			if strings.TrimSpace(segment) == "耗尽" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// patchLifecyclePhysical modifies no credentials, nicknames or unrelated fields.
+// A failed physical read must never fall back to cached storedAuth for a write.
+func patchLifecyclePhysical(phys *hostAuthPhysical, disabled bool, note string, clearReason bool) ([]byte, error) {
+	if phys == nil {
+		return nil, fmt.Errorf("lifecycle: missing physical auth")
+	}
+	var m map[string]any
+	if json.Unmarshal(phys.JSON, &m) != nil || m == nil {
+		return nil, fmt.Errorf("lifecycle: invalid physical auth")
+	}
+	m["disabled"], m["note"] = disabled, note
+	if clearReason {
+		delete(m, "disabled_reason")
+	}
+	return json.Marshal(m)
+}
+
 func reenableAuth(authIndex, authID string, sa *storedAuth, cr *creditsSummary) error {
+	_, err := reenableAuthChanged(authIndex, authID, sa, cr)
+	return err
+}
+
+func reenableAuthChanged(authIndex, authID string, sa *storedAuth, cr *creditsSummary) (bool, error) {
 	mu := checkinLockFor(authIndex)
 	mu.Lock()
 	defer mu.Unlock()
-
 	if !shouldReenable(true, cr) {
-		return nil
+		return false, nil
+	}
+	phys, err := hostAuthGetPhysicalFn(authIndex)
+	if err != nil {
+		return false, err
+	}
+	if phys == nil {
+		return false, fmt.Errorf("lifecycle: missing physical auth")
+	}
+	// Recheck after acquiring the account lock: the operator may have disabled
+	// or rotated this credential after the earlier billing/bundle read.
+	if !legacyExhaustedDisable(phys.JSON) {
+		return false, nil
 	}
 	note := displayNote(sa, cr, false)
-	if lifecycleStateUnchanged(authID, false, note) {
-		return nil
-	}
-	phys, err := hostAuthGetPhysical(authIndex)
-	name := authFileNameFor(sa)
-	path := ""
-	legacyPath := ""
-	if err == nil {
-		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
-	}
-	raw, err := buildAuthFileJSON(sa, false, note, nil)
+	name, path, legacyPath := resolveAuthFileTarget(sa, phys)
+	raw, err := patchLifecyclePhysical(phys, false, note, true)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
-		return err
+	if err := hostAuthPersistMigrateFn(name, path, legacyPath, raw); err != nil {
+		return false, err
 	}
 	rememberLifecycleState(authID, false, note)
 	accountCache.Delete(authID)
-	return nil
+	return true, nil
 }
 
 // deleteAuth removes exhausted credentials from disk.
@@ -167,9 +211,12 @@ func deleteAuth(authIndex, authID string, sa *storedAuth) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	phys, err := hostAuthGetPhysical(authIndex)
+	phys, err := hostAuthGetPhysicalFn(authIndex)
 	if err != nil {
 		return err
+	}
+	if phys == nil {
+		return fmt.Errorf("lifecycle: missing physical auth")
 	}
 	path := strings.TrimSpace(phys.Path)
 	if path == "" {
@@ -190,7 +237,7 @@ func deleteAuth(authIndex, authID string, sa *storedAuth) error {
 	if path == "" {
 		// Last resort: disable instead of silent no-op (never invent a random path).
 		note := displayNote(sa, nil, true) + " · 应删除但无 path"
-		raw, berr := buildAuthFileJSON(sa, true, note, nil)
+		raw, berr := patchLifecyclePhysical(phys, true, note, false)
 		if berr != nil {
 			return fmt.Errorf("no path and build failed: %w", berr)
 		}
@@ -198,7 +245,7 @@ func deleteAuth(authIndex, authID string, sa *storedAuth) error {
 		if phys.Name != "" && !isLegacyAuthName(phys.Name) {
 			name = phys.Name
 		}
-		if err := hostAuthPersistMigrate(name, "", "", raw); err != nil {
+		if err := hostAuthPersistMigrateFn(name, "", "", raw); err != nil {
 			return err
 		}
 		rememberLifecycleState(authID, true, note)
@@ -218,6 +265,7 @@ func deleteAuth(authIndex, authID string, sa *storedAuth) error {
 			}
 		}
 	}
+	cancelCheckinRetry(authIndex)
 	lifecycleState.Delete(authID)
 	accountCache.Delete(authID)
 	return nil
@@ -284,36 +332,30 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 	if sa == nil {
 		return nil
 	}
-	// Read the on-disk credit segment first so a nil cr (lazy refresh, restart,
-	// or a failed billing call) keeps the last known value instead of writing
-	// back the "积分未知" placeholder.
-	note := displayNoteWithPrev(sa, cr, disabled, existingNoteCredits(authIndex))
-	if lifecycleStateUnchanged(authID, disabled, note) {
-		return nil
-	}
 	mu := checkinLockFor(authIndex)
 	mu.Lock()
 	defer mu.Unlock()
 	phys, err := hostAuthGetPhysicalFn(authIndex)
-	name := authFileNameFor(sa)
-	path := ""
-	legacyPath := ""
-	if err == nil {
-		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
-		// re-read disabled from disk as source of truth
-		disabled = parseDisabledFromAuthJSON(phys.JSON)
-		note = displayNoteWithPrev(sa, cr, disabled, noteCreditsFromJSON(phys.JSON))
+	if err != nil {
+		return err
 	}
+	if phys == nil {
+		return fmt.Errorf("lifecycle: missing physical auth")
+	}
+	disabled = parseDisabledFromAuthJSON(phys.JSON)
+	note := displayNoteWithPrev(sa, cr, disabled, noteCreditsFromJSON(phys.JSON))
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
 	}
-	raw, err := buildAuthFileJSON(sa, disabled, note, nil)
+	name, path, legacyPath := resolveAuthFileTarget(sa, phys)
+	raw, err := patchLifecyclePhysical(phys, disabled, note, false)
 	if err != nil {
 		return err
 	}
 	if err := hostAuthPersistMigrateFn(name, path, legacyPath, raw); err != nil {
 		return err
 	}
+
 	rememberLifecycleState(authID, disabled, note)
 	return nil
 }
@@ -383,15 +425,19 @@ func reconcileOneAccount(authIndex, authID string, force bool) (action lifecycle
 		// this account on purpose, and shouldReenable decides purely from the
 		// balance, so without this guard the account would quietly come back on
 		// the next tick and the disable would look like it never took.
-		if phys != nil && manualDisableReason(phys.JSON) {
+		if phys == nil || !legacyExhaustedDisable(phys.JSON) {
 			_ = syncAuthNote(authIndex, authID, sa, cr, true)
 			return lifecycleNone, nil
 		}
 		if shouldReenable(true, cr) {
-			if err := reenableAuth(authIndex, authID, sa, cr); err != nil {
-				return lifecycleReenable, err
+			changed, err := reenableAuthChanged(authIndex, authID, sa, cr)
+			if err != nil {
+				return lifecycleNone, err
 			}
-			return lifecycleReenable, nil
+			if changed {
+				return lifecycleReenable, nil
+			}
+			return lifecycleNone, nil
 		}
 		// still disabled: refresh note
 		_ = syncAuthNote(authIndex, authID, sa, cr, true)

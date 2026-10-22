@@ -7,7 +7,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"strings"
 	"sync"
@@ -56,21 +58,25 @@ func nextCheckinTime(now time.Time) time.Time {
 }
 
 func checkinLoop(stop chan struct{}) {
+	retryTicker := time.NewTicker(30 * time.Second)
+	defer retryTicker.Stop()
+	timer := time.NewTimer(time.Until(nextCheckinTime(time.Now())))
+	defer timer.Stop()
 	for {
-		next := nextCheckinTime(time.Now())
-		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-stop:
-			timer.Stop()
+			cancelScheduledCheckinRetries()
 			return
+		case <-retryTicker.C:
+			// Keep the scheduled timer armed. Recreating it on every retry tick could
+			// lose a 10:00/21:00 event when both channels become ready together.
+			runDueCheckinRetries()
 		case <-timer.C:
 			runAutoCheckin()
-			// Fire keepalive if the current tick falls within its scheduled
-			// window (e.g. 22:00 keepalive fires on the 22:00 tick even though
-			// the previous checkin tick was 21:00).
 			if shouldRunKeepaliveNow(time.Now()) {
 				runTokenKeepalive()
 			}
+			timer.Reset(time.Until(nextCheckinTime(time.Now())))
 		}
 	}
 }
@@ -113,67 +119,10 @@ func runAutoCheckin() {
 // processAutoCheckinAccount handles one account's scheduled tick. Extracted so
 // runAutoCheckin can fan out per-account work without duplicating logic.
 func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
-	// A-24: only fetch sa when needed (checkin). For lifecycle-only paths,
-	// let reconcileOneAccount do the single hostAuthGetBundle internally.
 	if doCheckin {
-		sa, err := hostAuthGet(f.AuthIndex)
-		if err != nil {
-			return
-		}
-		if !supportsCheckin(sa) {
-			if lifecycleEnabled() {
-				_, _ = reconcileOneAccount(f.AuthIndex, f.ID, true)
-			}
-			return
-		}
-		// Daily benefit check-in when enabled.
-		ci, err := fetchCheckinStatus(sa)
-		if err == nil && ci != nil && ci.Active && !ci.TodayCheckedIn {
-			if _, callErr := performCheckinCall(sa); callErr == nil {
-				// v0.8.8: 记录签到时刻（与手动签到一致），让紧随
-				// 其后的 reconcile 处于 lifecycle 宽限窗口内。
-				rememberCheckinMoment(f.ID)
-				// Refresh once after a successful checkin call so cache reflects
-				// the post-call state. If the status call fails keep the pre-call
-				// snapshot rather than dropping it (v0.6.31: avoid shadowing ci
-				// with a second fetch that could race with concurrent readers).
-				if ci2, _ := fetchCheckinStatus(sa); ci2 != nil {
-					ci = ci2
-				}
-				// P1-5: checkin grants new credits — refresh the credits cache
-				// immediately so the panel shows the updated balance without
-				// waiting for the async reconcile pass.
-				if cr2, crErr := fetchUserResource(sa); crErr == nil && cr2 != nil {
-					if v, ok := accountCache.Load(f.ID); ok {
-						if prev, ok2 := v.(*accountCacheEntry); ok2 {
-							fresh := *prev
-							fresh.credits = cr2
-							fresh.fetched = time.Now()
-							accountCache.Store(f.ID, &fresh)
-						}
-					}
-				}
-			}
-		}
-		// Refresh cache with latest checkin status (merge, don't wipe credits/plan).
-		if ci != nil {
-			var prev *accountCacheEntry
-			if v, ok := accountCache.Load(f.ID); ok {
-				prev, _ = v.(*accountCacheEntry)
-			}
-			entry := &accountCacheEntry{checkin: ci, fetched: time.Now()}
-			if prev != nil {
-				entry.credits = prev.credits
-				entry.plan = prev.plan
-			}
-			accountCache.Store(f.ID, entry)
-		}
-		if lifecycleEnabled() {
-			_, _ = reconcileOneAccount(f.AuthIndex, f.ID, true)
-		}
-		return
+		runCheckinAccount(f, "auto", nil)
 	}
-	// Lifecycle-only (checkin off): reconcile handles its own get.
+	// Never hold the check-in lock while reconciling: lifecycle writes use it too.
 	if lifecycleEnabled() {
 		_, _ = reconcileOneAccount(f.AuthIndex, f.ID, true)
 	}
@@ -181,8 +130,8 @@ func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
 
 // handleManualCheckin checks in one account (auth_index) or all qoderwork
 // accounts. Unlike the workbuddy three-phase classify/execute/summarize flow,
-// QoderWork's checkin is a simple Bearer GET+POST — we run it directly per
-// account under an 8s timeout, no classify stage.
+// all entry points share the confirmation state machine below. Each check-in
+// HTTP request has an 8s context; the Host RPC wire may impose its own deadline.
 func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	t0 := time.Now()
 	var body struct {
@@ -230,7 +179,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	for r := range outCh {
 		results[r.idx] = r.out
 	}
-	successN, alreadyN, unsupportedN, failN := 0, 0, 0, 0
+	successN, alreadyN, unsupportedN, failN, pendingN, skippedN := 0, 0, 0, 0, 0, 0
 	for _, r := range results {
 		if r["error"] != nil {
 			failN++
@@ -240,8 +189,16 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 			unsupportedN++
 			continue
 		}
-		if r["skipped"] == true {
+		if r["state"] == "pending_confirmation" {
+			pendingN++
+			continue
+		}
+		if r["reason"] == "already" && r["success"] == true {
 			alreadyN++
+			continue
+		}
+		if r["skipped"] == true {
+			skippedN++
 			continue
 		}
 		if r["success"] == true {
@@ -258,147 +215,402 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 			"already":     alreadyN,
 			"unsupported": unsupportedN,
 			"fail":        failN,
+			"pending":     pendingN,
+			"skipped":     skippedN,
 			"elapsed_ms":  time.Since(t0).Milliseconds(),
 		},
 	}
 }
 
-// checkinOneAccount performs the actual GET status + POST claim flow for one
-// account. 8s overall budget — never blocks past that.
+// Manual, automatic, and scheduled retries share the same account mutex and
+// state. Manual means permission to check in, NOT permission to enable auth.
 func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
-	out := map[string]any{
-		"auth_index": f.AuthIndex,
-		"name":       f.Name,
-	}
-	mu := checkinLockFor(f.AuthIndex)
-	mu.Lock()
-	defer mu.Unlock()
+	return runCheckinAccount(f, "manual", nil)
+}
 
-	sa, err := hostAuthGet(f.AuthIndex)
-	if err != nil {
-		out["error"] = "get auth: " + err.Error()
-		return out
-	}
-	out["nickname"] = sa.Account.Nickname
-	if !supportsCheckin(sa) {
-		out["success"] = false
-		out["skipped"] = true
-		out["reason"] = "unsupported"
-		out["message"] = "当前区域不支持每日签到"
-		return out
-	}
+const checkinRunLimit = 512
 
-	// Step 1: GET status (5s budget).
-	ci, err := fetchCheckinStatus(sa)
+var checkinRetryDelays = [...]time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute}
+
+type checkinRunRecord struct {
+	authID, day, state, campaignID           string
+	at, next                                 time.Time
+	retries                                  int
+	confirmOnly, confirmed, legacy, inFlight bool
+	generation                               uint64
+}
+
+var checkinRuns = struct {
+	sync.Mutex
+	records map[string]checkinRunRecord
+}{records: make(map[string]checkinRunRecord)}
+var checkinRetryDispatch sync.Mutex
+
+func checkinAutoEnabled() bool {
+	checkinAutoMu.RLock()
+	defer checkinAutoMu.RUnlock()
+	return checkinAuto
+}
+
+// Cancel clears schedules, not the uncertain POST checkpoint or spent budget.
+// Safe to call while lifecycle holds checkinLockFor(index).
+func cancelCheckinRetry(index string) {
+	checkinRuns.Lock()
+	defer checkinRuns.Unlock()
+	if r, ok := checkinRuns.records[index]; ok {
+		r.next = time.Time{}
+		r.generation++
+		checkinRuns.records[index] = r
+	}
+}
+
+func cancelScheduledCheckinRetries() {
+	checkinRuns.Lock()
+	defer checkinRuns.Unlock()
+	for index, r := range checkinRuns.records {
+		r.next = time.Time{}
+		r.generation++
+		checkinRuns.records[index] = r
+	}
+}
+
+// reserveCheckin is called under the account lock, before any upstream I/O.
+// Refuse admission instead of evicting today's uncertain POST/retry budget.
+func reserveCheckin(index, id, source string, now time.Time) (checkinRunRecord, bool) {
+	checkinRuns.Lock()
+	defer checkinRuns.Unlock()
+	day := now.Format("2006-01-02")
+	if strings.TrimSpace(index) == "" {
+		return checkinRunRecord{}, false
+	}
+	r, exists := checkinRuns.records[index]
+	if !exists {
+		if len(checkinRuns.records) >= checkinRunLimit {
+			oldest := ""
+			var at time.Time
+			for k, v := range checkinRuns.records {
+				if v.inFlight || v.confirmOnly || v.day == day && (v.retries > 0 || !v.next.IsZero()) {
+					continue
+				}
+				if oldest == "" || v.at.Before(at) {
+					oldest, at = k, v.at
+				}
+			}
+			if oldest == "" {
+				return r, false
+			}
+			delete(checkinRuns.records, oldest)
+		}
+	}
+	if r.day != day {
+		// Retry schedules never cross days. An uncertain campaign POST, however,
+		// may belong to a multi-day activity: retain its read-only checkpoint.
+		r = checkinRunRecord{day: day, generation: r.generation, confirmOnly: r.confirmOnly, campaignID: r.campaignID, legacy: r.legacy}
+	}
+	if source == "retry" {
+		if r.next.IsZero() || r.next.After(now) || r.retries >= len(checkinRetryDelays) {
+			return r, false
+		}
+		// Charge before list/get failure too, so a broken Host cannot retry forever.
+		r.retries++
+		r.next = time.Time{}
+	}
+	if source == "auto" && r.state != "" && r.state != "none" && r.state != "disabled" {
+		return r, false
+	}
+	r.authID, r.at, r.inFlight = id, now, true
+	checkinRuns.records[index] = r
+	return r, true
+}
+
+type checkinAttemptResult struct {
+	state, message, campaignID                string
+	confirmed, confirmOnly, retryable, legacy bool
+	status                                    *checkinSummary
+	receipt                                   map[string]any
+}
+
+func checkinFailed(err error, confirmOnly bool) checkinAttemptResult {
+	r := checkinAttemptResult{state: "failed", message: "无法读取签到凭证或状态", confirmOnly: confirmOnly}
+	var ce *checkinRequestError
+	if errors.As(err, &ce) {
+		r.message, r.retryable = ce.Error(), ce.Retryable
+		r.confirmOnly = r.confirmOnly || ce.Uncertain
+	} else {
+		r.retryable = checkinTransportRetryable(err)
+	}
+	return r
+}
+
+func confirmedCheckinAttempt(sa *storedAuth, previous checkinRunRecord) checkinAttemptResult {
+	// A previous uncertain POST stays bound to its original contract/campaign.
+	// A missing campaign is not confirmation, and cannot permit another POST.
+	if previous.confirmOnly {
+		var ci *checkinSummary
+		var err error
+		if previous.legacy {
+			ci, err = fetchDailyCheckinStatus(sa)
+		} else {
+			var cs *campaignStatusResponse
+			cs, err = fetchCampaignStatus(sa)
+			if err == nil {
+				ci = campaignCheckinSummary(cs)
+				ci.TodayCheckedIn = false
+				for _, c := range cs.Campaigns {
+					if c.CampaignID == previous.campaignID && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
+						ci.TodayCheckedIn, ci.ClaimedAt = true, c.ClaimedAt
+						break
+					}
+				}
+			}
+		}
+		if err != nil {
+			return checkinFailed(err, true)
+		}
+		if ci != nil && ci.TodayCheckedIn {
+			return checkinAttemptResult{state: "already", message: "已领取（上游状态已确认）", confirmed: true, status: ci, campaignID: previous.campaignID, legacy: previous.legacy}
+		}
+		return checkinAttemptResult{state: "pending_confirmation", message: "领取结果尚未确认；仅有限次复查，不重复提交", retryable: true, confirmOnly: true, status: ci, campaignID: previous.campaignID, legacy: previous.legacy}
+	}
+	obs, err := fetchCheckinObservation(sa)
 	if err != nil {
-		out["error"] = "status: " + err.Error()
-		return out
+		return checkinFailed(err, false)
+	}
+	ci := obs.summary
+	if ci == nil {
+		return checkinFailed(&checkinRequestError{Kind: "protocol"}, false)
 	}
 	if ci.TodayCheckedIn {
-		out["success"] = true
-		out["skipped"] = true
-		out["reason"] = "already"
-		out["message"] = "今日已签到"
-		out["streak_days"] = ci.StreakDays
-		out["total_credits"] = ci.TotalCredits
-		if ci.ClaimedAt != "" {
-			out["claimed_at"] = ci.ClaimedAt
+		return checkinAttemptResult{state: "already", message: "今日已签到（上游状态已确认）", confirmed: true, status: ci, legacy: obs.legacy}
+	}
+	if previous.confirmed && (!obs.legacy && (obs.campaign == nil || obs.campaign.CampaignID == previous.campaignID) || obs.legacy && previous.legacy) {
+		// The listing may remove a claimed campaign, or lag behind its receipt.
+		return checkinAttemptResult{state: "already", message: "已领取（本进程已保存确认结果）", confirmed: true, campaignID: previous.campaignID, legacy: previous.legacy}
+	}
+	if !ci.Active {
+		return checkinAttemptResult{state: "none", message: "当前暂无可领取权益（不代表已签到）", status: ci}
+	}
+	var receipt map[string]any
+	var claimErr error
+	id := ""
+	if obs.legacy {
+		receipt, claimErr = performDailyCheckinCall(sa)
+	} else {
+		if obs.campaign == nil {
+			return checkinFailed(&checkinRequestError{Kind: "protocol"}, false)
 		}
-		return out
+		id = obs.campaign.CampaignID
+		receipt, claimErr = performCampaignClaim(sa, obs.campaign)
 	}
-	// Campaign regions drop a claimed campaign from /me/campaigns entirely, so
-	// an inactive summary means "nothing left to claim today" — either already
-	// claimed or no campaign running. Surface it as a no-op, not a failure.
-	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign && !ci.Active {
-		out["success"] = true
-		out["skipped"] = true
-		out["reason"] = "none"
-		out["message"] = "今日暂无可领取权益"
-		return out
+	if receipt["confirmed_receipt"] == true && claimErr == nil {
+		confirmed := *ci
+		confirmed.TodayCheckedIn, confirmed.TodayCredit = true, ci.DailyCredit
+		confirmed.ClaimedAt, _ = receipt["claimed_at"].(string)
+		result := checkinAttemptResult{state: "success", message: "签到成功（领取回执已确认）", confirmed: true, status: &confirmed, receipt: receipt, campaignID: id}
+		if receipt["replayed"] == true {
+			result.state, result.message = "already", "已领取（权益已存在，无法判断由谁领取）"
+		}
+		return result
 	}
+	// A definite business/auth rejection must not become a retry. Transient 429
+	// is safe to retry after a new read; transport/5xx/malformed POST is not.
+	if claimErr != nil {
+		var ce *checkinRequestError
+		if errors.As(claimErr, &ce) && !ce.Uncertain {
+			result := checkinFailed(claimErr, false)
+			result.status, result.campaignID, result.legacy = ci, id, obs.legacy
+			return result
+		}
+	}
+	// Legacy acknowledgement/duplicate markers require verification. Even a lost
+	// response may have mutated upstream, so from here on retries are read-only.
+	pending := checkinRunRecord{confirmOnly: true, campaignID: id, legacy: obs.legacy}
+	result := confirmedCheckinAttempt(sa, pending)
+	result.campaignID, result.legacy, result.receipt = id, obs.legacy, receipt
+	if result.confirmed && receipt["result"] != "ALREADY_CLAIMED" {
+		result.state, result.message = "success", "签到成功（上游状态已确认）"
+	}
+	if !result.confirmed && claimErr == nil && receipt["success"] == false && receipt["result"] != "ALREADY_CLAIMED" {
+		result.state, result.message, result.retryable, result.confirmOnly = "failed", "上游明确拒绝领取，未确认成功", false, false
+	}
+	if !result.confirmed && claimErr != nil {
+		var ce *checkinRequestError
+		if errors.As(claimErr, &ce) && !ce.Retryable {
+			result.retryable = false
+		}
+	}
+	return result
+}
 
-	// Step 2: POST claim (5s budget).
-	res, err := performCheckinCall(sa)
-	if err != nil {
-		out["error"] = "claim: " + err.Error()
-		return out
+func finishCheckin(index string, before checkinRunRecord, result checkinAttemptResult) map[string]any {
+	now := time.Now()
+	enabled := checkinAutoEnabled()
+	checkinRuns.Lock()
+	current := checkinRuns.records[index]
+	r := before
+	r.at, r.state, r.inFlight = now, result.state, false
+	r.confirmed = result.confirmed || before.confirmed
+	if result.campaignID != "" && result.campaignID != before.campaignID {
+		r.confirmed = result.confirmed
 	}
-	// QoderWork returns {"result":"ALREADY_CLAIMED"} with HTTP 409 — surface
-	// as already rather than error. (v0.8.8: performCheckinCall 现在会把
-	// 409/ALREADY_CLAIMED 归一化到这里；旧代码把它吞成 http 409 字符串，
-	// 此分支永远打不中。)
-	if result, _ := res["result"].(string); result == "ALREADY_CLAIMED" {
-		out["success"] = true
+	r.confirmOnly = result.confirmOnly || before.confirmOnly && !result.confirmed
+	if result.confirmed {
+		r.confirmOnly = false
+	}
+	if result.campaignID != "" {
+		r.campaignID = result.campaignID
+	}
+	if result.campaignID != "" || result.status != nil || result.confirmed {
+		r.legacy = result.legacy
+	}
+	r.next = time.Time{}
+	if result.retryable && enabled && r.retries < len(checkinRetryDelays) && current.generation == before.generation {
+		next := now.Add(checkinRetryDelays[r.retries])
+		if next.Format("2006-01-02") == r.day {
+			r.next = next
+		}
+	}
+	r.generation = current.generation
+	checkinRuns.records[index] = r
+	checkinRuns.Unlock()
+	out := map[string]any{"auth_index": index, "success": result.confirmed, "confirmed": result.confirmed, "state": result.state, "message": result.message, "retry_count": r.retries, "retry_scheduled": !r.next.IsZero()}
+	if !r.next.IsZero() {
+		out["next_retry_at"] = r.next.UTC().Format(time.RFC3339)
+	}
+	if result.state != "success" {
+		out["reason"] = result.state
+	}
+	if result.state == "already" || result.state == "none" || result.state == "disabled" || result.state == "unsupported" {
 		out["skipped"] = true
-		out["reason"] = "already"
-		// replayed=true means the grant already existed upstream before THIS
-		// call — normally the desktop client claimed it. Say so instead of the
-		// ambiguous "今日已签到", which previously made the plugin look like it
-		// had done work it never did (2026-10-22 field report).
-		if replayed, _ := res["replayed"].(bool); replayed {
-			out["message"] = "今日已领取（由其他客户端领取）"
-			out["claimed_by_other"] = true
-		} else {
-			out["message"] = "今日已签到"
-		}
-		if rc, ok := res["rewardCredits"].(float64); ok {
-			out["reward_credits"] = int64(rc)
-		}
-		if claimedAt, ok := res["claimed_at"].(string); ok && claimedAt != "" {
-			out["claimed_at"] = claimedAt
-		}
-		rememberCheckinMoment(f.ID)
-		return out
 	}
-	if success, _ := res["success"].(bool); success {
-		out["success"] = true
-		if rc, ok := res["rewardCredits"].(float64); ok {
-			out["reward_credits"] = int64(rc)
-		}
-		out["message"] = "签到成功"
-		// Refresh the credits snapshot so the panel shows the post-checkin
-		// balance immediately (check-in grants new credits). Best-effort:
-		// a failure here must not flip the check-in result to error.
-		if cr, crErr := fetchUserResource(sa); crErr == nil && cr != nil {
-			out["credits"] = cr
-		}
-		// v0.8.8: 记录签到时刻 —— reconcile 的 lifecycle 在宽限窗口内
-		// 不做 disable，防止签到后积分池刷新延迟时被误禁用。
-		rememberCheckinMoment(f.ID)
-		return out
+	if result.state == "failed" {
+		out["error"] = result.message
 	}
-	// v0.8.8: claim 失败时复查一次 status —— 若上游已记账（并发/竞态），
-	// 改判为“今日已签”而不是失败（与上游 workbuddy_auto_checkin 的
-	// “先确认状态再定论”精神一致）。
-	if ci2, err2 := fetchCheckinStatus(sa); err2 == nil && ci2 != nil && ci2.TodayCheckedIn {
-		out["success"] = true
-		out["skipped"] = true
-		out["reason"] = "already"
-		out["message"] = "今日已签到（复查确认）"
-		rememberCheckinMoment(f.ID)
-		return out
-	}
-	// v0.8.15: upstream answers 200 with success:false plus STRUCTURED
-	// detail (error/result objects). Stuffing the raw map into "message"
-	// made the panel render "u345ee231：[object Object]" — a string
-	// concatenation of a JS object (2026-09-20 field report). The plugin
-	// owns the rendering now: one readable line, raw body kept under
-	// "upstream" for diagnostics.
-	out["success"] = false
-	out["message"] = summarizeCheckinClaimRes(res)
-	out["upstream"] = res
-	// Soft-fail reclass (mirror workbuddy): an "already checked in" family
-	// message is done, not a failure — CN duplicate claims (browser tab
-	// racing the plugin timer) must not flap the panel into an error.
-	if msg, _ := out["message"].(string); msg != "" {
-		low := strings.ToLower(msg)
-		if strings.Contains(low, "already") || strings.Contains(msg, "已签") || strings.Contains(msg, "今日") {
-			out["success"] = true
-			out["skipped"] = true
-			out["reason"] = "already"
+	if result.confirmed {
+		for _, key := range []string{"claimed_at", "grant_id", "replayed", "campaign_id"} {
+			if v, ok := result.receipt[key]; ok {
+				out[key] = v
+			}
+		}
+		if n, ok := result.receipt["rewardCredits"].(float64); ok {
+			out["reward_credits"] = int64(n)
+		}
+		if result.status != nil {
+			out["streak_days"], out["total_credits"] = result.status.StreakDays, result.status.TotalCredits
+			if result.status.ClaimedAt != "" {
+				out["claimed_at"] = result.status.ClaimedAt
+			}
 		}
 	}
 	return out
+}
+
+func runCheckinAccount(f pluginapi.HostAuthFileEntry, source string, listErr error) map[string]any {
+	mu := checkinLockFor(f.AuthIndex)
+	mu.Lock()
+	defer mu.Unlock()
+	if source != "manual" && !checkinAutoEnabled() {
+		cancelCheckinRetry(f.AuthIndex)
+		return map[string]any{"auth_index": f.AuthIndex, "success": false, "skipped": true, "reason": "cancelled"}
+	}
+	before, ok := reserveCheckin(f.AuthIndex, f.ID, source, time.Now())
+	if !ok {
+		return map[string]any{"auth_index": f.AuthIndex, "success": false, "skipped": true, "reason": "not_scheduled", "message": "任务已处理、未到期或安全状态容量已满"}
+	}
+	finish := func(result checkinAttemptResult) map[string]any {
+		out := finishCheckin(f.AuthIndex, before, result)
+		out["name"] = f.Name
+		return out
+	}
+	if listErr != nil {
+		return finish(checkinAttemptResult{state: "failed", message: "无法读取签到账号列表", retryable: true, confirmOnly: before.confirmOnly})
+	}
+	phys, err := hostAuthGetPhysicalFn(f.AuthIndex)
+	if err != nil {
+		return finish(checkinFailed(err, before.confirmOnly))
+	}
+	if phys == nil {
+		return finish(checkinAttemptResult{state: "failed", message: "签到凭证不存在", confirmOnly: before.confirmOnly})
+	}
+	if source != "manual" && (phys.Disabled || parseDisabledFromAuthJSON(phys.JSON)) {
+		return finish(checkinAttemptResult{state: "disabled", message: "账号已禁用，跳过自动签到及重试", confirmOnly: before.confirmOnly})
+	}
+	sa, err := parseStored(phys.JSON)
+	if err != nil {
+		return finish(checkinFailed(err, before.confirmOnly))
+	}
+	if !supportsCheckin(sa) {
+		return finish(checkinAttemptResult{state: "unsupported", message: "当前区域不支持每日签到"})
+	}
+	started := time.Now()
+	result := confirmedCheckinAttempt(sa, before)
+	if result.confirmed && (!before.confirmed || result.campaignID != "" && result.campaignID != before.campaignID) {
+		// The first confirmation starts grace. Re-reading an existing receipt must
+		// not extend grace indefinitely on repeated button presses.
+		storeCheckinConfirmation(f.ID, result.status, time.Now())
+	} else if result.status != nil {
+		storeAccountSnapshot(f.ID, &accountCacheEntry{checkin: result.status, checkinFetched: started})
+	}
+	out := finish(result)
+	out["nickname"] = sa.Account.Nickname
+	if result.confirmed {
+		// A fresh credits read may fail without invalidating a grant receipt. Never
+		// restamp fallback credit data as newly fetched, and never change disabled.
+		creditStart := time.Now()
+		if cr, crErr := fetchUserResourceFn(sa); crErr == nil && cr != nil {
+			fresh := *cr
+			fresh.FetchedAt = time.Now().UTC().Format(time.RFC3339)
+			storeAccountSnapshot(f.ID, &accountCacheEntry{credits: &fresh, creditsFetched: creditStart})
+			out["credits"] = &fresh
+		}
+	}
+	return out
+}
+
+// Called only from the existing loop, with no retained request callbacks. The
+// due scan doesn't spend the budget: reserve under each account lock does.
+func runDueCheckinRetries() {
+	if !checkinRetryDispatch.TryLock() {
+		return
+	}
+	defer checkinRetryDispatch.Unlock()
+	if !checkinAutoEnabled() {
+		cancelScheduledCheckinRetries()
+		return
+	}
+	now := time.Now()
+	var due []pluginapi.HostAuthFileEntry
+	checkinRuns.Lock()
+	for index, r := range checkinRuns.records {
+		if r.day != now.Format("2006-01-02") {
+			r.next = time.Time{}
+			checkinRuns.records[index] = r
+			continue
+		}
+		if !r.next.IsZero() && !r.next.After(now) {
+			due = append(due, pluginapi.HostAuthFileEntry{AuthIndex: index, ID: r.authID})
+		}
+	}
+	checkinRuns.Unlock()
+	if len(due) == 0 {
+		return
+	}
+	files, listErr := hostAuthList()
+	live := make(map[string]pluginapi.HostAuthFileEntry, len(files))
+	for _, f := range files {
+		live[f.AuthIndex] = f
+	}
+	for _, f := range due {
+		if listErr == nil {
+			entry, exists := live[f.AuthIndex]
+			if !exists {
+				cancelCheckinRetry(f.AuthIndex)
+				continue
+			}
+			f = entry
+		}
+		runCheckinAccount(f, "retry", listErr)
+	}
 }
 
 // summarizeCheckinClaimRes renders a non-success claim response as one
@@ -445,19 +657,9 @@ const checkinGraceWindow = 10 * time.Minute
 // rememberCheckinMoment stamps the cache entry (creating one when absent) with
 // the check-in time so reconcileOneAccount can honor the grace window.
 func rememberCheckinMoment(authID string) {
-	if authID == "" {
-		return
+	if authID != "" {
+		storeCheckinConfirmation(authID, nil, time.Now())
 	}
-	now := time.Now()
-	if v, ok := accountCache.Load(authID); ok {
-		if e, ok2 := v.(*accountCacheEntry); ok2 {
-			fresh := *e
-			fresh.checkinAt = now
-			accountCache.Store(authID, &fresh)
-			return
-		}
-	}
-	accountCache.Store(authID, &accountCacheEntry{checkinAt: now, fetched: now})
 }
 
 // checkinGraceActive reports whether authID checked in within the grace window.
@@ -470,9 +672,14 @@ func checkinGraceActive(authID string) bool {
 	return false
 }
 
+// Fixed stripes cannot be deleted while a waiter still holds an old lock
+// pointer (dashboard pruning used to break per-account mutual exclusion).
+var checkinLockStripes [256]sync.Mutex
+
 func checkinLockFor(authIndex string) *sync.Mutex {
-	v, _ := checkinLocks.LoadOrStore(authIndex, &sync.Mutex{})
-	return v.(*sync.Mutex)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(authIndex))
+	return &checkinLockStripes[h.Sum32()%uint32(len(checkinLockStripes))]
 }
 
 // checkProUpgradeEligibility returns whether the account can still claim the

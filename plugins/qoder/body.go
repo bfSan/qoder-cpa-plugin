@@ -262,28 +262,23 @@ func withModelContext(facts *modelRegionFacts) qoderBodyOption {
 // the gateway for this account's region. The boolean reports whether a catalog
 // entry was found at all, so callers can tell "no data" from "zero".
 //
-// 这里也是操作者覆盖值生效的地方：返回的 facts 里 ContextLength 已被替换成
-// 覆盖值，而 withModelContext 优先取 ContextLength —— 所以请求体、面板显示、
-// CPA 对外广告三者用的是同一个数，不会出现"面板显示 1M 但实际按 200K 发"。
+// Requests and per-auth ModelInfo share effectiveContextFacts. A global
+// override unsupported by this particular account falls back visibly rather
+// than sending another region's tier. Refresh expiry preserves own last-good.
 func contextTierForModel(sa *storedAuth, modelKey string) (*modelRegionFacts, bool) {
 	modelKey = strings.TrimSpace(modelKey)
 	if sa == nil || modelKey == "" {
 		return nil, false
 	}
-	facts, ok := cachedRegionFactsFor(accountCacheKey(sa))
-	if !ok || len(facts) == 0 {
+	facts, ok := lastGoodRegionFactsFor(accountCacheKey(sa))
+	if !ok {
 		return nil, false
 	}
-	fact, found := facts[modelKey]
+	raw, found := facts[modelKey]
 	if !found {
 		return nil, false
 	}
-	if override, hasOverride := contextOverrideForModel(modelKey); hasOverride {
-		// 拷贝再改：fact 是缓存里那份的副本，但 ContextLength 是指针，
-		// 直接写会顺着指针改到共享的缓存对象上，把覆盖值固化进缓存。
-		value := override
-		fact.ContextLength = &value
-	}
+	fact := effectiveContextFacts(modelKey, raw)
 	return &fact, true
 }
 

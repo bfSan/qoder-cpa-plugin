@@ -72,9 +72,8 @@ type checkinSummary struct {
 	Season          int64    `json:"season"`
 	CheckinDates    []string `json:"checkin_dates,omitempty"`
 	// ClaimedAt is the upstream receipt timestamp for campaign-contract
-	// regions. It lets the panel answer "did the plugin claim this, or did
-	// another client (the desktop app) claim it first?" — a distinction the
-	// bare today_checked_in flag can never express.
+	// regions. A timestamp identifies when a grant was made, not which client
+	// made it; a replayed receipt alone cannot establish the claimant.
 	ClaimedAt string `json:"claimed_at,omitempty"`
 }
 
@@ -227,6 +226,9 @@ func handleAccountDelete(req pluginapi.ManagementRequest) map[string]any {
 	if authIndex == "" {
 		return map[string]any{"error": "auth_index is required"}
 	}
+	mu := checkinLockFor(authIndex)
+	mu.Lock()
+	defer mu.Unlock()
 	phys, err := hostAuthGetPhysical(authIndex)
 	if err != nil || phys == nil {
 		return map[string]any{"error": "account not found"}
@@ -238,6 +240,7 @@ func handleAccountDelete(req pluginapi.ManagementRequest) map[string]any {
 	if err := deleteAuthFileInDir(path, authDirFromPath(path)); err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	cancelCheckinRetry(authIndex)
 	accountCache.Delete(authIndex)
 	lifecycleState.Delete(authIndex)
 	return map[string]any{"status": "ok", "auth_index": authIndex, "file": filepath.Base(path)}
@@ -280,6 +283,9 @@ func handleAccountSetDisabled(req pluginapi.ManagementRequest) map[string]any {
 		disabled = &val
 	}
 
+	mu := checkinLockFor(authIndex)
+	mu.Lock()
+	defer mu.Unlock()
 	phys, err := hostAuthGetPhysicalFn(authIndex)
 	if err != nil || phys == nil {
 		return map[string]any{"error": "account not found"}
@@ -301,7 +307,7 @@ func handleAccountSetDisabled(req pluginapi.ManagementRequest) map[string]any {
 		// read as a stale failure later. null removes the key entirely.
 		extra["disabled_reason"] = nil
 	}
-	raw, err := buildAuthFileJSON(sa, next, note, extra)
+	raw, err := buildAuthFileJSONFrom(sa, next, note, extra, phys.JSON)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -311,6 +317,9 @@ func handleAccountSetDisabled(req pluginapi.ManagementRequest) map[string]any {
 	}
 	if err := hostAuthSaveJSONFn(name, raw); err != nil {
 		return map[string]any{"error": err.Error()}
+	}
+	if next {
+		cancelCheckinRetry(authIndex)
 	}
 	// Both cache keys the dashboard reads from must stop serving the old state.
 	accountCache.Delete(authIndex)
@@ -398,7 +407,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelOverlayAction(req)))
 	case req.Method == http.MethodGet && path == base+"/models/context":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
-			"model_context": currentContextOverrides(),
+			"model_context":  currentContextOverrides(),
+			"context_states": contextOverrideStates(),
 		}))
 	case (req.Method == http.MethodPost || req.Method == http.MethodPut) && path == base+"/models/context":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelContextWrite(req)))

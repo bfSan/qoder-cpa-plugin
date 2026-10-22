@@ -193,8 +193,11 @@ function loadPanelWithCatalog(catalog = CATALOG) {
     // backend does in buildPanelRegionModels().
     const regionModels = (catalog.region_models || []).map(row => {
       const override = state.context[row.id];
-      if (!override) return row;
       const next = { ...row };
+      for (const region of ["cn", "intl"]) {
+        if (next[region] && next[region].present === true) next[region] = { ...next[region], context_options: next[region].context_options || (next[region].context_tiers || []).map(t => t.tokens) };
+      }
+      if (!override) return next;
       for (const region of ["cn", "intl"]) {
         if (next[region] && next[region].present === true) {
           next[region] = { ...next[region], context_length: override, context_override: true };
@@ -206,6 +209,7 @@ function loadPanelWithCatalog(catalog = CATALOG) {
   };
   panel.context.api = async (path, opts) => {
     if (path === "/models/context") {
+      if (!opts) return { model_context: { ...state.context } };
       const body = JSON.parse(opts.body);
       state.contextCalls.push(body);
       const tiers = (catalog.region_models || [])
@@ -215,13 +219,15 @@ function loadPanelWithCatalog(catalog = CATALOG) {
             .filter(c => c && Array.isArray(c.context_tiers))
             .flatMap(c => c.context_tiers.map(t => t.tokens)))].sort((a, b) => a - b)
         : [];
-      if (body.context_length == null) delete state.context[body.id];
-      else state.context[body.id] = body.context_length;
-      return { success: true, id: body.id, context_length: body.context_length ?? null, model_context: { ...state.context }, context_options: options };
+      const proposal = { ...state.context };
+      if (body.context_length == null) delete proposal[body.id];
+      else proposal[body.id] = body.context_length;
+      return { success: true, proposal: true, persistent: false, applied: false, id: body.id, context_length: body.context_length ?? null, model_context: proposal, context_options: options };
     }
     return served();
   };
   panel.context.managementAPI = async (p, o) => {
+    if (!o) return { config: { model_context: { ...state.context } } };
     const body = JSON.parse(o.body);
     state.patches.push([p, body]);
     if (body.model_order) state.order = body.model_order;
@@ -283,7 +289,7 @@ test("region table renders CN and Intl columns with per-region facts", async () 
   // fixture's qmodel carries upstream display_name "Q".
   assert.match(html, /class="model-display"[^>]*>Q</);
   assert.match(html, /倍率 0\.5x/);
-  assert.match(html, /思考 默认 high（low\/medium\/high）/);
+  assert.match(html, /思考 目录默认 high（low\/medium\/high）；插件可转发 low\/medium；未支持 high/);
   assert.doesNotMatch(html, /Global/, "Qoder's regions are cn/intl, not global");
 });
 
@@ -337,90 +343,35 @@ test("price factor renders one unified multiplier string", () => {
 
 // ------------------------------------------------------------------ 4. 思考
 
-test("thinking reports the default level, unknown, unsupported and off_only", () => {
+test("thinking separates catalog defaults from adapter forwarding and unknown", () => {
   const { context } = loadPanel();
-  const think = thinking => {
-    const html = context.regionCell({ cn: { status: "present", present: true, thinking } }, "cn");
-    const match = html.match(/思考 ([^<]*)<\/span>/);
-    assert.ok(match, `no 思考 fact in ${html}`);
-    return match[1];
-  };
-  const supported = { status: "supported", default: "high", can_disable: true, levels: ["low", "medium", "high", "xhigh", "max"] };
-  assert.equal(think(supported), "默认 high（low/medium/high/xhigh/max）");
-  // can_disable must not change the wording on its own.
-  assert.equal(think({ ...supported, can_disable: false }), "默认 high（low/medium/high/xhigh/max）");
-  assert.equal(think({ status: "unknown", levels: [] }), "未上报");
-  assert.equal(think({}), "未上报");
-  assert.equal(think(undefined), "未上报");
-  assert.equal(think({ status: "unsupported", levels: [] }), "不支持");
-  assert.equal(think({ status: "off_only", levels: [] }), "仅可关闭");
-  assert.equal(think({ status: "off_only", levels: ["high"] }), "仅可关闭（high）");
-  // supported without a default still lists the levels it accepts.
-  assert.equal(think({ status: "supported", levels: ["low", "high"] }), "low / high");
+  const value = context.thinkingText({ status: "supported", default: "max", levels: ["low", "medium", "high", "xhigh", "max"] });
+  assert.match(value, /目录默认 max/);
+  assert.match(value, /插件可转发 low\/medium\/xhigh/);
+  assert.match(value, /未支持 high\/max/);
+  assert.match(context.thinkingText({ status: "supported", levels: ["low", "high"] }), /目录默认未上报/);
+  assert.match(context.thinkingText({}), /目录未上报/);
+  assert.match(context.thinkingText({ status: "unsupported" }), /目录：不支持/);
+  assert.match(context.thinkingText({ status: "off_only" }), /插件不转发关闭值/);
 });
 
 // ------------------------------------------------------- 5. 上下文默认档高亮
 
-test("the effective context tier is bolded, for tiers and both legacy key shapes", () => {
+test("context displays effective, catalog default, and unknown independently", () => {
   const { context } = loadPanel();
-  // No model id → the tiers stay plain text. This is the fallback for a caller
-  // that has no id to key a click on; it must still mark the live tier.
-  const line = facts => {
-    const html = context.regionCell({ cn: { status: "present", present: true, ...facts } }, "cn");
-    const match = html.match(/上下文 ([\s\S]*?)<\/span><\/div>$/);
-    assert.ok(match, `no 上下文 fact in ${html}`);
-    return match[1];
-  };
-  const bolded = text => `<b class="ctx-default" title="当前生效档位 — CPA 与客户端看到的就是这一档">${text}</b>`;
-  const sep = '<span class="ctx-sep">/</span>';
-  // context_tiers is the current key: objects with label/tokens/is_default.
-  const tiers = line({
-    context_length: 200000,
-    context_tiers: [
-      { label: "200K", tokens: 200000, is_default: true },
-      { label: "400K", tokens: 400000 },
-      { label: "1M", tokens: 1000000 },
-    ],
-  });
-  assert.equal(tiers, `${bolded("200K")}${sep}400K${sep}1M`);
-  // The bold must follow context_length, NOT is_default. The backend advertises
-  // a 1M-capable model at 1M even when the provider's own default tier is 200K
-  // (models.go: effectiveCtx only falls back to the marked default when
-  // max_input_tokens is absent), so bolding is_default would label a tier
-  // nobody is served as the live one — the exact misreport this row exists to
-  // prevent. This fixture is that disagreement, stated explicitly.
-  const disagrees = line({
-    context_length: 1000000,
-    context_tiers: [
-      { label: "200K", tokens: 200000, is_default: true },
-      { label: "1M", tokens: 1000000 },
-    ],
-  });
-  assert.equal(disagrees, `200K${sep}${bolded("1M")}`);
-  assert.doesNotMatch(disagrees, /<b[^>]*>200K<\/b>/);
-  // context_options is the legacy key; supported_context_lengths the older one.
-  const options = line({ context_length: 600000, context_options: [300000, 600000, 1000000], default_context_length: 600000 });
-  assert.equal(options, `300K${sep}${bolded("600K")}${sep}1M`);
-  const legacy = line({ context_length: 300000, supported_context_lengths: [300000, 600000], default_context_length: 300000 });
-  assert.equal(legacy, `${bolded("300K")}${sep}600K`);
-  // context_tiers wins when both are present.
-  assert.equal(
-    line({ context_length: 128000, context_tiers: [{ label: "128K", tokens: 128000 }], context_options: [300000] }),
-    bolded("128K"),
-  );
-  // No advertised value at all: the list renders unadorned rather than guessing
-  // one of the tiers. Unknowable must stay visibly unknown.
-  const noEffective = line({ context_options: [300000, 600000] });
-  assert.equal(noEffective, `300K${sep}600K`);
-  assert.doesNotMatch(noEffective, /ctx-default/);
-  // An effective value outside the offered tiers is appended instead of being
-  // dropped: dropping it would leave the row with no bold at all, which reads
-  // as "no tier is live" — the one thing this row must never imply.
-  const foreign = line({ context_length: 750000, context_options: [300000, 600000], default_context_length: 750000 });
-  assert.equal(foreign, `300K${sep}600K${sep}${bolded("750K")}`);
-  // Single-tier fallback when no option list is reported.
-  assert.equal(line({ context_length: 128000 }), bolded("128K"));
-  assert.equal(line({}), "未上报");
+  const tiers = [{ label: "200K", tokens: 200000, is_default: true }, { label: "1M", tokens: 1000000 }];
+  const value = context.contextFactsHTML({ context_length: 1000000, context_tiers: tiers });
+  assert.match(value, /200K（目录默认）/);
+  assert.match(value, /<b[^>]*>1M<\/b>/);
+  assert.doesNotMatch(value, /<b[^>]*>200K/);
+  const unknown = context.contextFactsHTML({ context_tiers: [{tokens:200000},{tokens:1000000}] });
+  assert.match(unknown, /目录默认未上报/);
+  assert.match(unknown, /生效窗口未上报/);
+  assert.doesNotMatch(unknown, /ctx-default|aria-pressed="true"/);
+  const blocked = context.contextFactsHTML({ context_length: 200000, context_tiers: tiers, context_options: [200000], context_status: "override_rejected", context_requested: 1000000 }, "auto");
+  assert.match(blocked, /data-ctx-tokens="1000000"[^>]*disabled/);
+  assert.match(blocked, /覆盖不兼容/);
+  assert.match(blocked, /data-ctx-clear="true"/);
 });
 
 // 档位必须可点：点哪一档就切到哪一档。这里守的是"按钮形状 + 生效标记"两件事——
@@ -770,7 +721,7 @@ test("region facts escape dynamic values and never use inline handlers", async (
   await panel2.context.loadModels(false);
   const rendered = panel2.elements.get("modelList").innerHTML;
   assert.match(rendered, /倍率 0\.34x/);
-  assert.match(rendered, /思考 默认 high（low\/high）/);
+  assert.match(rendered, /思考 目录默认 high（low\/high）；插件可转发 low；未支持 high/);
   // The live tier is a clickable button here (the row carries a model id), not a
   // bare <b>; it must still be marked as the live one.
   assert.match(rendered, /class="ctx-tier ctx-tier-on"[^>]*data-ctx-tokens="600000"[^>]*aria-pressed="true"/);
@@ -1360,3 +1311,77 @@ test("an unchanged, still-persisted save reports success without a warning", asy
 
 
 
+
+
+test("context proposal cannot mutate runtime when host PATCH fails", async () => {
+  const panel = loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  const notices=[];
+  panel.context.toast=(...args)=>notices.push(args);
+  panel.context.managementAPI=async()=>{throw new Error("PATCH unavailable")};
+  assert.equal(await panel.context.setContextTier("auto",400000),false);
+  assert.deepEqual(panel.state.context,{});
+  assert.ok(notices.some(v=>v[1]==="err"));
+  assert.ok(!notices.some(v=>v[1]==="ok"));
+  assert.match(panel.elements.get("modelList").innerHTML,/data-ctx-tokens="200000"[^>]*aria-pressed="true"/);
+});
+
+test("context host readback mismatch never reports persistent success", async () => {
+  const panel = loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  const notices=[];
+  panel.context.toast=(...args)=>notices.push(args);
+  const host=panel.context.managementAPI;
+  panel.context.managementAPI=async(path,opts)=>opts?host(path,opts):{config:{model_context:{}}};
+  assert.equal(await panel.context.setContextTier("auto",400000),false);
+  assert.ok(!notices.some(v=>v[1]==="ok"));
+  assert.ok(notices.some(v=>String(v[2]).includes("未确认保存")));
+});
+
+test("context clear commits empty map and restores each catalog default", async () => {
+  const panel = loadPanelWithCatalog();
+  panel.context.toast=()=>{};
+  await panel.context.loadModels(false);
+  assert.equal(await panel.context.setContextTier("auto",400000),true);
+  assert.match(panel.elements.get("modelList").innerHTML,/data-ctx-clear="true"/);
+  assert.equal(await panel.context.setContextTier("auto",null),true);
+  assert.deepEqual(panel.state.context,{});
+  assert.deepEqual(panel.state.patches.at(-1)[1],{model_context:{}});
+  assert.match(panel.elements.get("modelList").innerHTML,/data-ctx-tokens="200000"[^>]*aria-pressed="true"/);
+});
+
+test("context runtime readback mismatch never reports applied success", async () => {
+  const panel = loadPanelWithCatalog();
+  panel.context.toast=()=>{};
+  await panel.context.loadModels(false);
+  const api=panel.context.api;
+  panel.context.api=async(path,opts)=>path==="/models/context"&&!opts?{model_context:{}}:api(path,opts);
+  assert.equal(await panel.context.setContextTier("auto",400000),false);
+});
+
+
+test("context readback reports saved but incompatible state without success", async () => {
+  const panel=loadPanelWithCatalog();
+  await panel.context.loadModels(false);
+  const notices=[];panel.context.toast=(...args)=>notices.push(args);
+  const api=panel.context.api;
+  panel.context.api=async(path,opts)=>{
+    const result=await api(path,opts);
+    if(path==="/models/context"&&!opts) result.context_states={auto:{status:"unverified_or_incompatible"}};
+    return result;
+  };
+  assert.equal(await panel.context.setContextTier("auto",400000),false);
+  assert.ok(notices.some(v=>String(v[2]).includes("配置已保存，但账号目录已变化")));
+  assert.ok(!notices.some(v=>v[1]==="ok"));
+});
+
+test("same-region context differences are inspectable instead of first-writer wins", () => {
+  const {context}=loadPanel();
+  const html=context.contextFactsHTML({context_status:"account_variance",context_length:200000,account_variants:[
+    {context_length:200000,context_tiers:[{tokens:200000,is_default:true}]},
+    {context_length:400000,context_tiers:[{tokens:400000,is_default:true}]}
+  ]},"shared");
+  assert.match(html,/查看 2 个账号目录差异/);
+  assert.match(html,/账号 1/);assert.match(html,/账号 2/);
+  assert.match(html,/200K/);assert.match(html,/400K/);
+});

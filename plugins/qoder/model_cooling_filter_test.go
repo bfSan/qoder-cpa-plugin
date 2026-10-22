@@ -23,6 +23,7 @@ import (
 func servingModelIDsFor(t *testing.T, authID string, models []string) []string {
 	t.Helper()
 	sa := testStoredAuthCNAccount()
+	fillFixtureToken(sa)
 	sa.Account.UID = authID
 	infos := make([]pluginapi.ModelInfo, 0, len(models))
 	for _, id := range models {
@@ -140,6 +141,7 @@ func TestQoderForAuthMatchesCoolingRecordedAgainstAlias(t *testing.T) {
 	markModelCooldown(authID, "upstream-model", cooldownReasonRateLimit)
 
 	sa := testStoredAuthCNAccount()
+	fillFixtureToken(sa)
 	sa.Account.UID = authID
 	restore := setDynamicModelsCacheForTest(map[string][]pluginapi.ModelInfo{
 		accountCacheKey(sa): {
@@ -213,6 +215,7 @@ func TestQoderCoolingDoesNotEmptyDynamicCache(t *testing.T) {
 	resetCooldowns(t)
 	const authID = "qoder-cache"
 	sa := testStoredAuthCNAccount()
+	fillFixtureToken(sa)
 	sa.Account.UID = authID
 	restore := setDynamicModelsCacheForTest(map[string][]pluginapi.ModelInfo{
 		accountCacheKey(sa): {

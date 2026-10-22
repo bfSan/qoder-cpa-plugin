@@ -88,7 +88,9 @@ func TestBillingSessionAttachesCookieAndCSRF(t *testing.T) {
 		}
 		seenCookie = r.Header.Get("Cookie")
 		seenCSRF = r.Header.Get("X-CSRF-Token")
-		_, _ = w.Write([]byte(`{"status":"CLAIMABLE"}`))
+		// Exercise the current campaign contract, not a legacy payload on the
+		// campaign URL (unknown status must not trigger speculative fallback).
+		_, _ = w.Write([]byte(campaignListJSON))
 	}))
 	defer server.Close()
 	restore := setUpstreamBaseForTest(regionCN, server.URL)

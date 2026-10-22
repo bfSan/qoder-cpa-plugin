@@ -29,6 +29,7 @@
 package main
 
 import (
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -70,6 +71,15 @@ func panelRegionCell(facts modelRegionFacts) map[string]any {
 		tiers = []contextTier{}
 	}
 	cell["context_tiers"] = tiers
+	cell["context_status"] = facts.ContextStatus
+	cell["context_override"] = facts.ContextOverride
+	cell["context_requested"] = facts.ContextRequested
+	cell["max_input_tokens"] = facts.MaxInputTokens
+	if tokens, ok := contextDefaultTokens(facts.ContextTiers); ok {
+		cell["context_default"] = tokens
+	} else {
+		cell["context_default"] = nil
+	}
 	if facts.Thinking != nil {
 		// Deep copy: the response is handed out per request, so returning the
 		// cached pointer would let one caller's mutation corrupt the catalog
@@ -157,13 +167,15 @@ func buildPanelRegionModels() []map[string]any {
 	regions := []string{regionCN, regionIntl}
 	loaded := map[string]bool{}
 	merged := map[string]map[string]modelRegionFacts{}
+	variants := map[string]map[string][]map[string]any{}
 
 	for _, region := range regions {
 		for _, key := range cachedRegionKeysByRegion(region) {
-			facts, ok := cachedRegionFactsFor(key)
+			facts, ok := lastGoodPanelFactsFor(key)
 			if !ok {
 				continue
 			}
+			_, fresh := cachedRegionFactsFor(key)
 			loaded[region] = true
 			for id, fact := range facts {
 				id = strings.TrimSpace(id)
@@ -175,11 +187,20 @@ func buildPanelRegionModels() []map[string]any {
 					byRegion = map[string]modelRegionFacts{}
 					merged[id] = byRegion
 				}
-				// First writer wins for a given region. cachedRegionKeysByRegion
-				// is sorted, so this is deterministic when two accounts in the
-				// same region report the same model.
-				if _, seen := byRegion[region]; !seen {
-					byRegion[region] = cloneRegionFacts(fact)
+				effective := effectiveContextFacts(id, fact)
+				if variants[id] == nil {
+					variants[id] = map[string][]map[string]any{}
+				}
+				variant := panelRegionCell(effective)
+				variant["catalog_state"] = "last_good"
+				if fresh {
+					variant["catalog_state"] = "ready"
+				}
+				variants[id][region] = append(variants[id][region], variant)
+				if previous, seen := byRegion[region]; seen {
+					byRegion[region] = conservativeRegionFacts(previous, effective)
+				} else {
+					byRegion[region] = effective
 				}
 			}
 		}
@@ -220,25 +241,16 @@ func buildPanelRegionModels() []map[string]any {
 		byRegion := merged[id]
 		for _, region := range regions {
 			if fact, ok := byRegion[region]; ok {
-				row[region] = panelRegionCell(fact)
+				cell := panelRegionCell(fact)
+				cell["account_variants"] = variants[id][region]
+				cell["account_count"] = len(variants[id][region])
+				cell["context_options"] = supportedContextTiersFor(id)
+				row[region] = cell
 				continue
 			}
 			row[region] = missingRegionCell(loaded[region])
 		}
-		// 操作者手工选定的档位覆盖的是"这个模型用多大窗口"，与区域无关：面板
-		// 一列展示两区，让同一模型在两区显示同一个生效值，操作者不必理解
-		// "CN 默认 200K、Intl 默认 1M" 这类上游差异。覆盖值按 ID 存，这里统一
-		// 应用到两区；没有覆盖时保持上游默认档，与加这个功能前完全一致。
-		if override, ok := contextOverrideForModel(id); ok {
-			for _, region := range regions {
-				cell, isCell := row[region].(map[string]any)
-				if !isCell || cell["present"] != true {
-					continue
-				}
-				cell["context_length"] = override
-				cell["context_override"] = true
-			}
-		}
+
 		row["context_options"] = supportedContextTiersFor(id)
 		rows = append(rows, row)
 	}
@@ -261,19 +273,29 @@ func buildPanelRegionStatus() map[string]any {
 		keys := cachedRegionKeysByRegion(region)
 		usable := false
 		models := 0
+		stale := 0
 		for _, key := range keys {
-			if _, ok := cachedRegionFactsFor(key); !ok {
+			if _, ok := lastGoodRegionFactsFor(key); !ok {
 				continue
 			}
 			usable = true
-			if cached, ok := cachedDynamicModelsFor(key); ok {
-				models += len(cached)
+			dynamicModelsCache.RLock()
+			entry := dynamicModelsCache.byAccount[key]
+			models += len(entry.models)
+			if time.Since(entry.fetched) >= dynamicModelsCacheTTL {
+				stale++
 			}
+			dynamicModelsCache.RUnlock()
+		}
+		label := regionStatusLabel(usable)
+		if stale > 0 {
+			label = "last_good"
 		}
 		status[region] = map[string]any{
-			"loaded": usable,
-			"status": regionStatusLabel(usable),
-			"models": models,
+			"loaded":         usable,
+			"status":         label,
+			"stale_accounts": stale,
+			"models":         models,
 		}
 	}
 	return status
@@ -284,4 +306,55 @@ func regionStatusLabel(loaded bool) string {
 		return "ready"
 	}
 	return "not_loaded"
+}
+
+// A region cell is a conservative summary, never an arbitrary account's claim.
+// Full anonymous account variants accompany it so differences remain inspectable.
+func conservativeRegionFacts(a, b modelRegionFacts) modelRegionFacts {
+	out := cloneRegionFacts(a)
+	if a.ContextLength == nil || b.ContextLength == nil {
+		out.ContextLength = nil
+	} else if *b.ContextLength < *a.ContextLength {
+		value := *b.ContextLength
+		out.ContextLength = &value
+	}
+	if !reflect.DeepEqual(a.ContextLength, b.ContextLength) || !reflect.DeepEqual(a.ContextTiers, b.ContextTiers) || a.ContextStatus != b.ContextStatus {
+		out.ContextStatus = "account_variance"
+	}
+	out.ContextOverride = a.ContextOverride && b.ContextOverride
+	// Show only common tiers in the summary; variants preserve the full reports.
+	var common []contextTier
+	for _, left := range a.ContextTiers {
+		for _, right := range b.ContextTiers {
+			if left.Tokens == right.Tokens {
+				left.IsDefault = left.IsDefault && right.IsDefault
+				common = append(common, left)
+				break
+			}
+		}
+	}
+	out.ContextTiers = common
+	if !reflect.DeepEqual(a.Thinking, b.Thinking) {
+		out.Thinking = &thinkingFacts{Status: "account_variance"}
+	}
+	if !reflect.DeepEqual(a.PriceFactor, b.PriceFactor) {
+		out.PriceFactor = nil
+	}
+	return out
+}
+
+// Presence comes from this account's own model list. Missing optional facts
+// remain unknown and participate in the conservative region summary.
+func lastGoodPanelFactsFor(key string) (map[string]modelRegionFacts, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	entry, ok := dynamicModelsCache.byAccount[key]
+	if !ok || len(entry.models) == 0 {
+		return nil, false
+	}
+	facts := make(map[string]modelRegionFacts, len(entry.models))
+	for _, model := range entry.models {
+		facts[model.ID] = entry.region[model.ID]
+	}
+	return facts, true
 }

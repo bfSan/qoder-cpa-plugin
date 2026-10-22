@@ -5,11 +5,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -52,47 +50,52 @@ type checkinStatusResponse struct {
 	RewardExpiresAt    int64  `json:"rewardExpiresAt"` // epoch seconds from upstream
 }
 
-func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
-	switch capabilitiesForRegion(authRegion(sa)).Contract {
-	case checkinContractCampaign:
-		sum, err := fetchCampaignCheckinSummary(sa)
+// checkinObservation binds a claim to the exact status/contract just read.
+// An unknown status must never trigger a speculative POST or contract switch.
+type checkinObservation struct {
+	summary  *checkinSummary
+	campaign *campaign
+	legacy   bool
+}
+
+func fetchCheckinObservation(sa *storedAuth) (*checkinObservation, error) {
+	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
+		status, err := fetchCampaignStatus(sa)
 		if err == nil {
-			return sum, nil
+			return &checkinObservation{summary: campaignCheckinSummary(status), campaign: claimableCampaign(status)}, nil
 		}
-		// Older CN credentials may predate the campaign surface. Fall back to
-		// the legacy daily-check-in endpoint only for CN and only when the
-		// campaign call itself failed (an empty campaign list is a valid
-		// "nothing to claim" answer, not a reason to retry another contract).
-		if authRegion(sa) == regionCN {
-			if legacy, legacyErr := fetchDailyCheckinStatus(sa); legacyErr == nil {
-				return legacy, nil
-			}
+		if authRegion(sa) != regionCN || !checkinLegacyFallback(err) {
+			return nil, err
 		}
+	}
+	ci, err := fetchDailyCheckinStatus(sa)
+	if err != nil {
 		return nil, err
 	}
-	return fetchDailyCheckinStatus(sa)
+	return &checkinObservation{summary: ci, legacy: true}, nil
+}
+
+func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
+	observation, err := fetchCheckinObservation(sa)
+	if err != nil {
+		return nil, err
+	}
+	return observation.summary, nil
 }
 
 // fetchDailyCheckinStatus is the legacy CN daily-check-in contract, kept as a
 // fallback after CN moved to /me/campaigns (2026-09-21).
 func fetchDailyCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/status", nil)
+	resp, err := checkinHTTPRequest(sa, http.MethodGet, "/sash/api/v1/me/daily-check-in/status")
 	if err != nil {
 		return nil, err
 	}
-	billingHeaders(req, sa)
-	resp, err := hostHTTPDo(req)
-	if err != nil {
+	if err := checkinHTTPError(resp.StatusCode, false); err != nil {
 		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, classifyCheckinStatusError(authRegion(sa), resp.StatusCode, string(resp.Body))
 	}
 	var q checkinStatusResponse
-	if err := json.Unmarshal(resp.Body, &q); err != nil {
-		return nil, fmt.Errorf("checkin status parse: %w", err)
+	if json.Unmarshal(resp.Body, &q) != nil || (q.Status != "CLAIMABLE" && q.Status != "CLAIMED") {
+		return nil, &checkinRequestError{Kind: "protocol"}
 	}
 	today := time.Now().Format("2006-01-02")
 	lastClaimed := ""
@@ -111,6 +114,9 @@ func fetchDailyCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 	}
 	if sum.TodayCheckedIn {
 		sum.TodayCredit = q.RewardCredits
+	}
+	if q.Status == "CLAIMED" && !sum.TodayCheckedIn {
+		return nil, &checkinRequestError{Kind: "protocol"}
 	}
 	return sum, nil
 }
@@ -234,59 +240,45 @@ func fetchPaymentType(sa *storedAuth) string {
 }
 
 func performCheckinCall(sa *storedAuth) (map[string]any, error) {
-	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
-		res, err := performCampaignCheckin(sa)
-		if err == nil {
-			return res, nil
-		}
-		if authRegion(sa) == regionCN {
-			if legacy, legacyErr := performDailyCheckinCall(sa); legacyErr == nil {
-				return legacy, nil
-			}
-		}
+	observation, err := fetchCheckinObservation(sa)
+	if err != nil {
 		return nil, err
 	}
-	return performDailyCheckinCall(sa)
+	if observation.summary.TodayCheckedIn {
+		return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+	}
+	if !observation.summary.Active {
+		return map[string]any{"success": false}, nil
+	}
+	if observation.legacy {
+		return performDailyCheckinCall(sa)
+	}
+	return performCampaignClaim(sa, observation.campaign)
 }
 
-// performDailyCheckinCall is the legacy CN claim path, kept as a fallback.
+// The legacy acknowledgement still requires a status verification. Missing
+// success, nil error, free text or a duplicate marker are not confirmation.
 func performDailyCheckinCall(sa *storedAuth) (map[string]any, error) {
-	req, err := http.NewRequest(http.MethodPost, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/claim", strings.NewReader("{}"))
+	resp, err := checkinHTTPRequest(sa, http.MethodPost, "/sash/api/v1/me/daily-check-in/claim")
 	if err != nil {
 		return nil, err
-	}
-	billingHeaders(req, sa)
-	resp, err := hostHTTPDo(req)
-	if err != nil {
-		return map[string]any{"success": false, "message": err.Error()}, nil
-	}
-	if resp.StatusCode >= 400 {
-		body := truncateRedacted(string(resp.Body), 200)
-		// v0.8.8: QoderWork 在并发/重复领取时返回 HTTP 409 +
-		// {"result":"ALREADY_CLAIMED"}（偶尔也用 200 + success:false）。
-		// 旧代码把一切 http>=400 都吞成 success:false，导致下面
-		// checkinOneAccount 的 ALREADY_CLAIMED 分支永远打不中，
-		// “今日已签”被当成失败展示。这里提前识别并归一化。
-		var probe map[string]any
-		if json.Unmarshal(resp.Body, &probe) == nil {
-			if r, _ := probe["result"].(string); r == "ALREADY_CLAIMED" {
-				return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-			}
-		}
-		if resp.StatusCode == http.StatusConflict && strings.Contains(string(resp.Body), "ALREADY_CLAIMED") {
-			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-		}
-		return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, body)}, nil
 	}
 	var m map[string]any
-	if err := json.Unmarshal(resp.Body, &m); err != nil {
+	parseErr := json.Unmarshal(resp.Body, &m)
+	if resp.StatusCode == http.StatusConflict && parseErr == nil && m["result"] == "ALREADY_CLAIMED" {
+		return m, nil
+	}
+	if err := checkinHTTPError(resp.StatusCode, true); err != nil {
 		return nil, err
 	}
-	// QoderWork checkin claim returns {"success":true, "rewardCredits":100,...}
-	// on success, or {"success":false,"error":"..."} on already-claimed.
-	// Normalise to the panel's expected shape (bool success).
-	if _, ok := m["success"]; !ok {
-		m["success"] = true
+	if parseErr != nil || m == nil {
+		return nil, &checkinRequestError{Kind: "protocol", Retryable: true, Uncertain: true}
+	}
+	if err := checkinBodyRejection(m); err != nil {
+		return nil, err
+	}
+	if _, ok := m["success"].(bool); !ok && m["result"] != "ALREADY_CLAIMED" {
+		return nil, &checkinRequestError{Kind: "protocol", Retryable: true, Uncertain: true}
 	}
 	return m, nil
 }

@@ -106,11 +106,14 @@ func TestRequestModelForCooldown_FallsBackToExecutorModel(t *testing.T) {
 	}
 }
 
-func TestRecordUpstreamFailure_HardCreditStaysAccountScoped(t *testing.T) {
+func TestRecordUpstreamFailure_AmbiguousCreditStaysModelScoped(t *testing.T) {
 	resetCooldowns(t)
 	recordUpstreamFailure("qoder-a", "qfmodel", 402, `{"message":"insufficient credit"}`)
-	if got := cooldownSnapshotAll(); len(got) != 0 {
-		t.Fatalf("hard credit errors belong to lifecycle handling, got %+v", got)
+	if got := cooldownSnapshotAll(); len(got) != 1 || got[0]["scope"] != "model" {
+		t.Fatalf("ambiguous credit errors must not freeze the account: %+v", got)
+	}
+	if dailyQuotaCooldownError("qoder-a", "gmodel") != nil {
+		t.Fatal("unrelated model frozen")
 	}
 }
 

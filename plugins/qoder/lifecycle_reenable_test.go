@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // 禁用恢复此前只对 CN 生效，Intl 账号一旦被停用就再没有任何代码路径能把它
@@ -15,7 +16,7 @@ func intlAuthWithCredits(t *testing.T) (*storedAuth, *stubAuthHost) {
 	sa.Auth.Region = regionIntl
 	sa.Auth.Domain = "qoder.com"
 	fillFixtureToken(sa)
-	raw, err := buildAuthFileJSON(sa, true, "INTL · 已禁用 · 余100 已用100 池200", nil)
+	raw, err := buildAuthFileJSON(sa, true, "INTL · 已禁用 · 余100 已用100 池200", map[string]any{"disabled_reason": "exhausted"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +50,9 @@ func TestLifecycleReenablesIntlWithCredits(t *testing.T) {
 	accountCache.Delete("auth-id-intl")
 	lifecycleState.Delete("auth-id-intl")
 
-	act, err := reconcileOneAccount("idx-intl", "auth-id-intl", true)
+	accountCache.Store("auth-id-intl", &accountCacheEntry{credits: cr, fetched: time.Now()})
+	t.Cleanup(func() { accountCache.Delete("auth-id-intl"); lifecycleState.Delete("auth-id-intl") })
+	act, err := reconcileOneAccount("idx-intl", "auth-id-intl", false)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

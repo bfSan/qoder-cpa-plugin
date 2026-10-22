@@ -19,6 +19,7 @@ build:
 # Run all tests with race detector.
 test:
 	$(GO) test -race -count=1 ./...
+	node --test panel.test.js panel.reliability.test.js
 
 # Lint everything (requires gofmt + go vet; staticcheck/gocritic/unparam optional).
 lint:

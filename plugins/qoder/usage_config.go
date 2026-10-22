@@ -73,6 +73,7 @@ const fallbackUsageReportURL = "http://cpa-manager-plus:18317/v0/management/usag
 
 // configure decodes plugin config from the lifecycle request.
 func configure(raw []byte) {
+	_ = configureQoderProxyRequest(raw)
 	// Parse config without holding any lock (fixes nested-lock hazard).
 	nextCheckinAuto := true
 	nextLifecycleAuto := true
@@ -157,6 +158,9 @@ func configure(raw []byte) {
 	checkinAutoMu.Lock()
 	checkinAuto = nextCheckinAuto
 	checkinAutoMu.Unlock()
+	if !nextCheckinAuto {
+		cancelScheduledCheckinRetries()
+	}
 
 	lifecycleAutoMu.Lock()
 	lifecycleAuto = nextLifecycleAuto

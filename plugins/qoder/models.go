@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,7 +24,8 @@ import (
 // q37fmodel and gm51model, while the Intl gateway (qoder.com) advertises the
 // ultimate/performance/efficient tiers instead. So a discovery failure falls
 // back to this union rather than to one region's list, and no entry here may be
-// dropped just because the other region lacks it.
+// dropped just because the other region lacks it. This list is display-only
+// fallback metadata, never proof that an undiscovered account serves these IDs.
 //
 // (History: this comment used to claim qmodel_preview / q36fmodel / gm51model
 // were "retired upstream". That was wrong for gm51model — it is simply CN-only,
@@ -34,25 +36,28 @@ import (
 // account is present. Aliases use the qoder/ prefix in AuthAttributes; bare IDs
 // work too.
 func wbModels() []pluginapi.ModelInfo {
-	return []pluginapi.ModelInfo{
-		{ID: "auto", Name: "Auto", ContextLength: 200000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "ultimate", Name: "Ultimate", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "performance", Name: "Performance", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "efficient", Name: "Efficient", ContextLength: 200000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "qmodel_38max", Name: "Qwen3.8-Max", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "qfmodel", Name: "Qwen3.8-Flash", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "qmodel_latest", Name: "Qwen3.7-Max", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "qmodel", Name: "Qwen3.7-Plus", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "q37fmodel", Name: "Qwen3.7-Flash", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "kmodel_latest", Name: "Kimi-K3", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "kmodel", Name: "Kimi-K2.8-Preview", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gmodel", Name: "GLM-5.3", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gfmodel", Name: "GLM-5.3-Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gm51model", Name: "GLM-5.2", ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "dmodel", Name: "DeepSeek-V4-Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "dfmodel", Name: "DeepSeek-Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "mmodel", Name: "MiniMax-M3", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+	models := []pluginapi.ModelInfo{
+		{ID: "auto", Name: "Auto", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "ultimate", Name: "Ultimate", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "performance", Name: "Performance", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "efficient", Name: "Efficient", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "qmodel_38max", Name: "Qwen3.8-Max", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "qfmodel", Name: "Qwen3.8-Flash", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "qmodel_latest", Name: "Qwen3.7-Max", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "qmodel", Name: "Qwen3.7-Plus", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "q37fmodel", Name: "Qwen3.7-Flash", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "kmodel_latest", Name: "Kimi-K3", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "kmodel", Name: "Kimi-K2.8-Preview", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gmodel", Name: "GLM-5.3", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gfmodel", Name: "GLM-5.3-Flash", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gm51model", Name: "GLM-5.2", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "dmodel", Name: "DeepSeek-V4-Pro", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "dfmodel", Name: "DeepSeek-Flash", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "mmodel", Name: "MiniMax-M3", MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
+	// Static names preserve candidates, not account entitlement. Until discovery
+	// supplies an account-specific default the context capability is unknown.
+	return models
 }
 
 // dynamicModelEntry is one account's cached discovery result.
@@ -76,26 +81,23 @@ type dynamicModelEntry struct {
 // e.g. gm51model resolved while the CN list was cached, then 400'd once the
 // Intl list replaced it — and it made the panel show one region's catalog for
 // both accounts. The empty key is a synthetic slot used by unit tests and as
-// the last-resort fallback.
+// legacy test fixtures (never an account fallback).
 var dynamicModelsCache struct {
 	sync.RWMutex
 	byAccount map[string]dynamicModelEntry
 }
 
 // accountCacheKey identifies the account a discovery result belongs to. The UID
-// is stable across token refreshes; the token prefix only backs up files that
-// predate it. Region is folded in so two files sharing a UID can never collide.
+// is stable across token refreshes; a full token digest backs up legacy files.
+// Region is folded in so two files sharing a UID can never collide.
 func accountCacheKey(sa *storedAuth) string {
 	if sa == nil {
 		return ""
 	}
 	key := strings.TrimSpace(sa.Account.UID)
-	if key == "" {
-		n := len(sa.Auth.AccessToken)
-		if n > 16 {
-			n = 16
-		}
-		key = sa.Auth.AccessToken[:n]
+	if key == "" && sa.Auth.AccessToken != "" {
+		// Full digest avoids collisions for legacy tokens sharing a prefix.
+		key = fmt.Sprintf("token-sha256:%x", sha256.Sum256([]byte(sa.Auth.AccessToken)))
 	}
 	if key == "" {
 		return ""
@@ -110,7 +112,7 @@ func cachedDynamicModelsFor(key string) ([]pluginapi.ModelInfo, bool) {
 	if !ok || len(e.models) == 0 || time.Since(e.fetched) >= dynamicModelsCacheTTL {
 		return nil, false
 	}
-	return e.models, true
+	return effectiveModelsForAccount(e.models, e.region), true
 }
 
 // cachedDynamicModelsAll unions every cached account (plus the synthetic slot)
@@ -120,28 +122,42 @@ func cachedDynamicModelsFor(key string) ([]pluginapi.ModelInfo, bool) {
 func cachedDynamicModelsAll() ([]pluginapi.ModelInfo, bool) {
 	dynamicModelsCache.RLock()
 	defer dynamicModelsCache.RUnlock()
-	seen := make(map[string]struct{})
+	// Sort account keys for stable names, and merge limits conservatively. A
+	// provider-wide minimum is not a promise that all regions share a default.
+	keys := make([]string, 0, len(dynamicModelsCache.byAccount))
+	for key := range dynamicModelsCache.byAccount {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	indexes := map[string]int{}
 	var out []pluginapi.ModelInfo
-	for _, e := range dynamicModelsCache.byAccount {
-		if len(e.models) == 0 || time.Since(e.fetched) >= dynamicModelsCacheTTL {
-			continue
-		}
-		for _, m := range e.models {
-			if _, dup := seen[m.ID]; dup {
+	for _, key := range keys {
+		e := dynamicModelsCache.byAccount[key]
+		for _, model := range effectiveModelsForAccount(e.models, e.region) {
+			if index, exists := indexes[model.ID]; exists {
+				if model.ContextLength < out[index].ContextLength {
+					out[index].ContextLength = model.ContextLength
+				}
 				continue
 			}
-			seen[m.ID] = struct{}{}
-			out = append(out, m)
+			indexes[model.ID] = len(out)
+			out = append(out, model)
 		}
 	}
-	if len(out) == 0 {
-		return nil, false
-	}
-	return out, true
+	return out, len(out) > 0
+}
+
+// lastGoodRegionFactsFor intentionally ignores refresh TTL for serving. It
+// never looks at another identity; expiry means refresh due, not lost facts.
+func lastGoodRegionFactsFor(key string) (map[string]modelRegionFacts, bool) {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	entry, ok := dynamicModelsCache.byAccount[key]
+	return entry.region, ok && len(entry.models) > 0
 }
 
 // storeDynamicModels seeds the synthetic slot, which stands in for "the last
-// account to answer" in unit tests and the provider-wide fallback.
+// account to answer" in unit tests and the provider-wide display catalog.
 func storeDynamicModels(models []pluginapi.ModelInfo) {
 	storeDynamicModelsFor("", models, nil)
 }
@@ -276,7 +292,7 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 // stored under its own key, so a per-auth query never inherits another region's
 // catalog.
 func fetchDynamicModelsForce(force bool) ([]pluginapi.ModelInfo, error) {
-	if !force {
+	if !force && allModelCatalogsFresh() {
 		if models, ok := cachedDynamicModelsAll(); ok {
 			return models, nil
 		}
@@ -284,6 +300,9 @@ func fetchDynamicModelsForce(force bool) ([]pluginapi.ModelInfo, error) {
 	models := wbModels()
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
+		if lastGood, ok := cachedDynamicModelsAll(); ok {
+			return lastGood, err
+		}
 		return models, err
 	}
 	// Strict filename-prefix match — same filter as host_auth.go hostAuthList.
@@ -331,7 +350,11 @@ func fetchDynamicModelsForce(force bool) ([]pluginapi.ModelInfo, error) {
 		}
 	}
 	if pulled && len(out) > 0 {
-		return out, nil
+		union, _ := cachedDynamicModelsAll()
+		return union, lastErr
+	}
+	if lastGood, ok := cachedDynamicModelsAll(); ok {
+		return lastGood, lastErr
 	}
 	return models, lastErr
 }
@@ -343,27 +366,25 @@ func fetchDynamicModelsForce(force bool) ([]pluginapi.ModelInfo, error) {
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	sa, err := parseStored(storageJSON)
 	if err != nil || sa == nil {
-		return fetchDynamicModels()
+		return []pluginapi.ModelInfo{}
 	}
 	key := accountCacheKey(sa)
 	if models, ok := cachedDynamicModelsFor(key); ok {
 		return models
 	}
 	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
-		return dyn
+		facts, _ := lastGoodRegionFactsFor(key)
+		return effectiveModelsForAccount(dyn, facts)
 	}
 	// Discovery failed for this account: reuse its stale entry if we have one
-	// rather than another region's list, then fall back to the union.
+	// rather than another region's list. Without it this auth is not ready.
 	dynamicModelsCache.RLock()
 	stale, ok := dynamicModelsCache.byAccount[key]
 	dynamicModelsCache.RUnlock()
 	if ok && len(stale.models) > 0 {
-		return stale.models
+		return effectiveModelsForAccount(stale.models, stale.region)
 	}
-	if models, ok := cachedDynamicModelsAll(); ok {
-		return models
-	}
-	return wbModels()
+	return []pluginapi.ModelInfo{}
 }
 
 // fetchDynamicModels calls the QoderWork API to get the latest model list.
@@ -413,7 +434,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		Key                 string              `json:"key"`
 		DisplayName         string              `json:"display_name"`
 		Enable              bool                `json:"enable"`
-		IsReasoning         bool                `json:"is_reasoning"`
+		IsReasoning         *bool               `json:"is_reasoning"`
 		IsVL                bool                `json:"is_vl"`
 		MaxInputTokens      int64               `json:"max_input_tokens"`
 		PriceFactor         float64             `json:"price_factor"`
@@ -436,9 +457,9 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			continue
 		}
 		factors[m.Key] = m.PriceFactor
-		ctx2 := int64(180000)
-		if m.MaxInputTokens > 0 {
-			ctx2 = m.MaxInputTokens
+		ctx2 := m.MaxInputTokens
+		if ctx2 < 0 || ctx2 > maxContextWindowValue {
+			ctx2 = 0
 		}
 		tiers := parseContextTiers(m.ContextConfig)
 		out = append(out, pluginapi.ModelInfo{
@@ -453,9 +474,20 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		// marked: max_input_tokens is the ceiling the gateway accepts, while
 		// the default tier is what it applies without an explicit choice, and
 		// the panel labels that one as current.
-		effectiveCtx := ctx2
+		var effectiveCtx *int64
 		if tokens, ok := contextDefaultTokens(tiers); ok {
-			effectiveCtx = tokens
+			effectiveCtx = &tokens
+		} else if len(tiers) == 0 && ctx2 > 0 {
+			// max_input is useful fallback metadata only when no selectable
+			// tiers were published. Never label it a catalog default tier.
+			value := ctx2
+			effectiveCtx = &value
+		}
+		thinking := parseThinkingFacts(m.Thinking, m.IsReasoning == nil || *m.IsReasoning)
+		var maxInput *int64
+		if ctx2 > 0 {
+			value := ctx2
+			maxInput = &value
 		}
 		factor := m.PriceFactor
 		regions[m.Key] = modelRegionFacts{
@@ -463,9 +495,10 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			OriginalPriceFactor: cloneFloat64Ptr(m.OriginalPriceFactor),
 			IsFree:              m.IsFree,
 			Promotion:           normalizeQoderPromotion(m.Promotion, time.Now()),
-			ContextLength:       &effectiveCtx,
+			ContextLength:       effectiveCtx,
+			MaxInputTokens:      maxInput,
 			ContextTiers:        tiers,
-			Thinking:            parseThinkingFacts(m.Thinking, m.IsReasoning),
+			Thinking:            thinking,
 		}
 	}
 	if len(out) == 0 {
@@ -722,4 +755,18 @@ func filterCoolingModels(req pluginapi.AuthModelRequest, models []pluginapi.Mode
 		out = append(out, model)
 	}
 	return out
+}
+
+func allModelCatalogsFresh() bool {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	if len(dynamicModelsCache.byAccount) == 0 {
+		return false
+	}
+	for _, entry := range dynamicModelsCache.byAccount {
+		if len(entry.models) == 0 || time.Since(entry.fetched) >= dynamicModelsCacheTTL {
+			return false
+		}
+	}
+	return true
 }

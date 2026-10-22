@@ -29,7 +29,7 @@ func isDailyCountLimit(status int, body string) bool {
 // the deployed host requires the lifecycle marker to leave cooldown ownership
 // with this plugin. It is an ABI compatibility marker, not a real stream EOF.
 // Quota wording makes DSH classify this as QUOTA (not AUTH or quick retry).
-type dailyQuotaError struct{}
+type dailyQuotaError struct{ hint quotaHint }
 
 func (*dailyQuotaError) Error() string {
 	return "qoder quota exceeded: 上游每日调用次数已达上限，该账号的此模型暂时冷却；并非 API 密钥失效。稍后重试或使用其他账号/模型 (DAILY_COUNT_LIMIT; unexpected EOF)"
@@ -37,7 +37,7 @@ func (*dailyQuotaError) Error() string {
 
 func newDailyQuotaError(status int, body string) *dailyQuotaError {
 	if isDailyCountLimit(status, body) {
-		return &dailyQuotaError{}
+		return &dailyQuotaError{hint: parseQuotaHint(nil, body, cooldownNowFn())}
 	}
 	return nil
 }
@@ -47,6 +47,9 @@ func newDailyQuotaError(status int, body string) *dailyQuotaError {
 // daily quota cooldown, even before model.for_auth refreshes. Reads don't extend
 // the finite TTL, and no assumption is made about the upstream reset timezone.
 func dailyQuotaCooldownError(authID, model string) error {
+	if err := otherQuotaCooldownError(authID, model); err != nil {
+		return err
+	}
 	key := modelCooldownKey{AuthID: strings.TrimSpace(authID), ModelID: normalizeCooldownModel(model)}
 	now := cooldownNowFn()
 	cooldownMu.Lock()

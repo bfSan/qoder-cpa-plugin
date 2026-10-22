@@ -118,11 +118,21 @@ const (
 // verifier/challenge + nonce/machine_id, the user authorizes in a browser,
 // and PollLogin exchanges the grant at /api/v1/deviceToken/poll.
 type loginCtx struct {
-	verifier  string // PKCE code_verifier — required by the poll endpoint
-	nonce     string // device-flow nonce — paired with the auth URL
-	region    string // login region: cn | intl (merged qoder-intl)
+	mu        sync.Mutex // serializes token exchange, checkpoints, and panel save
+	verifier  string
+	nonce     string
+	deviceKey string // stable machine_id generated with this authorization
+	region    string
+	owner     string // host RPC or panel; never both credential writers
 	expires   time.Time
-	startedAt int64 // unix nano, set when StartLogin creates the state
+	startedAt int64
+	token     *deviceTokenResponse
+	jobToken  *jobTokenResponse
+	pat       string
+	tokenAt   time.Time
+	result    *storedAuth
+	saved     bool
+	store     *oauthPendingStore
 }
 
 var (
@@ -140,14 +150,8 @@ func init() {
 	go func() {
 		ticker := time.NewTicker(loginStatesPruneInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			now := time.Now()
-			loginStates.Range(func(key, value any) bool {
-				if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
-					loginStates.Delete(key)
-				}
-				return true
-			})
+		for now := range ticker.C {
+			pruneOAuthPending(now)
 		}
 	}()
 }
@@ -261,8 +265,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		seedModelCatalogMemory()
 		return okEnvelope(wbRegistration())
 	case pluginabi.MethodModelStatic:
+		_ = configureOAuthPending(request)
 		return handleModelStatic(request)
 	case pluginabi.MethodModelForAuth:
+		_ = configureOAuthPending(request)
 		return handleModelForAuth(request)
 	case pluginabi.MethodAuthIdentifier:
 		return okEnvelope(identifierResponse{Identifier: providerName})
@@ -356,7 +362,7 @@ type registrationCapability struct {
 // `make build` feeds from the VERSION file. This literal is the fallback for a
 // bare `go build`; keep it in step with VERSION so a stray build never
 // under-reports the plugin version.
-var version = "0.9.23"
+var version = "0.9.24"
 
 func wbRegistration() registration {
 	return registration{
@@ -368,14 +374,15 @@ func wbRegistration() registration {
 			GitHubRepository: pluginRepoURL,
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 10:00 and 21:00 local time for CN accounts (default true)."},
+				{Name: "proxy-url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional HTTP/HTTPS/SOCKS5/SOCKS5H proxy used exclusively for Qoder HTTP, including login. Empty inherits host routing; failures never replay directly."},
+				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 10:00 and 21:00 local time for supported CN/Intl accounts (default true)."},
 				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{regionCN, regionIntl}, Description: "Region for NEW logins: cn (qoder.com.cn, default) or intl (qoder.com). Existing accounts keep their own region; legacy qoder-cn-/qoder-intl- auth files are adopted automatically."},
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto lifecycle for credit-driven states (default true). Since 0.9.18 exhaustion no longer disables an account (free rate-0 models stay callable; upstream hard-credit errors are the authority); instead this flag gates the cleanup that re-enables accounts the old rule had parked (except manual disables and session-dead credentials)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 				{Name: "hidden_models", Type: pluginapi.ConfigFieldTypeArray, Description: "Plugin-owned model deny-list. Hidden IDs are removed from CPA's model responses before registration; the panel persists hide/restore edits here."},
 				{Name: "model_order", Type: pluginapi.ConfigFieldTypeArray, Description: "Persisted catalog display order written by the panel drag handle. The complete model ID list is stored and restored on reload."},
-				{Name: "model_context", Type: pluginapi.ConfigFieldTypeArray, Description: "Persisted per-model context-window overrides written by the panel tier buttons, as {modelID: tokens}. Values must be one of the tiers the upstream gateway reports for that model; clearing the key reverts to the upstream default tier."},
+				{Name: "model_context", Type: pluginapi.ConfigFieldTypeObject, Description: "Persisted per-model context-window overrides written by the panel tier buttons, as {modelID: tokens}. Values must be one of the tiers the upstream gateway reports for that model; clearing the key reverts to the upstream default tier."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},
@@ -793,7 +800,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		}
 		// Compliance: route via host.http.do_stream so request-log captures the
 		// outbound call. Read entire body via the bridge, then fold SSE → completion.
-		stream, statusCode, _, streamErr := hostHTTPDoStream(httpReq)
+		stream, statusCode, responseHeaders, streamErr := hostHTTPDoStream(httpReq)
 		if streamErr != nil {
 			if cancel != nil {
 				cancel()
@@ -814,11 +821,11 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 				}
 			}
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
-			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
+			recordUpstreamFailureWithHeaders(req.AuthID, cooldownModel, statusCode, string(payload), responseHeaders)
 			reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
 			// 0.8.13: account-level statuses ride the error envelope so the host
 			// cooldown layer stops re-picking a drained credential.
-			return nil, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
+			return nil, upstreamStatusError(statusCode, attachQuotaHeaders(chatUpstreamError(statusCode, string(payload)), responseHeaders))
 		}
 		completion, foldErr := aggregateQoderSSE(reader, req.Model)
 		stream.Close()
@@ -843,7 +850,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 				}
 			}
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, foldStatus, foldErr.Error())
-			recordUpstreamFailure(req.AuthID, cooldownModel, foldStatus, foldErr.Error())
+			recordUpstreamError(req.AuthID, cooldownModel, foldStatus, foldErr)
 			reconcileAfterExecutorError(req.AuthID, foldStatus, foldErr.Error())
 			return nil, queueErrorForClient(foldErr)
 		}
@@ -975,7 +982,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		chunks, statusCode, errCollect := collectUpstreamStreamQoder(prepare, sseFramed, collector)
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
-			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errCollect.Error())
+			recordUpstreamError(req.AuthID, cooldownModel, statusCode, errCollect)
 			return nil, errCollect
 		}
 		publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -1015,6 +1022,10 @@ func errorEnvelopeFor(err error) []byte {
 	err = queueErrorForClient(err)
 	if _, daily := err.(*dailyQuotaError); daily {
 		return errorEnvelope("quota_exceeded", err.Error())
+	}
+	var quota *quotaObservationError
+	if errors.As(err, &quota) {
+		return errorEnvelope("quota_exceeded", quota.Error())
 	}
 	if _, queued := err.(*queueAdmissionError); queued {
 		return errorEnvelope("rate_limit", err.Error())

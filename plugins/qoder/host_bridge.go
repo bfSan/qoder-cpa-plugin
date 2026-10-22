@@ -1,18 +1,20 @@
 // host_bridge.go routes every upstream HTTP call through the CPA host's
 // http bridge (host.http.do / host.http.do_stream / stream_read / stream_close).
-// Production traffic always uses the bridge so request-log captures outbound
-// calls and host transport policy (proxy, timeout) applies. The *Direct
-// variants are the test-only fallback used when the bridge is unavailable
+// Inherit mode uses the bridge and its transport policy. Explicit plugin proxy
+// mode uses that proxy exclusively. A failed bridge call is NEVER retried direct.
+// Direct variants are used only when the bridge is unavailable
 // (unit tests, or hosts older than v7.2.x without the http bridge RPC).
 package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -33,6 +35,7 @@ func sharedHTTPClient() *http.Client {
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,
@@ -111,7 +114,21 @@ func hostBridgeAvailable() bool {
 // v7.2.x without the http bridge), we route through sharedHTTPClient directly.
 // This keeps the plugin functional in dev/test contexts while preferring the
 // compliant path in production.
+var qoderBridgeAvailable = hostBridgeAvailable
+
 func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
+	if req != nil {
+		route := currentQoderProxy()
+		if route.mode == qoderProxyBlocked {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, blockedQoderHTTPError()
+		}
+		if route.mode == qoderProxyExplicit {
+			return qoderHTTPDoWithClient(route.client, req)
+		}
+	}
 	if req == nil {
 		return nil, fmt.Errorf("nil request")
 	}
@@ -124,12 +141,7 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 		_ = req.Body.Close()
 		bodyBytes = b
 	}
-	// Windows stack movement mitigation: nested host calls during synchronous
-	// RPCs (model.for_auth, management.handle) cause the host stack to move,
-	// rendering the stack response pointer dangling and causing "unexpected
-	// end of JSON input". Bypass host bridge on Windows and make direct HTTP
-	// calls.
-	if !hostBridgeAvailable() || runtime.GOOS == "windows" {
+	if !qoderBridgeAvailable() {
 		return hostHTTPDoDirect(req, bodyBytes)
 	}
 	wire := rpcHostHTTPRequestWire{
@@ -141,25 +153,21 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 		},
 	}
 	raw, err := hostCall(pluginabi.MethodHostHTTPDo, mustJSON(wire))
-	if err == nil {
-		result, uerr := hostBridgeUnwrap(raw, pluginabi.MethodHostHTTPDo)
-		if uerr == nil {
-			resp, perr := decodeBridgeHTTPResponse(result)
-			if perr == nil {
-				return resp, nil
-			}
-			return nil, perr
-		}
-		err = uerr
+	if err != nil {
+		return nil, qoderTransportFailure(req.Context(), err)
 	}
-	// Bridge exists but the call failed — fall back to direct so a transient
-	// host RPC error doesn't take down the executor. The host's own failure
-	// reason is preserved in the combined error when direct also fails.
-	if dResp, dErr := hostHTTPDoDirect(req, bodyBytes); dErr == nil {
-		return dResp, nil
-	} else {
-		return nil, fmt.Errorf("host http bridge: %v; direct fallback: %w", err, dErr)
+	result, err := hostBridgeUnwrap(raw, pluginabi.MethodHostHTTPDo)
+	if err != nil {
+		return nil, qoderTransportFailure(req.Context(), err)
 	}
+	resp, err := decodeBridgeHTTPResponse(result)
+	if err != nil {
+		return nil, qoderTransportFailure(req.Context(), err)
+	}
+	if resp.StatusCode < 100 || resp.StatusCode > 599 {
+		return nil, fmt.Errorf("Qoder host HTTP response has invalid status")
+	}
+	return resp, nil
 }
 
 // decodeBridgeHTTPResponse parses the host bridge's host.http.do result.
@@ -200,20 +208,26 @@ func hostHTTPDoDirect(req *http.Request, bodyBytes []byte) (*hostHTTPResponse, e
 		return nil, err
 	}
 	newReq.Header = req.Header.Clone()
-	resp, err := sharedHTTPClient().Do(newReq)
+	return qoderHTTPDoWithClient(sharedHTTPClient(), newReq)
+}
+
+func blockedQoderHTTPError() error {
+	return fmt.Errorf("Qoder HTTP blocked by invalid proxy-url configuration")
+}
+
+func qoderHTTPDoWithClient(client *http.Client, req *http.Request) (*hostHTTPResponse, error) {
+	copy := *client
+	copy.CheckRedirect = qoderRejectRedirect
+	resp, err := copy.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, qoderTransportFailure(req.Context(), err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, qoderTransportFailure(req.Context(), err)
 	}
-	return &hostHTTPResponse{
-		StatusCode: resp.StatusCode,
-		Headers:    resp.Header.Clone(),
-		Body:       raw,
-	}, nil
+	return &hostHTTPResponse{StatusCode: resp.StatusCode, Headers: resp.Header.Clone(), Body: raw}, nil
 }
 
 // hostHTTPStream is a handle for an in-flight host-bridged stream. Read returns
@@ -224,9 +238,14 @@ func hostHTTPDoDirect(req *http.Request, bodyBytes []byte) (*hostHTTPResponse, e
 //   - Direct (test fallback): direct holds the full buffered body, Read drains
 //     it once then reports done. Close is a no-op.
 type hostHTTPStream struct {
-	streamID string
-	direct   []byte
-	directAt int
+	streamID  string
+	direct    []byte // compatibility for synthetic buffered bridge tests
+	directAt  int
+	body      io.ReadCloser // explicit proxy/bridge-unavailable streams stay streaming
+	ctx       context.Context
+	readMu    sync.Mutex
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 // hostHTTPDoStream opens a streaming call via the host bridge. The host owns
@@ -236,6 +255,18 @@ type hostHTTPStream struct {
 // In that case the returned hostHTTPStream wraps an in-memory copy of the
 // full response body so Read/Close have the same shape.
 func hostHTTPDoStream(req *http.Request) (*hostHTTPStream, int, http.Header, error) {
+	if req != nil {
+		route := currentQoderProxy()
+		if route.mode == qoderProxyBlocked {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, 0, nil, blockedQoderHTTPError()
+		}
+		if route.mode == qoderProxyExplicit {
+			return qoderHTTPDoStreamWithClient(route.client, req)
+		}
+	}
 	if req == nil {
 		return nil, 0, nil, fmt.Errorf("nil request")
 	}
@@ -248,7 +279,7 @@ func hostHTTPDoStream(req *http.Request) (*hostHTTPStream, int, http.Header, err
 		_ = req.Body.Close()
 		bodyBytes = b
 	}
-	if !hostBridgeAvailable() {
+	if !qoderBridgeAvailable() {
 		return hostHTTPDoStreamDirect(req, bodyBytes)
 	}
 	wire := rpcHostHTTPRequestWire{
@@ -261,11 +292,11 @@ func hostHTTPDoStream(req *http.Request) (*hostHTTPStream, int, http.Header, err
 	}
 	raw, err := hostCall(pluginabi.MethodHostHTTPDoStream, mustJSON(wire))
 	if err != nil {
-		return hostHTTPDoStreamDirect(req, bodyBytes)
+		return nil, 0, nil, qoderTransportFailure(req.Context(), err)
 	}
 	result, err := hostBridgeUnwrap(raw, pluginabi.MethodHostHTTPDoStream)
 	if err != nil {
-		return hostHTTPDoStreamDirect(req, bodyBytes)
+		return nil, 0, nil, qoderTransportFailure(req.Context(), err)
 	}
 	var resp rpcHostHTTPStreamResponseWire
 	if err := json.Unmarshal(result, &resp); err != nil {
@@ -274,37 +305,53 @@ func hostHTTPDoStream(req *http.Request) (*hostHTTPStream, int, http.Header, err
 	if resp.StreamID == "" {
 		return nil, resp.StatusCode, http.Header(resp.Headers), fmt.Errorf("host stream bridge unavailable")
 	}
-	return &hostHTTPStream{streamID: resp.StreamID}, resp.StatusCode, http.Header(resp.Headers), nil
+	return &hostHTTPStream{streamID: resp.StreamID, ctx: req.Context()}, resp.StatusCode, http.Header(resp.Headers), nil
 }
 
-// hostHTTPDoStreamDirect is the test-only fallback: it performs the request
-// with the plugin's own http.Client and buffers the full body into an
-// in-memory hostHTTPStream so Read/Close keep the same contract.
+// hostHTTPDoStreamDirect is selected before sending when the bridge is absent.
+// The response stays streaming and Close interrupts its reader.
 func hostHTTPDoStreamDirect(req *http.Request, bodyBytes []byte) (*hostHTTPStream, int, http.Header, error) {
 	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	newReq.Header = req.Header.Clone()
-	resp, err := sharedHTTPClient().Do(newReq)
+	return qoderHTTPDoStreamWithClient(sharedHTTPClient(), newReq)
+}
+
+func qoderHTTPDoStreamWithClient(client *http.Client, req *http.Request) (*hostHTTPStream, int, http.Header, error) {
+	copy := *client
+	copy.CheckRedirect = qoderRejectRedirect
+	resp, err := copy.Do(req)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, qoderTransportFailure(req.Context(), err)
 	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, resp.StatusCode, resp.Header.Clone(), err
-	}
-	return &hostHTTPStream{direct: raw}, resp.StatusCode, resp.Header.Clone(), nil
+	return &hostHTTPStream{body: resp.Body, ctx: req.Context()}, resp.StatusCode, resp.Header.Clone(), nil
 }
 
 // Read pulls the next chunk. Returns (payload, done, err). done=true means the
 // stream ended cleanly; err non-nil means upstream or bridge error.
 func (s *hostHTTPStream) Read() ([]byte, bool, error) {
-	if s == nil {
+	if s == nil || s.closed.Load() {
 		return nil, true, fmt.Errorf("stream closed")
 	}
-	// Direct (test fallback) mode: serve the buffered body in one shot.
+	if s.ctx != nil && s.ctx.Err() != nil {
+		s.Close()
+		return nil, true, s.ctx.Err()
+	}
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if s.body != nil {
+		buf := make([]byte, 32*1024)
+		n, err := s.body.Read(buf)
+		if err == io.EOF {
+			return buf[:n], true, nil
+		}
+		if err != nil {
+			return buf[:n], true, qoderTransportFailure(s.ctx, err)
+		}
+		return buf[:n], false, nil
+	}
 	if s.direct != nil {
 		if s.directAt >= len(s.direct) {
 			return nil, true, nil
@@ -318,37 +365,35 @@ func (s *hostHTTPStream) Read() ([]byte, bool, error) {
 	}
 	raw, err := hostCall(pluginabi.MethodHostHTTPStreamRead, mustJSON(map[string]any{"stream_id": s.streamID}))
 	if err != nil {
-		return nil, true, err
+		return nil, true, qoderTransportFailure(s.ctx, err)
 	}
 	result, err := hostBridgeUnwrap(raw, pluginabi.MethodHostHTTPStreamRead)
 	if err != nil {
-		return nil, true, err
+		return nil, true, qoderTransportFailure(s.ctx, err)
 	}
 	var resp rpcHostHTTPStreamReadResponseWire
-	if err := json.Unmarshal(result, &resp); err != nil {
-		return nil, true, fmt.Errorf("decode host.http.stream_read response: %w", err)
+	if json.Unmarshal(result, &resp) != nil {
+		return nil, true, fmt.Errorf("invalid host stream response")
 	}
 	if resp.Error != "" {
-		return nil, true, fmt.Errorf("%s", resp.Error)
+		return nil, true, fmt.Errorf("upstream stream read failed")
 	}
 	return resp.Payload, resp.Done, nil
 }
 
-// Close aborts the upstream stream. Always safe to call (idempotent on host).
 func (s *hostHTTPStream) Close() {
 	if s == nil {
 		return
 	}
-	if s.direct != nil {
-		s.direct = nil
-		s.directAt = 0
-		return
-	}
-	if s.streamID == "" {
-		return
-	}
-	_, _ = hostCall(pluginabi.MethodHostHTTPStreamClose, mustJSON(map[string]any{"stream_id": s.streamID}))
-	s.streamID = ""
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		if s.body != nil {
+			_ = s.body.Close()
+		}
+		if s.streamID != "" {
+			_, _ = hostCall(pluginabi.MethodHostHTTPStreamClose, mustJSON(map[string]any{"stream_id": s.streamID}))
+		}
+	})
 }
 
 // hostStreamReader adapts a hostHTTPStream to io.Reader so existing
@@ -367,40 +412,42 @@ func newHostStreamReader(s *hostHTTPStream) *hostStreamReader {
 }
 
 func (r *hostStreamReader) Read(p []byte) (int, error) {
-	// Drain buffered bytes first.
-	if len(r.buf) > 0 {
-		n := copy(p, r.buf)
-		r.buf = r.buf[n:]
-		return n, nil
+	if len(p) == 0 {
+		return 0, nil
 	}
-	if r.done {
-		if r.err != nil {
+	for empty := 0; ; empty++ {
+		if len(r.buf) > 0 {
+			n := copy(p, r.buf)
+			r.buf = r.buf[n:]
+			return n, nil
+		}
+		if r.done {
+			if r.err != nil {
+				return 0, r.err
+			}
+			return 0, io.EOF
+		}
+		chunk, done, err := r.s.Read()
+		r.done, r.err = done || err != nil, err
+		if len(chunk) > 0 {
+			n := copy(p, chunk)
+			if n < len(chunk) {
+				r.buf = append(r.buf, chunk[n:]...)
+			}
+			return n, nil
+		}
+		if r.done {
+			if err != nil {
+				return 0, err
+			}
+			return 0, io.EOF
+		}
+		if empty >= 100 {
+			r.done = true
+			r.err = io.ErrNoProgress
 			return 0, r.err
 		}
-		return 0, io.EOF
 	}
-	chunk, done, err := r.s.Read()
-	if err != nil {
-		r.done = true
-		r.err = err
-		return 0, err
-	}
-	if len(chunk) > 0 {
-		n := copy(p, chunk)
-		if n < len(chunk) {
-			r.buf = append(r.buf, chunk[n:]...)
-		}
-		if done {
-			r.done = true
-		}
-		return n, nil
-	}
-	if done {
-		r.done = true
-		return 0, io.EOF
-	}
-	// Empty chunk, not done — recurse to fetch next.
-	return r.Read(p)
 }
 
 // mustJSON marshals v and panics on error — the wire structs above are always

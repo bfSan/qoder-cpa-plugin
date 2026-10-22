@@ -79,18 +79,14 @@ var hardCreditMarkers = []string{
 // isHardCreditError reports business "out of credits" style failures.
 // 402 is treated as payment/credit. Pure 429 is not hard unless body has credit markers.
 func isHardCreditError(status int, body string) bool {
+	// Legacy billing-refresh hint only. Freeze scope is decided separately by
+	// classifyQuotaReason; neither this heuristic nor a balance disables auths.
 	if status == httpStatusPaymentRequired {
 		return true
 	}
 	lower := strings.ToLower(body)
-	for _, m := range hardCreditMarkers {
-		if strings.Contains(lower, strings.ToLower(m)) {
-			return true
-		}
-	}
-	// Chinese markers may not lower-map usefully; also scan raw.
-	for _, m := range hardCreditMarkers {
-		if strings.Contains(body, m) {
+	for _, marker := range hardCreditMarkers {
+		if strings.Contains(lower, strings.ToLower(marker)) {
 			return true
 		}
 	}
@@ -157,7 +153,7 @@ func isQueueAdmission(status int, body string) bool {
 		return false
 	}
 	flat := strings.ReplaceAll(body, `\`, "")
-	if strings.Contains(flat, upstreamQueueCode) {
+	if strings.Contains(flat, upstreamQueueCode) || queueCodePattern.MatchString(flat) {
 		return true
 	}
 	// Defensive: honour queue semantics even if the numeric code shifts.
@@ -197,19 +193,11 @@ func lifecycleActionFor(region string, cr *creditsSummary) lifecycleAction {
 	return lifecycleNone
 }
 
-// shouldReenable is true when a disabled account should be brought back.
-//
-// ★ It no longer requires positive credits. Exhausted credits stopped being a
-// reason to disable an account (see lifecycleActionFor), so a disabled account
-// with 0 remaining is a leftover from the old rule and must be revived even
-// though the balance cannot grow while it sits parked.
-//
-// The caller has already excluded the two disables that must survive:
-// manual (the operator parked it on purpose) and session-dead (the credential
-// itself is revoked; re-login is the fix). What remains is "credits known and
-// not otherwise condemned" — revive it. cr == nil (balance unknown) still
-// returns false: the caller bails out before reaching here, and a wrong
-// re-enable of a possibly-broken credential is worse than one more idle tick.
+// shouldReenable is the balance-only migration prerequisite. Callers MUST also
+// require legacyExhaustedDisable on the latest physical document while holding
+// the account lock. Unknown/manual/session-dead disables are never automatic.
+// Positive balance is not required for an explicitly proven old exhaustion
+// disable: this fork keeps free models available at zero credits.
 func shouldReenable(disabled bool, cr *creditsSummary) bool {
 	if !disabled {
 		return false
@@ -264,12 +252,17 @@ func (e *statusError) Unwrap() error   { return e.err }
 // upstreamStatusError wraps a translated upstream chat failure with the HTTP
 // status the host cooldown layer should attribute to the credential.
 //
-// qoder variant: only unambiguous account-level statuses pass (401/402/429).
-// 403 and the request-level shapes (413/输入过大 etc.) stay status-less — the
-// qoder upstream has no evidenced business-403 family, and chatSizeMarkers
-// failures are request-level by definition; both keep the host's 1-minute
-// transient default (pre-0.8.13 behavior unchanged).
+// Typed Qoder business failures (daily quota, shared/model credit, queue)
+// retain plugin-owned cooldown semantics and never carry auth-looking status.
+// Other errors preserve the historical 401/402/429 passthrough policy.
 func upstreamStatusError(status int, err error) error {
+	if safe := queueErrorForClient(err); safe != err {
+		return safe
+	}
+	switch err.(type) {
+	case *dailyQuotaError, *queueAdmissionError, *quotaObservationError:
+		return err
+	}
 	if status == http.StatusUnauthorized ||
 		status == http.StatusPaymentRequired ||
 		status == http.StatusTooManyRequests {
@@ -304,8 +297,8 @@ func upstreamReadError(err error) error {
 // actionable copy when the rejection was caused by oversized input so users
 // don't mistake it for an account/quota problem.
 func chatUpstreamError(status int, body string) error {
-	if daily := newDailyQuotaError(status, body); daily != nil {
-		return daily
+	if quota := quotaErrorWithHeaders(status, body, nil); quota != nil {
+		return quota
 	}
 	if queued := newQueueAdmissionError(status, body); queued != nil {
 		return queued

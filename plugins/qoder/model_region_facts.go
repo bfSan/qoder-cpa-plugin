@@ -50,11 +50,13 @@ type contextTier struct {
 // disabled block (it cannot), and no thinking_config at all (unreported). Only
 // the first is a claim about capability; the third must stay unknown.
 type thinkingFacts struct {
-	Status      string   `json:"status"`
-	Default     string   `json:"default,omitempty"`
-	CanDisable  *bool    `json:"can_disable,omitempty"`
-	Levels      []string `json:"levels,omitempty"`
-	EffortNames []string `json:"-"`
+	Status               string   `json:"status"`
+	Default              string   `json:"default,omitempty"`
+	CanDisable           *bool    `json:"can_disable,omitempty"`
+	Levels               []string `json:"levels,omitempty"`
+	EffortNames          []string `json:"-"`
+	SupportedByAdapter   []string `json:"supported_by_adapter"`
+	UnsupportedByAdapter []string `json:"unsupported_by_adapter"`
 }
 
 // qoderPromotionFacts is the promotion block published alongside one chat
@@ -116,6 +118,10 @@ type modelRegionFacts struct {
 	IsFree              bool                 `json:"is_free,omitempty"`
 	Promotion           *qoderPromotionFacts `json:"promotion,omitempty"`
 	ContextLength       *int64               `json:"context_length,omitempty"`
+	ContextStatus       string               `json:"context_status,omitempty"`
+	ContextOverride     bool                 `json:"context_override,omitempty"`
+	ContextRequested    *int64               `json:"context_requested,omitempty"`
+	MaxInputTokens      *int64               `json:"max_input_tokens,omitempty"`
 	ContextTiers        []contextTier        `json:"context_tiers,omitempty"`
 	Thinking            *thinkingFacts       `json:"thinking,omitempty"`
 }
@@ -273,9 +279,7 @@ func parseThinkingFacts(cfg *qoderThinkingConfigWire, supportsReasoning bool) *t
 	// holds; reading a root-level efforts map would be guessing at a shape that
 	// has not been seen.
 	efforts := map[string]qoderThinkingEffortWire{}
-	var source qoderThinkingOptionWire
 	if cfg.Enabled != nil {
-		source = *cfg.Enabled
 		for name, effort := range cfg.Enabled.Efforts {
 			efforts[name] = effort
 		}
@@ -293,19 +297,26 @@ func parseThinkingFacts(cfg *qoderThinkingConfigWire, supportsReasoning bool) *t
 	case len(levels) > 0:
 		facts.Status = "supported"
 		facts.Levels = levels
-		// The tier marked is_default wins; otherwise the model's enabled block
-		// default, then the strongest named tier. Upstream omits the marker on
-		// some models, and showing a tier with no indication of which one is
-		// current is the state this field exists to fix.
-		for _, name := range levels {
-			if efforts[name].IsDefault {
-				facts.Default = name
-				break
+		for _, level := range levels {
+			if normalizeReasoningEffort(level) != "" {
+				facts.SupportedByAdapter = append(facts.SupportedByAdapter, level)
+			} else {
+				facts.UnsupportedByAdapter = append(facts.UnsupportedByAdapter, level)
 			}
 		}
-		if facts.Default == "" && source.IsDefault {
-			facts.Default = levels[len(levels)-1]
+		// Only an explicitly marked effort is a default; enabled.is_default
+		// describes the switch and cannot select a reasoning intensity.
+		for _, name := range levels {
+			if !efforts[name].IsDefault {
+				continue
+			}
+			if facts.Default != "" {
+				facts.Default = ""
+				break
+			}
+			facts.Default = name
 		}
+
 	case cfg.Enabled != nil:
 		// A pure on/off switch: the gateway offers thinking but names no tiers.
 		// Reporting this as supported with no levels would misrepresent it as a
@@ -313,6 +324,13 @@ func parseThinkingFacts(cfg *qoderThinkingConfigWire, supportsReasoning bool) *t
 		facts.Status = "off_only"
 	default:
 		facts.Status = "unknown"
+	}
+	if cfg.Disabled != nil && cfg.Disabled.IsDefault {
+		if cfg.Enabled != nil && cfg.Enabled.IsDefault {
+			facts.Default = ""
+		} else {
+			facts.Default = "disabled"
+		}
 	}
 	return facts
 }
@@ -346,7 +364,7 @@ func parseContextTiers(raw map[string]qoderContextTierWire) []contextTier {
 	tiers := make([]contextTier, 0, len(raw))
 	for label, entry := range raw {
 		label = strings.TrimSpace(label)
-		if label == "" || entry.TokenCount <= 0 {
+		if label == "" || entry.TokenCount <= 0 || entry.TokenCount > maxContextWindowValue {
 			continue
 		}
 		tiers = append(tiers, contextTier{
@@ -372,12 +390,17 @@ func parseContextTiers(raw map[string]qoderContextTierWire) []contextTier {
 // contextDefaultTokens reports the token count of the tier marked default, used
 // to resolve the context length the gateway would apply on its own.
 func contextDefaultTokens(tiers []contextTier) (int64, bool) {
+	var value int64
 	for _, tier := range tiers {
-		if tier.IsDefault {
-			return tier.Tokens, true
+		if !tier.IsDefault || tier.Tokens <= 0 || tier.Tokens > maxContextWindowValue {
+			continue
 		}
+		if value != 0 && value != tier.Tokens {
+			return 0, false
+		}
+		value = tier.Tokens
 	}
-	return 0, false
+	return value, value > 0
 }
 
 // cloneThinkingFacts deep-copies so a caller mutating a response cannot corrupt
@@ -389,6 +412,17 @@ func cloneThinkingFacts(facts *thinkingFacts) *thinkingFacts {
 	copied := *facts
 	copied.Levels = append([]string(nil), facts.Levels...)
 	copied.EffortNames = append([]string(nil), facts.EffortNames...)
+	copied.SupportedByAdapter = []string{}
+	copied.UnsupportedByAdapter = []string{}
+	// Adapter policy is local, not an upstream/disk capability. Recompute for
+	// legacy caches and never trust stale adapter claims persisted by a build.
+	for _, level := range copied.Levels {
+		if normalizeReasoningEffort(level) != "" {
+			copied.SupportedByAdapter = append(copied.SupportedByAdapter, level)
+		} else {
+			copied.UnsupportedByAdapter = append(copied.UnsupportedByAdapter, level)
+		}
+	}
 	if facts.CanDisable != nil {
 		value := *facts.CanDisable
 		copied.CanDisable = &value
@@ -437,6 +471,10 @@ func cloneRegionFacts(facts modelRegionFacts) modelRegionFacts {
 		IsFree:              facts.IsFree,
 		Promotion:           cloneQoderPromotion(facts.Promotion),
 		ContextLength:       cloneInt64Ptr(facts.ContextLength),
+		ContextStatus:       facts.ContextStatus,
+		ContextOverride:     facts.ContextOverride,
+		ContextRequested:    cloneInt64Ptr(facts.ContextRequested),
+		MaxInputTokens:      cloneInt64Ptr(facts.MaxInputTokens),
 		ContextTiers:        cloneContextTiers(facts.ContextTiers),
 		Thinking:            cloneThinkingFacts(facts.Thinking),
 	}

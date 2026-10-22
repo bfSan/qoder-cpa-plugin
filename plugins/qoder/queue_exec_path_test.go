@@ -63,11 +63,16 @@ func TestAggregateQueueAdmissionRetries(t *testing.T) {
 			t.Fatal(err)
 		}
 		stream, status, _, err := hostHTTPDoStream(req)
-		if cancel != nil {
-			cancel()
-		}
 		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
 			t.Fatal(err)
+		}
+		// Match the production loop: direct/proxy responses now remain streams,
+		// so cancellation belongs after body consumption, not after headers.
+		if req.Context().Err() != nil {
+			t.Fatal("request cancelled before stream consumption")
 		}
 		if status >= 400 {
 			stream.Close()
@@ -75,6 +80,9 @@ func TestAggregateQueueAdmissionRetries(t *testing.T) {
 		}
 		_, foldErr = aggregateQoderSSE(newHostStreamReader(stream), "qwen3.8-flash")
 		stream.Close()
+		if cancel != nil {
+			cancel()
+		}
 		if foldErr == nil {
 			break
 		}

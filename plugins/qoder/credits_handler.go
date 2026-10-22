@@ -115,6 +115,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 					"auth_index": authIndex, "error": "load auth: " + err.Error(),
 				}}}
 			}
+			creditsStarted := time.Now()
 			cr, err := fetchUserResourceFn(sa)
 			acct := map[string]any{
 				"auth_index": authIndex,
@@ -128,6 +129,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			if err != nil {
 				acct["error"] = err.Error()
 			} else {
+				observePositiveCreditsAt(f.ID, cr, creditsStarted)
 				acct["credits"] = cr
 				acct["exhausted"] = isCreditsExhausted(cr)
 				// Also fetch plan so the badge updates on lazy load.
@@ -137,19 +139,8 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				if cr != nil {
 					cr.FetchedAt = now.UTC().Format(time.RFC3339)
 				}
-				// Merge into existing cache entry (keep checkin if present).
-				var prev *accountCacheEntry
-				if v, ok := accountCache.Load(f.ID); ok {
-					prev, _ = v.(*accountCacheEntry)
-				}
-				var ci *checkinSummary
-				if prev != nil {
-					ci = prev.checkin
-				}
 				plan, _ := acct["plan"].(string)
-				accountCache.Store(f.ID, &accountCacheEntry{
-					checkin: ci, credits: cr, plan: plan, fetched: now,
-				})
+				storeAccountSnapshot(f.ID, &accountCacheEntry{credits: cr, creditsFetched: creditsStarted, plan: plan, planFetched: now, fetched: now})
 				// Propagate the fresh credits into the host auth-file note so
 				// CPA's native credential card matches this panel. Without it a
 				// lazy /credits refresh updated the panel while the native card
@@ -185,11 +176,13 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			out = append(out, acctCredits{AuthIndex: f.AuthIndex, Error: "load auth: " + err.Error()})
 			continue
 		}
+		creditsStarted := time.Now()
 		cr, err := fetchUserResourceFn(sa)
 		ac := acctCredits{AuthIndex: f.AuthIndex, Nickname: sa.Account.Nickname, UID: sa.Account.UID}
 		if err != nil {
 			ac.Error = err.Error()
 		} else {
+			observePositiveCreditsAt(f.ID, cr, creditsStarted)
 			ac.Credits = cr
 			// Keep the host note in sync for the all-accounts path too.
 			_ = syncAuthNote(f.AuthIndex, f.ID, sa, cr, f.Disabled)

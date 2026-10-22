@@ -109,9 +109,10 @@ func streamHeaders() http.Header {
 // model. A single transient rate limit then escalated into `503
 // auth_unavailable` for every model on the account.
 type sseEnvelope struct {
-	Body            *string `json:"body"`
-	StatusCodeValue *int    `json:"statusCodeValue"`
-	StatusCode      *int    `json:"statusCode"`
+	Body            *string     `json:"body"`
+	Headers         http.Header `json:"headers"`
+	StatusCodeValue *int        `json:"statusCodeValue"`
+	StatusCode      *int        `json:"statusCode"`
 }
 
 // statusCodeValueOrZero reports the envelope's HTTP status, tolerating both
@@ -142,17 +143,30 @@ func parseSSEEnvelope(payload string) (*sseEnvelope, bool) {
 		return nil, false
 	}
 	var raw struct {
-		Body            json.RawMessage `json:"body"`
-		StatusCodeValue json.RawMessage `json:"statusCodeValue"`
-		StatusCode      json.RawMessage `json:"statusCode"`
+		Body            json.RawMessage            `json:"body"`
+		Headers         map[string]json.RawMessage `json:"headers"`
+		StatusCodeValue json.RawMessage            `json:"statusCodeValue"`
+		StatusCode      json.RawMessage            `json:"statusCode"`
 	}
 	if json.Unmarshal([]byte(trimmed), &raw) != nil {
 		return nil, false
 	}
-	env := &sseEnvelope{}
+	env := &sseEnvelope{Headers: make(http.Header)}
+	for key, val := range raw.Headers {
+		var list []string
+		var one string
+		if json.Unmarshal(val, &list) == nil {
+			env.Headers[key] = list
+		} else if json.Unmarshal(val, &one) == nil {
+			env.Headers.Set(key, one)
+		}
+	}
 	if len(raw.Body) > 0 {
 		var s string
 		if json.Unmarshal(raw.Body, &s) == nil {
+			env.Body = &s
+		} else if strings.HasPrefix(strings.TrimSpace(string(raw.Body)), "{") {
+			s = string(raw.Body)
 			env.Body = &s
 		}
 	}
@@ -162,7 +176,33 @@ func parseSSEEnvelope(payload string) (*sseEnvelope, bool) {
 	if v, ok := jsonInt(raw.StatusCode); ok {
 		env.StatusCode = &v
 	}
+	if env.Body == nil {
+		var shape map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(trimmed), &shape)
+		_, choices := shape["choices"]
+		_, code := shape["code"]
+		_, failure := shape["error"]
+		if !choices && (code || failure) {
+			env.Body = &trimmed
+		}
+	}
 	return env, true
+}
+
+// parseUpstreamLine accepts normal data frames and compact JSON error
+// envelopes on HTTP 200. Bare success JSON is not promoted to an SSE chunk.
+func parseUpstreamLine(line string) (*sseEnvelope, bool) {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "data:") {
+		return parseSSEEnvelope(strings.TrimPrefix(line, "data:"))
+	}
+	if strings.HasPrefix(line, "{") {
+		env, ok := parseSSEEnvelope(line)
+		if ok && upstreamEnvelopeStatus(env) >= 400 {
+			return env, true
+		}
+	}
+	return nil, false
 }
 
 // jsonInt decodes a JSON number-or-numeric-string into an int.
@@ -198,7 +238,7 @@ func upstreamEnvelopeStatus(env *sseEnvelope) int {
 	}
 	code, ok := envelopeBodyErrorCode(envelopeBodyText(env))
 	if !ok {
-		return 0
+		return businessEnvelopeStatus(envelopeBodyText(env))
 	}
 	return code
 }
@@ -284,8 +324,8 @@ func looksLikeErrorBody(body string) bool {
 // upstreamStatusError, so the host classifies the failure from the HTTP status
 // that crosses the RPC boundary — not from the message text.
 func upstreamEnvelopeError(status int, body string) error {
-	if daily := newDailyQuotaError(status, body); daily != nil {
-		return daily
+	if quota := quotaErrorWithHeaders(status, body, nil); quota != nil {
+		return quota
 	}
 	if queued := newQueueAdmissionError(status, body); queued != nil {
 		return queued
@@ -305,8 +345,8 @@ func upstreamEnvelopeError(status int, body string) error {
 // EOF)" is that marker. Rate limiting is a model-scoped, short-lived condition
 // — it must cool the (account, model) pair, never the whole credential.
 func streamEnvelopeError(status int, body string) string {
-	if daily := newDailyQuotaError(status, body); daily != nil {
-		return daily.Error()
+	if quota := quotaErrorWithHeaders(status, body, nil); quota != nil {
+		return quota.Error()
 	}
 	if queued := newQueueAdmissionError(status, body); queued != nil {
 		return queued.Error()
@@ -447,7 +487,7 @@ func pumpUpstreamAttempt(httpReq *http.Request, cancel context.CancelFunc, strea
 		defer cancel()
 	}
 
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+	stream, statusCode, responseHeaders, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
@@ -466,7 +506,7 @@ func pumpUpstreamAttempt(httpReq *http.Request, cancel context.CancelFunc, strea
 			return true
 		}
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, body)
-		recordUpstreamFailure(authID, cooldownModel, statusCode, body)
+		recordUpstreamFailureWithHeaders(authID, cooldownModel, statusCode, body, responseHeaders)
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, body)
 		}
@@ -479,10 +519,7 @@ func pumpUpstreamAttempt(httpReq *http.Request, cancel context.CancelFunc, strea
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		env, ok := parseSSEEnvelope(strings.TrimPrefix(line, "data:"))
+		env, ok := parseUpstreamLine(line)
 		if !ok {
 			continue
 		}
@@ -496,7 +533,7 @@ func pumpUpstreamAttempt(httpReq *http.Request, cancel context.CancelFunc, strea
 				return true
 			}
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, envStatus, body)
-			recordUpstreamFailure(authID, cooldownModel, envStatus, body)
+			recordUpstreamFailureWithHeaders(authID, cooldownModel, envStatus, body, env.Headers)
 			if authUID != "" {
 				go reconcileByUID(authUID, envStatus, body)
 			}
@@ -589,7 +626,7 @@ func collectUpstreamAttempt(prepare upstreamRequestPrepare, sseFramed bool, coll
 	if cancel != nil {
 		defer cancel()
 	}
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+	stream, statusCode, responseHeaders, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
@@ -598,17 +635,14 @@ func collectUpstreamAttempt(prepare upstreamRequestPrepare, sseFramed bool, coll
 		payload, _ := io.ReadAll(newHostStreamReader(stream))
 		// 0.8.13: account-level statuses ride the error envelope so the host
 		// cooldown layer stops re-picking a drained credential.
-		return nil, statusCode, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
+		return nil, statusCode, attachQuotaHeaders(upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload))), responseHeaders)
 	}
 	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 64)
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		env, ok := parseSSEEnvelope(strings.TrimPrefix(line, "data:"))
+		env, ok := parseUpstreamLine(line)
 		if !ok {
 			continue
 		}
@@ -618,7 +652,7 @@ func collectUpstreamAttempt(prepare upstreamRequestPrepare, sseFramed bool, coll
 		// its own credential-scoped empty_stream.
 		if envStatus := upstreamEnvelopeStatus(env); envStatus >= 400 {
 			body := envelopeBodyText(env)
-			return nil, envStatus, upstreamStatusError(envStatus, upstreamEnvelopeError(envStatus, body))
+			return nil, envStatus, attachQuotaHeaders(upstreamStatusError(envStatus, upstreamEnvelopeError(envStatus, body)), env.Headers)
 		}
 		bodyStr := envelopeBodyText(env)
 		if bodyStr == "" || bodyStr == "[DONE]" {
@@ -881,11 +915,7 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			// Skip event:/id:/retry:/comment lines
-			continue
-		}
-		env, ok := parseSSEEnvelope(strings.TrimPrefix(line, "data:"))
+		env, ok := parseUpstreamLine(line)
 		if !ok {
 			continue
 		}
@@ -895,7 +925,7 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 			// gate can classify it. upstreamEnvelopeError alone is a plain
 			// fmt.Errorf, which made upstreamStatusFromError return 0 and left
 			// a 10605 queue admission unretryable.
-			return nil, &statusError{status: envStatus, err: upstreamEnvelopeError(envStatus, body)}
+			return nil, &statusError{status: envStatus, err: attachQuotaHeaders(upstreamEnvelopeError(envStatus, body), env.Headers)}
 		}
 		bodyStr := envelopeBodyText(env)
 		if bodyStr == "" {

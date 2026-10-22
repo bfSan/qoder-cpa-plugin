@@ -254,17 +254,27 @@ func TestContextTierWriteRejectsTiersTheModelDoesNotOffer(t *testing.T) {
 	if resp["success"] != true {
 		t.Fatalf("a reported tier was rejected: %v", resp)
 	}
-	if got := currentContextOverrides()[modelID]; got != 400000 {
-		t.Fatalf("stored override = %d, want 400000", got)
+	if len(currentContextOverrides()) != 0 || resp["persistent"] != false || resp["applied"] != false || resp["proposal"] != true {
+		t.Fatalf("proposal mutated live state or claimed persistence: %v", resp)
 	}
+	proposal := resp["model_context"].(map[string]int64)
+	if proposal[modelID] != 400000 {
+		t.Fatalf("wrong proposal: %v", proposal)
+	}
+	// Host PATCH/configure commits the validated candidate, not POST.
+	replaceContextOverrides(proposal)
 
 	// 省略 context_length 表示清除覆盖，回到上游默认档。
 	resp = handleModelContextWrite(pluginapi.ManagementRequest{Body: body(nil)})
 	if resp["success"] != true {
 		t.Fatalf("clearing the override failed: %v", resp)
 	}
+	if currentContextOverrides()[modelID] != 400000 {
+		t.Fatal("clear proposal mutated live state")
+	}
+	replaceContextOverrides(resp["model_context"].(map[string]int64))
 	if _, still := currentContextOverrides()[modelID]; still {
-		t.Fatal("clearing did not remove the override")
+		t.Fatal("commit did not clear override")
 	}
 }
 

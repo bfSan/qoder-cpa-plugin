@@ -322,6 +322,8 @@ func buildModelListQueryForce(force bool) map[string]any {
 			"name":            m.Name,
 			"displayName":     m.DisplayName,
 			"position":        i,
+			"context_length":  m.ContextLength,
+			"context_scope":   "conservative_account_minimum",
 			"hidden":          overlayHidden(overlay, id),
 			"custom":          overlayAdded(overlay, id),
 			"coolingAccounts": cooldownModelCount(id),

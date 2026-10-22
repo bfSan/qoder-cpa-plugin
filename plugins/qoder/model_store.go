@@ -39,6 +39,10 @@ import (
 // modelCatalogSchemaVersion is the only schema this build understands.
 const modelCatalogSchemaVersion = 1
 
+// Additive provenance marker: old files remain readable, but their inferred
+// reasoning defaults and synthesized context fallback cannot become facts.
+const modelCatalogFactsVersion = 1
+
 var errFutureModelCatalogSchema = errors.New("future model catalog cache schema")
 
 // modelCatalogCacheV1 is the on-disk document for one account's catalog.
@@ -48,6 +52,7 @@ var errFutureModelCatalogSchema = errors.New("future model catalog cache schema"
 // hand decodes to a mismatch and is skipped, not adopted for the wrong account.
 type modelCatalogCacheV1 struct {
 	SchemaVersion  int                         `json:"schema_version"`
+	FactsVersion   int                         `json:"facts_version,omitempty"`
 	IdentitySHA256 string                      `json:"identity_sha256"`
 	Region         string                      `json:"region"`
 	UID            string                      `json:"uid"`
@@ -192,6 +197,10 @@ func decodeModelCatalogFile(path string) (modelCatalogCacheV1, bool) {
 	if validateModelCatalogCache(cache) != nil {
 		return modelCatalogCacheV1{}, false
 	}
+	name := strings.TrimSuffix(strings.TrimSuffix(filepath.Base(path), ".bak"), ".json")
+	if name != cache.IdentitySHA256 {
+		return modelCatalogCacheV1{}, false
+	}
 	return cache, true
 }
 
@@ -217,6 +226,7 @@ func persistModelCatalogFor(sa *storedAuth, models []pluginapi.ModelInfo, factor
 	region := authRegion(sa)
 	_ = store.saveModelCatalog(modelCatalogCacheV1{
 		SchemaVersion:  modelCatalogSchemaVersion,
+		FactsVersion:   modelCatalogFactsVersion,
 		IdentitySHA256: modelCatalogIdentitySHA256(region, uid),
 		Region:         region,
 		UID:            uid,
@@ -264,7 +274,7 @@ func seedModelCatalogMemory() {
 		dynamicModelsCache.byAccount[key] = dynamicModelEntry{
 			models:  c.Models,
 			factors: c.Factors,
-			region:  c.RegionFacts,
+			region:  trustedLoadedCatalogFacts(c),
 			fetched: c.FetchedAt,
 		}
 	}
@@ -378,4 +388,27 @@ func syncCatalogDir(dir string) error {
 	}
 	defer file.Close()
 	return file.Sync()
+}
+
+// Upgrade old cache evidence conservatively without deleting it or breaking
+// registration. Previous builds guessed strongest effort/default input values,
+// and did not preserve whether is_reasoning was absent versus explicitly false.
+func trustedLoadedCatalogFacts(cache modelCatalogCacheV1) map[string]modelRegionFacts {
+	out := make(map[string]modelRegionFacts, len(cache.RegionFacts))
+	for id, raw := range cache.RegionFacts {
+		fact := cloneRegionFacts(raw)
+		if cache.FactsVersion != modelCatalogFactsVersion {
+			if len(fact.ContextTiers) == 0 {
+				fact.ContextLength = nil
+			}
+			if fact.Thinking != nil {
+				fact.Thinking.Default = ""
+				if fact.Thinking.Status == "unsupported" {
+					fact.Thinking.Status = "unknown"
+				}
+			}
+		}
+		out[id] = fact
+	}
+	return out
 }

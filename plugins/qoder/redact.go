@@ -7,6 +7,9 @@ package main
 import "regexp"
 
 var (
+	redactQuotedSecrets = regexp.MustCompile(`(?i)("(?:access_?token|refresh_?token|id_?token|personal_?token|authorization|cookie|set-cookie|nonce|verifier|code_?verifier)"\s*:\s*)"(?:[^"\\]|\\.)*"`)
+	redactQuerySecrets  = regexp.MustCompile(`(?i)((?:access_?token|refresh_?token|id_?token|personal_?token|nonce|verifier|code_?verifier)\s*[=:]\s*)([^&\s,;"'<>]+)`)
+
 	redactREBearer  = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
 	redactREJWT     = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b`)
 	redactRETokenKV = regexp.MustCompile(`(?i)((?:access_token|refresh_token|id_token)\s*[=:]\s*)([A-Za-z0-9._\-+/=]{12,})`)
@@ -21,6 +24,9 @@ func redactSecrets(s string) string {
 	if s == "" {
 		return s
 	}
+	// Quoted JSON values may contain escaped delimiters; redact before truncating.
+	s = redactQuotedSecrets.ReplaceAllString(s, `${1}"***"`)
+	s = redactQuerySecrets.ReplaceAllString(s, "${1}***")
 	// Bearer tokens
 	s = redactREBearer.ReplaceAllString(s, "Bearer ***")
 	// long JWT-ish segments

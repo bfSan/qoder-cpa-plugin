@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,8 +31,8 @@ func TestPerformCheckinCallDoesNotFakeSuccessOn401(t *testing.T) {
 	upstreamRejectingServer(t)
 	sa := &storedAuth{Auth: storedTokens{AccessToken: "dt-test", Domain: domainCN}}
 	res, err := performCheckinCall(sa)
-	if err != nil {
-		t.Fatalf("performCheckinCall error = %v", err)
+	if err == nil || !isAuthRejectedError(err) {
+		t.Fatalf("expected typed auth rejection, got %v", err)
 	}
 	if success, _ := res["success"].(bool); success {
 		t.Fatalf("401 claim returned success=true: %#v", res)
@@ -42,19 +43,13 @@ func TestPerformCheckinCallDoesNotFakeSuccessOn401(t *testing.T) {
 func TestCheckinOneAccountReportsErrorOn401(t *testing.T) {
 	upstreamRejectingServer(t)
 	sa := &storedAuth{Auth: storedTokens{AccessToken: "dt-test", Domain: domainCN}}
-	out := map[string]any{}
-	_, err := fetchCheckinStatus(sa)
-	if err == nil {
-		t.Fatal("fetchCheckinStatus must fail on 401")
+	resetCheckinTestState(t)
+	installStubAuthHost(t, map[string][]byte{"auth-reject": fixtureAuthFile(t, sa, false)})
+	out := checkinOneAccount(pluginapi.HostAuthFileEntry{AuthIndex: "auth-reject", ID: "auth-reject"})
+	if out["error"] == nil || out["success"] == true || out["reason"] == "already" || out["retry_scheduled"] != false {
+		t.Fatalf("auth failure masked: %#v", out)
 	}
-	out["error"] = "status: " + err.Error()
-	if _, hasError := out["error"]; !hasError {
-		t.Fatal("401 must surface as error")
-	}
-	if out["skipped"] == true || out["reason"] == "already" {
-		t.Fatalf("401 must not be reported as already-checked-in: %#v", out)
-	}
-	_ = sa
+
 }
 
 // Intl uses the campaign contract. Its summary treats a non-active campaign as
@@ -111,25 +106,20 @@ func TestSummarizeCheckinClaimResNeverClaimsAlreadyCheckedIn(t *testing.T) {
 // checkinOneAccount must surface the upstream 401 as an error, not as a
 // skipped/duplicate check-in.
 func TestCheckinSoftFailReclassKeepsAuthFailures(t *testing.T) {
-	reclassify := func(out map[string]any) {
-		if msg, _ := out["message"].(string); msg != "" {
-			low := strings.ToLower(msg)
-			if strings.Contains(low, "already") || strings.Contains(msg, "已签") || strings.Contains(msg, "今日") {
-				out["success"] = true
-				out["skipped"] = true
-				out["reason"] = "already"
+	for _, message := range []string{"今日签到失败", "already unavailable", "已签到功能暂不可用"} {
+		t.Run(message, func(t *testing.T) {
+			f, _ := checkinHTTPFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"success":false,"message":"` + message + `"}`))
+					return
+				}
+				_, _ = w.Write([]byte(campaignListJSON))
+			}, false)
+			out := checkinOneAccount(f)
+			if out["success"] == true || out["reason"] == "already" {
+				t.Fatalf("text was mistaken for evidence: %#v", out)
 			}
-		}
-	}
-	out := map[string]any{"success": false, "message": "上游未确认签到成功：http 401: missing cookie header"}
-	reclassify(out)
-	if out["success"] == true {
-		t.Fatalf("401 billing failure reclassified as success: %#v", out)
-	}
-
-	genuine := map[string]any{"success": false, "message": "今日已签到"}
-	reclassify(genuine)
-	if genuine["success"] != true {
-		t.Fatal("genuine duplicate still must reclassify")
+		})
 	}
 }

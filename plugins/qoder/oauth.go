@@ -1,23 +1,12 @@
-// oauth.go implements QoderWork's auth flows. Two entry points, one outcome:
-//
-//  1. PAT import (management panel): user pastes a PAT (`pt-...`) created on
-//     qoder.com.cn; the plugin exchanges it for a jobToken pair (jt-/jrt-)
-//     and stores both.
-//
-//  2. OAuth-like flow (AuthProvider.StartLogin): QoderWork has no real
-//     OAuth authorization-code flow — its web login is Aliyun SSO SMS →
-//     web session cookie → manual PAT creation. So handleStartLogin returns
-//     the PAT-creation page URL; the user creates a PAT in their browser
-//     and pastes it back. handlePollLogin accepts the pasted PAT and runs
-//     the same exchange as path 1.
-//
-// Refresh uses jrt- (48h TTL) to get a fresh jt- (24h TTL). When jrt-
-// expires, the underlying PAT is still valid — we fall back to a fresh
-// exchange using the stored PAT.
+// oauth.go implements Qoder DeviceFlow/PKCE login (dt-/drt-), legacy
+// PAT exchange (jt-/jrt-), and credential refresh. Pending login state and
+// token/result checkpoints live in oauth_pending*.go. Host RPC returns Auth for
+// the host to save; the management entry saves its own owner-bound state once.
 package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -26,7 +15,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -45,10 +33,28 @@ type jobTokenResponse struct {
 	RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in"` // ms
 }
 
+// Test seams retain production routing on every request, not a login-time client.
+var oauthHTTPDo = qoderRoutedHTTPDo
+var oauthSaveAuthJSON = hostAuthSaveJSON
+
+func oauthRoutedHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
+	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	defer cancel()
+	resp, err := oauthHTTPDo(req.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("oauth transport unavailable; retry this login")
+	}
+	if resp == nil || len(resp.Body) > oauthPendingMaxBytes {
+		return nil, fmt.Errorf("oauth invalid or oversized response")
+	}
+	return resp, nil
+}
+
 // doRawJSON sends method to fullURL with the given headers and returns the
-// raw response body. Used for endpoints that return plain JSON (no envelope)
+// raw response body. The legacy client argument is ignored: current routing
+// policy is consulted on every request. Used for plain JSON (no envelope)
 // like /api/v1/jobToken/exchange and /api/v1/jobToken/refresh.
-func doRawJSON(client *http.Client, method, fullURL string, headers func(*http.Request), body io.Reader) (json.RawMessage, int, error) {
+func doRawJSON(_ *http.Client, method, fullURL string, headers func(*http.Request), body io.Reader) (json.RawMessage, int, error) {
 	req, err := http.NewRequest(method, fullURL, body)
 	if err != nil {
 		return nil, 0, err
@@ -58,17 +64,16 @@ func doRawJSON(client *http.Client, method, fullURL string, headers func(*http.R
 	} else {
 		commonHeaders(req)
 	}
-	resp, err := client.Do(req)
+	resp, err := oauthRoutedHTTPDo(req)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw := resp.Body
 	if resp.StatusCode >= 400 {
-		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d body=%s", resp.StatusCode, truncateRedacted(string(raw), 200))
+		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d", resp.StatusCode)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream redirect %d (location: %s)", resp.StatusCode, resp.Header.Get("Location"))
+		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream redirect %d", resp.StatusCode)
 	}
 	return raw, resp.StatusCode, nil
 }
@@ -77,7 +82,7 @@ func doRawJSON(client *http.Client, method, fullURL string, headers func(*http.R
 // returns the resulting jt-/jrt- pair.
 func exchangePATForJobToken(pat, region string) (*jobTokenResponse, error) {
 	body, _ := json.Marshal(map[string]string{"personal_token": pat})
-	data, _, err := doRawJSON(sharedHTTPClient(), http.MethodPost, upstreamBaseForRegion(region)+"/api/v1/jobToken/exchange", nil, bytes.NewReader(body))
+	data, _, err := doRawJSON(nil, http.MethodPost, upstreamBaseForRegion(region)+"/api/v1/jobToken/exchange", nil, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +99,7 @@ func exchangePATForJobToken(pat, region string) (*jobTokenResponse, error) {
 // refreshJobToken calls POST /api/v1/jobToken/refresh with a jrt-.
 func refreshJobToken(jrt, region string) (*jobTokenResponse, error) {
 	body, _ := json.Marshal(map[string]string{"refresh_token": jrt})
-	data, _, err := doRawJSON(sharedHTTPClient(), http.MethodPost, upstreamBaseForRegion(region)+"/api/v1/jobToken/refresh", nil, bytes.NewReader(body))
+	data, _, err := doRawJSON(nil, http.MethodPost, upstreamBaseForRegion(region)+"/api/v1/jobToken/refresh", nil, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -132,18 +137,17 @@ func fetchUserInfo(jt, region string) (*userInfoResponse, error) {
 	}
 	commonHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+jt)
-	resp, err := sharedHTTPClient().Do(req)
+	resp, err := oauthRoutedHTTPDo(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw := resp.Body
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("userinfo: http %d body=%s", resp.StatusCode, truncateRedacted(string(raw), 200))
+		return nil, fmt.Errorf("userinfo: http %d", resp.StatusCode)
 	}
 	var out userInfoResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("userinfo parse: %w (body=%s)", err, truncateRedacted(string(raw), 200))
+		return nil, fmt.Errorf("userinfo: invalid response")
 	}
 	return &out, nil
 }
@@ -243,21 +247,13 @@ func (d *deviceTokenResponse) accessToken() string {
 
 // makePKCE returns (verifier, challenge) per RFC 7636 (S256).
 func makePKCE() (string, string) {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-	raw := make([]byte, 64)
+	raw := make([]byte, 48)
 	if _, err := rand.Read(raw); err != nil {
-		// crypto/rand failure is fatal for PKCE; fall back to uuid material.
-		s := uuid.NewString() + uuid.NewString()
-		sum := sha256.Sum256([]byte(s))
-		v := base64.RawURLEncoding.EncodeToString(sum[:])
-		return v, v
+		return "", ""
 	}
-	verifier := make([]byte, 64)
-	for i, b := range raw {
-		verifier[i] = alphabet[int(b)%len(alphabet)]
-	}
-	sum := sha256.Sum256(verifier)
-	return string(verifier), base64.RawURLEncoding.EncodeToString(sum[:])
+	verifier := base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(verifier))
+	return verifier, base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // handleStartLogin implements AuthProvider.StartLogin: build the device
@@ -302,7 +298,7 @@ func handleManagementOAuthStart(req pluginapi.ManagementRequest) map[string]any 
 			region = normalizeRegion(body.Region)
 		}
 	}
-	raw, err := startLoginWithRegion(nil, region)
+	raw, err := startLoginOwned(nil, region, oauthOwnerPanel)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -338,6 +334,9 @@ func handleManagementOAuthStart(req pluginapi.ManagementRequest) map[string]any 
 		"state":      start.State,
 		"region":     region,
 		"expires_at": start.ExpiresAt,
+		"persistent": start.Metadata["persistent"],
+		"save_owner": oauthOwnerPanel,
+		"resume":     "poll the same state until expires_at; token and result checkpoints survive restart when persistent=true",
 	}
 }
 
@@ -356,56 +355,53 @@ func handleManagementOAuthPoll(req pluginapi.ManagementRequest) map[string]any {
 	if state == "" {
 		return map[string]any{"status": "error", "error": "state is required"}
 	}
-	v, ok := loginStates.Load(state)
-	if !ok {
-		return map[string]any{"status": "error", "error": "unknown or expired login state"}
-	}
-	lc, ok := v.(*loginCtx)
-	if !ok || lc == nil {
-		loginStates.Delete(state)
-		return map[string]any{"status": "error", "error": "invalid login state"}
-	}
-	if time.Now().After(lc.expires) {
-		loginStates.Delete(state)
-		return map[string]any{"status": "error", "error": "login expired"}
-	}
-
-	tok, pending, err := pollDeviceToken(lc.nonce, lc.verifier, lc.region)
+	lc, err := lockOAuthPending(state, oauthOwnerPanel)
 	if err != nil {
-		return map[string]any{"status": "error", "error": err.Error()}
+		return map[string]any{"status": "error", "error": err.Error(), "state": state}
 	}
-	if pending || tok == nil {
-		return map[string]any{"status": "wait", "region": lc.region}
+	defer lc.mu.Unlock()
+	response := func(status string) map[string]any {
+		return map[string]any{"status": status, "state": state, "region": lc.region, "expires_at": lc.expires.UTC(), "persistent": lc.store != nil, "save_owner": oauthOwnerPanel}
 	}
-
-	sa := buildStoredAuthFromDeviceToken(tok, nil, lc.region)
-	// DEBUG(login-intl): 记录落库前的关键字段。uid 与文件名不算机密，token 不记。
-	hostLog("debug", "qoder oauth poll: persisting credential", map[string]any{
-		"region":         lc.region,
-		"uid_present":    sa.Account.UID != "",
-		"nickname":       sa.Account.Nickname,
-		"domain":         sa.Auth.Domain,
-		"access_prefix":  tokenPrefix(sa.Auth.AccessToken),
-		"refresh_prefix": tokenPrefix(sa.Auth.RefreshToken),
-		"file":           authFileNameFor(sa),
-	})
-	fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), nil)
+	ready, err := advanceOAuthPending(state, lc, "")
 	if err != nil {
-		hostLog("error", "qoder oauth poll: buildAuthFileJSON failed", map[string]any{"error": err.Error()})
-		return map[string]any{"status": "error", "error": err.Error()}
+		res := response("error")
+		res["error"] = err.Error()
+		res["retryable"] = true
+		return res
 	}
-	if err := hostAuthSaveJSON(authFileNameFor(sa), fileJSON); err != nil {
-		hostLog("error", "qoder oauth poll: host.auth.save failed", map[string]any{"error": err.Error()})
-		return map[string]any{"status": "error", "error": err.Error()}
+	if !ready {
+		return response("wait")
 	}
-	loginStates.Delete(state)
-	return map[string]any{
-		"status":   "ok",
-		"region":   lc.region,
-		"uid":      sa.Account.UID,
-		"nickname": sa.Account.Nickname,
-		"file":     authFileNameFor(sa),
+	if !lc.saved {
+		sa := lc.result
+		fileJSON, err := buildAuthFileJSON(sa, false, displayNote(sa, nil, false), nil)
+		if err != nil {
+			res := response("error")
+			res["error"] = "login credential preparation failed; retry this state"
+			res["retryable"] = true
+			return res
+		}
+		if err := oauthSaveAuthJSON(authFileNameFor(sa), fileJSON); err != nil {
+			res := response("error")
+			res["error"] = "login credential save failed; retry this state"
+			res["retryable"] = true
+			return res
+		}
+		lc.saved = true
 	}
+	// Even when the saved-marker checkpoint fails, keep saved=true in memory.
+	// After a crash in that tiny window the deterministic filename makes the
+	// host save an idempotent overwrite (exactly-once RPC is not available).
+	if err := persistOAuthPending(state, lc); err != nil {
+		res := response("error")
+		res["error"] = err.Error()
+		res["retryable"] = true
+		return res
+	}
+	res := response("ok")
+	res["uid"], res["nickname"], res["file"] = lc.result.Account.UID, lc.result.Account.Nickname, authFileNameFor(lc.result)
+	return res
 }
 
 // requestedLoginRegion extracts region=cn|intl from login metadata. It accepts
@@ -450,16 +446,34 @@ func explicitLoginRegion(v string) string {
 
 // startLoginWithRegion starts a device-flow login pinned to region.
 func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
+	return startLoginOwned(raw, region, oauthOwnerHost)
+}
+
+func startLoginOwned(raw []byte, region, owner string) ([]byte, error) {
+	if err := configureOAuthPending(raw); err != nil {
+		return nil, err
+	}
 	region = normalizeRegion(region)
 	verifier, challenge := makePKCE()
+	if verifier == "" {
+		return nil, fmt.Errorf("login secure randomness unavailable")
+	}
 	// nonce: intl protocol (cockpit-tools v1.3.36, aligned 2026-09-02)
 	// uses 32-hex uuid-simple; CN (cpa-plugin qoderwork reference) keeps
 	// the dashed uuid.
-	nonce := uuid.NewString()
+	nonceID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("login secure randomness unavailable")
+	}
+	deviceID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("login secure randomness unavailable")
+	}
+	nonce := nonceID.String()
 	if region == regionIntl {
 		nonce = strings.ReplaceAll(nonce, "-", "")
 	}
-	machineID := uuid.NewString()
+	machineID := deviceID.String()
 
 	q := url.Values{}
 	q.Set("challenge", challenge)
@@ -479,19 +493,34 @@ func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	authURL := qoderWebsiteFor(region) + "/device/selectAccounts?" + q.Encode()
 
 	now := time.Now()
-	state := fmt.Sprintf("qw-%d", now.UnixNano())
-	loginStates.Store(state, &loginCtx{verifier: verifier, nonce: nonce, region: region, expires: now.Add(loginTTL), startedAt: now.UnixNano()})
-	return okEnvelope(pluginapi.AuthLoginStartResponse{
+	stateID, err := oauthRandomHex(32)
+	if err != nil {
+		return nil, err
+	}
+	state := "qw-" + stateID
+	lc := &loginCtx{verifier: verifier, nonce: nonce, deviceKey: machineID, region: region, owner: owner, expires: now.Add(loginTTL), startedAt: now.UnixNano()}
+	if err := registerOAuthPending(state, lc); err != nil {
+		return nil, err
+	}
+	response := pluginapi.AuthLoginStartResponse{
 		Provider:  providerName,
 		URL:       authURL,
 		State:     state,
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
-			"logo":   pluginLogoURL,
-			"region": region,
-			"prompt": "在打开的页面中登录并授权 Qoder（设备授权，无需 PAT）。完成后此窗口会自动关闭。",
+			"persistent": lc.store != nil,
+			"save_owner": owner,
+			"resume":     "poll the same state; token/result checkpoints are replayable until expires_at",
+			"logo":       pluginLogoURL,
+			"region":     region,
+			"prompt":     "在打开的页面中登录并授权 Qoder（设备授权，无需 PAT）。完成后此窗口会自动关闭。",
 		},
-	})
+	}
+	return okEnvelope(struct {
+		pluginapi.AuthLoginStartResponse
+		Persistent bool   `json:"persistent"`
+		SaveOwner  string `json:"save_owner"`
+	}{response, lc.store != nil, owner})
 }
 
 // pollDeviceToken performs one GET against /api/v1/deviceToken/poll.
@@ -510,75 +539,34 @@ func pollDeviceToken(nonce, verifier, region string) (*deviceTokenResponse, bool
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "QoderWork")
-	resp, err := sharedHTTPClient().Do(req)
+	resp, err := oauthRoutedHTTPDo(req)
 	if err != nil {
 		return nil, false, err
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	// DEBUG(login-intl): 记录轮询的真实结果。只记状态码、响应键名和 token 前缀，
-	// 绝不打印 token 本体。
-	hostLog("debug", "qoder deviceToken poll", map[string]any{
-		"region":      region,
-		"http_status": resp.StatusCode,
-		"body_keys":   jsonKeyNames(raw),
-		"body_head":   truncateRedacted(string(raw), 300),
-	})
+	raw := resp.Body
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusAccepted {
 		return nil, true, nil
 	}
-	if resp.StatusCode >= 400 {
-		return nil, false, fmt.Errorf("deviceToken poll: http %d body=%s", resp.StatusCode, truncateRedacted(string(raw), 200))
+	if resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("deviceToken poll: http %d", resp.StatusCode)
 	}
 	var out deviceTokenResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, false, fmt.Errorf("deviceToken poll parse: %w", err)
+		return nil, false, fmt.Errorf("deviceToken poll: invalid response")
 	}
 	if out.accessToken() == "" {
 		return nil, true, nil // 200 without token yet — treat as pending
 	}
-	hostLog("info", "qoder deviceToken poll: token obtained", map[string]any{
-		"region":          region,
-		"access_prefix":   tokenPrefix(out.accessToken()),
-		"access_len":      len(out.accessToken()),
-		"refresh_prefix":  tokenPrefix(out.RefreshToken),
-		"refresh_len":     len(out.RefreshToken),
-		"user_id_present": out.UserID != "",
-		"expires_in":      out.ExpiresIn,
-		"expires_at_set":  out.ExpiresAt != "",
-	})
+	if out.RefreshToken == "" {
+		return nil, false, fmt.Errorf("deviceToken poll: incomplete token pair")
+	}
 	return &out, false, nil
-}
-
-// tokenPrefix 只返回令牌的类型前缀（如 "dt-"、"drt-"、"pt-"），不泄露内容。
-func tokenPrefix(tok string) string {
-	if i := strings.Index(tok, "-"); i > 0 && i <= 6 {
-		return tok[:i+1]
-	}
-	if tok == "" {
-		return ""
-	}
-	return "(no-dash)"
-}
-
-// jsonKeyNames 返回 JSON 顶层键名，用于诊断响应形状而不暴露内容。
-func jsonKeyNames(raw []byte) string {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "(not-object)"
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return strings.Join(keys, ",")
 }
 
 // refreshDeviceToken calls POST /api/v1/deviceToken/refresh with a drt-.
 func refreshDeviceToken(drt, region string) (*deviceTokenResponse, error) {
 	body, _ := json.Marshal(map[string]string{"refresh_token": drt})
-	data, _, err := doRawJSON(sharedHTTPClient(), http.MethodPost, upstreamBaseForRegion(region)+"/api/v1/deviceToken/refresh", nil, bytes.NewReader(body))
+	data, _, err := doRawJSON(nil, http.MethodPost, upstreamBaseForRegion(region)+"/api/v1/deviceToken/refresh", nil, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -592,94 +580,42 @@ func refreshDeviceToken(drt, region string) (*deviceTokenResponse, error) {
 	return &out, nil
 }
 
-// handlePollLogin implements AuthProvider.PollLogin. Three paths, in order:
-//  1. Legacy PAT pasted into the modal (kept for backward compatibility).
-//  2. Panel import produced a new auth file after StartLogin (unchanged).
-//  3. Device-authorization poll (the real OAuth flow).
+// handlePollLogin returns a replayable auth result; the host alone saves it.
+// Never infer completion by scanning other accounts: that crosses sessions.
 func handlePollLogin(raw []byte) ([]byte, error) {
-	var req pluginapi.AuthLoginPollRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
+	if err := configureOAuthPending(raw); err != nil {
 		return nil, err
 	}
+	var req pluginapi.AuthLoginPollRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("invalid login poll request")
+	}
 	state := strings.TrimSpace(req.State)
-	if state == "" {
-		return nil, fmt.Errorf("poll: empty state")
-	}
-	v, ok := loginStates.Load(state)
-	if !ok {
-		return nil, fmt.Errorf("poll: unknown state (restart login)")
-	}
-	lc := v.(*loginCtx)
-	if time.Now().After(lc.expires) {
-		loginStates.Delete(state)
-		return nil, fmt.Errorf("poll: login expired (10 min timeout)")
-	}
-
-	// Legacy path: user pasted PAT into the OAuth modal callback.
-	pat := ""
-	if req.Metadata != nil {
-		if v, ok := req.Metadata["pat"].(string); ok {
-			pat = strings.TrimSpace(v)
-		}
-	}
-	if pat != "" {
-		if !strings.HasPrefix(pat, "pt-") {
-			return nil, fmt.Errorf("poll: PAT must start with pt-")
-		}
-		tok, err := exchangePATForJobToken(pat, lc.region)
-		if err != nil {
-			return nil, fmt.Errorf("PAT exchange failed: %w", err)
-		}
-		ui, _ := fetchUserInfo(tok.Token, lc.region)
-		sa := buildStoredAuthFromJobToken(pat, tok, ui, lc.region)
-		loginStates.Delete(state)
-		return okEnvelope(pluginapi.AuthLoginPollResponse{
-			Status: pluginapi.AuthLoginStatusSuccess,
-			Auth:   toAuthData(sa),
-		})
-	}
-
-	// Device-authorization path: poll the grant. The verifier never left
-	// this process; the nonce pairs it to the auth URL we handed out.
-	tok, pending, err := pollDeviceToken(lc.nonce, lc.verifier, lc.region)
+	lc, err := lockOAuthPending(state, oauthOwnerHost)
 	if err != nil {
-		return nil, fmt.Errorf("device authorization poll: %w", err)
+		return nil, err
 	}
-	if !pending && tok != nil {
-		// Auth file must land IMMEDIATELY — no upstream calls before return.
-		// The host writes the auth file from AuthLoginPollResponse, so any
-		// blocking work (fetchUserInfo, hostAuthList) delays persistence.
-		// UserID is already in the poll response; nickname is fetched lazily
-		// by the panel on first load. PAT coalescing happens on keepalive.
-		sa := buildStoredAuthFromDeviceToken(tok, nil, lc.region)
-		loginStates.Delete(state)
-		return okEnvelope(pluginapi.AuthLoginPollResponse{
-			Status: pluginapi.AuthLoginStatusSuccess,
-			Auth:   toAuthData(sa),
-		})
+	defer lc.mu.Unlock()
+	pat, _ := req.Metadata["pat"].(string)
+	ready, err := advanceOAuthPending(state, lc, strings.TrimSpace(pat))
+	if err != nil {
+		return nil, err
 	}
-
-	// Panel-import path: a new qoderwork auth file appeared since StartLogin.
-	files, err := hostAuthList()
-	if err == nil {
-		for _, f := range files {
-			if f.CreatedAt.UnixNano() > lc.startedAt {
-				sa, err := hostAuthGet(f.AuthIndex)
-				if err == nil && sa != nil {
-					loginStates.Delete(state)
-					return okEnvelope(pluginapi.AuthLoginPollResponse{
-						Status: pluginapi.AuthLoginStatusSuccess,
-						Auth:   toAuthData(sa),
-					})
-				}
-			}
-		}
+	response := pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending, Message: "等待浏览器完成 QoderWork 设备授权"}
+	if ready {
+		response.Status = pluginapi.AuthLoginStatusSuccess
+		response.Auth = toAuthData(lc.result)
+		response.Message = ""
 	}
-
-	return okEnvelope(pluginapi.AuthLoginPollResponse{
-		Status:  pluginapi.AuthLoginStatusPending,
-		Message: "等待浏览器完成 QoderWork 设备授权",
-	})
+	// Embed the SDK response to preserve wire compatibility while providing
+	// explicit resume semantics for callers that retain state across restarts.
+	return okEnvelope(struct {
+		pluginapi.AuthLoginPollResponse
+		State      string    `json:"state"`
+		ExpiresAt  time.Time `json:"expires_at"`
+		Persistent bool      `json:"persistent"`
+		SaveOwner  string    `json:"save_owner"`
+	}{response, state, lc.expires.UTC(), lc.store != nil, oauthOwnerHost})
 }
 
 // deviceExpiryUnix resolves the access-token expiry from a deviceToken
