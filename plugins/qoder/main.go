@@ -356,7 +356,7 @@ type registrationCapability struct {
 // `make build` feeds from the VERSION file. This literal is the fallback for a
 // bare `go build`; keep it in step with VERSION so a stray build never
 // under-reports the plugin version.
-var version = "0.9.22"
+var version = "0.9.23"
 
 func wbRegistration() registration {
 	return registration{
