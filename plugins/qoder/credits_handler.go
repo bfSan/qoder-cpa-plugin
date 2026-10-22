@@ -156,6 +156,16 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				// stayed on a stale "积分未知".
 				_ = syncAuthNote(f.AuthIndex, f.ID, sa, cr, f.Disabled)
 			}
+			// Also refresh this account's MODEL catalog, not just credits.
+			//
+			// The button an operator presses when an account "stopped serving a
+			// model" is this one, and it used to leave the stale catalog -- and
+			// therefore the host's registered model list, and therefore the
+			// router -- untouched. See model_catalog_single.go for the incident
+			// that made this necessary. Runs even when the credits call failed:
+			// the two are independent upstream endpoints, and a billing hiccup
+			// must not block a catalog repair.
+			acct["catalog"] = refreshAccountModelCatalog(f.AuthIndex)
 			return map[string]any{"accounts": []map[string]any{acct}}
 		}
 		return map[string]any{"error": "account not found"}

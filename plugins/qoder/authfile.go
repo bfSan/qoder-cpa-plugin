@@ -185,6 +185,23 @@ func hostAuthSaveJSON(name string, raw []byte) error {
 // lifecycleStateUnchanged avoids redundant saves when note/disabled unchanged.
 
 func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[string]any) ([]byte, error) {
+	return buildAuthFileJSONFrom(sa, disabled, note, extra, nil)
+}
+
+// buildAuthFileJSONFrom is buildAuthFileJSON plus a base document to inherit
+// from.
+//
+// ★ Keys the caller does not mention are inherited from base (the auth file as
+// it exists on disk). Without this, every rewrite silently dropped anything not
+// in the fixed key list — disabled_reason (written by the panel's 禁用 button)
+// survived only until the next syncAuthNote / rename / keepalive pass, all of
+// which rebuild the whole document, and a manual disable then quietly came back
+// enabled on the next reconcile.
+//
+// base may be nil (fresh file / test call sites): behaviour is then exactly the
+// old one. extra still wins over both base and the fixed keys, so an explicit
+// null in extra genuinely deletes a key (the 启用 path depends on that).
+func buildAuthFileJSONFrom(sa *storedAuth, disabled bool, note string, extra map[string]any, base []byte) ([]byte, error) {
 	if sa == nil {
 		return nil, fmt.Errorf("nil storedAuth")
 	}
@@ -196,7 +213,11 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
 	if err := json.Unmarshal(storage, &nested); err != nil {
 		return nil, err
 	}
-	out := map[string]any{
+	out := map[string]any{}
+	if len(base) > 0 {
+		_ = json.Unmarshal(base, &out)
+	}
+	for k, v := range map[string]any{
 		"type":     providerName,
 		"provider": providerName,
 		"logo":     pluginLogoURL,
@@ -205,6 +226,8 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
 		"note":     note,
 		"auth":     nested["auth"],
 		"account":  nested["account"],
+	} {
+		out[k] = v
 	}
 	if email := displayEmailForAuth(sa); email != "" {
 		out["email"] = email
