@@ -74,3 +74,7 @@ If no reliable context fact exists, the body preserves the existing restricted t
 - Panel context click/clear, PATCH failure, host readback mismatch, runtime readback mismatch, no-default rendering, adapter boundaries, and HTML escaping.
 
 Tests use fixtures, temporary storage, and loopback servers. They do not claim live gateway validation of additional reasoning values or deployed behavior.
+
+## 0.9.25 panel presentation
+
+The panel uses concise `high（默认）` / `200K（默认）` labels. A default marker is not selected styling: only the effective context tier is bold/highlighted. Reasoning facts remain read-only plain text. Adapter-forwarding diagnostics and the reset-to-account-default control are not rendered; the backend validation, request adapter limits and explicit configuration-clear API remain intact.

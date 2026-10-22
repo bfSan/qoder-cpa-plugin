@@ -289,7 +289,7 @@ test("region table renders CN and Intl columns with per-region facts", async () 
   // fixture's qmodel carries upstream display_name "Q".
   assert.match(html, /class="model-display"[^>]*>Q</);
   assert.match(html, /倍率 0\.5x/);
-  assert.match(html, /思考 目录默认 high（low\/medium\/high）；插件可转发 low\/medium；未支持 high/);
+  assert.match(html, /思考 low \/ medium \/ high（默认）/);
   assert.doesNotMatch(html, /Global/, "Qoder's regions are cn/intl, not global");
 });
 
@@ -343,16 +343,19 @@ test("price factor renders one unified multiplier string", () => {
 
 // ------------------------------------------------------------------ 4. 思考
 
-test("thinking separates catalog defaults from adapter forwarding and unknown", () => {
-  const { context } = loadPanel();
-  const value = context.thinkingText({ status: "supported", default: "max", levels: ["low", "medium", "high", "xhigh", "max"] });
-  assert.match(value, /目录默认 max/);
-  assert.match(value, /插件可转发 low\/medium\/xhigh/);
-  assert.match(value, /未支持 high\/max/);
-  assert.match(context.thinkingText({ status: "supported", levels: ["low", "high"] }), /目录默认未上报/);
-  assert.match(context.thinkingText({}), /目录未上报/);
-  assert.match(context.thinkingText({ status: "unsupported" }), /目录：不支持/);
-  assert.match(context.thinkingText({ status: "off_only" }), /插件不转发关闭值/);
+test("thinking shows plain default labels without adapter diagnostics or selected styling", () => {
+  const { context }=loadPanel();
+  assert.equal(context.thinkingText({status:"supported",default:"high",levels:["low","high","max"]}),"low / high（默认） / max");
+  assert.equal(context.thinkingText({status:"supported",default:"max",levels:["low","medium","high","xhigh","max"]}),"low / medium / high / xhigh / max（默认）");
+  assert.equal(context.thinkingText({status:"supported",levels:["low","high"]}),"low / high（默认未上报）");
+  assert.equal(context.thinkingText({}),"默认未上报");
+  assert.equal(context.thinkingText({status:"unsupported"}),"不支持");
+  assert.equal(context.thinkingText({status:"off_only"}),"仅可关闭");
+  assert.equal(context.thinkingText({status:"unknown",default:"medium"}),"medium（默认）");
+  assert.equal(context.thinkingText({status:"supported",default:"HIGH",levels:["low","high","high",null]}),"low / high（默认）");
+  const html=context.regionCell({cn:{status:"present",present:true,thinking:{status:"supported",default:"high",levels:["low","high"]}}},"cn","m");
+  assert.match(html,/思考 low \/ high（默认）/);
+  assert.doesNotMatch(html,/<(?:b|strong)\b[^>]*>high|thinking-default|插件可转发|插件仅转发|目录默认/);
 });
 
 // ------------------------------------------------------- 5. 上下文默认档高亮
@@ -361,17 +364,17 @@ test("context displays effective, catalog default, and unknown independently", (
   const { context } = loadPanel();
   const tiers = [{ label: "200K", tokens: 200000, is_default: true }, { label: "1M", tokens: 1000000 }];
   const value = context.contextFactsHTML({ context_length: 1000000, context_tiers: tiers });
-  assert.match(value, /200K（目录默认）/);
+  assert.match(value, /200K（默认）/);
   assert.match(value, /<b[^>]*>1M<\/b>/);
   assert.doesNotMatch(value, /<b[^>]*>200K/);
   const unknown = context.contextFactsHTML({ context_tiers: [{tokens:200000},{tokens:1000000}] });
-  assert.match(unknown, /目录默认未上报/);
+  assert.doesNotMatch(unknown, /目录默认/);
   assert.match(unknown, /生效窗口未上报/);
   assert.doesNotMatch(unknown, /ctx-default|aria-pressed="true"/);
   const blocked = context.contextFactsHTML({ context_length: 200000, context_tiers: tiers, context_options: [200000], context_status: "override_rejected", context_requested: 1000000 }, "auto");
   assert.match(blocked, /data-ctx-tokens="1000000"[^>]*disabled/);
   assert.match(blocked, /覆盖不兼容/);
-  assert.match(blocked, /data-ctx-clear="true"/);
+  assert.doesNotMatch(blocked, /data-ctx-clear|恢复各账号默认/);
 });
 
 // 档位必须可点：点哪一档就切到哪一档。这里守的是"按钮形状 + 生效标记"两件事——
@@ -721,7 +724,7 @@ test("region facts escape dynamic values and never use inline handlers", async (
   await panel2.context.loadModels(false);
   const rendered = panel2.elements.get("modelList").innerHTML;
   assert.match(rendered, /倍率 0\.34x/);
-  assert.match(rendered, /思考 目录默认 high（low\/high）；插件可转发 low；未支持 high/);
+  assert.match(rendered, /思考 low \/ high（默认）/);
   // The live tier is a clickable button here (the row carries a model id), not a
   // bare <b>; it must still be marked as the live one.
   assert.match(rendered, /class="ctx-tier ctx-tier-on"[^>]*data-ctx-tokens="600000"[^>]*aria-pressed="true"/);
@@ -1343,7 +1346,7 @@ test("context clear commits empty map and restores each catalog default", async 
   panel.context.toast=()=>{};
   await panel.context.loadModels(false);
   assert.equal(await panel.context.setContextTier("auto",400000),true);
-  assert.match(panel.elements.get("modelList").innerHTML,/data-ctx-clear="true"/);
+  assert.doesNotMatch(panel.elements.get("modelList").innerHTML,/data-ctx-clear|恢复各账号默认/);
   assert.equal(await panel.context.setContextTier("auto",null),true);
   assert.deepEqual(panel.state.context,{});
   assert.deepEqual(panel.state.patches.at(-1)[1],{model_context:{}});
@@ -1385,3 +1388,14 @@ test("same-region context differences are inspectable instead of first-writer wi
   assert.match(html,/账号 1/);assert.match(html,/账号 2/);
   assert.match(html,/200K/);assert.match(html,/400K/);
 });
+
+ test("only selected context is bold and reset controls/verbose terms stay absent", () => {
+   const {context}=loadPanel();
+   const html=context.contextFactsHTML({context_length:1000000,context_override:true,context_requested:1000000,context_options:[200000,1000000],context_tiers:[{tokens:200000,is_default:true},{tokens:1000000}]},"m");
+   assert.match(html,/class="ctx-tier"[^>]*data-ctx-tokens="200000"[^>]*aria-pressed="false"[^>]*>200K（默认）/);
+   assert.match(html,/class="ctx-tier ctx-tier-on"[^>]*data-ctx-tokens="1000000"[^>]*aria-pressed="true"[^>]*>1M/);
+   assert.doesNotMatch(html,/class="ctx-tier ctx-tier-on"[^>]*>200K|<(?:b|strong)\b[^>]*>200K/);
+   const page=fs.readFileSync(path.join(__dirname,"panel.html"),"utf8");
+   assert.doesNotMatch(page,/目录默认|恢复各账号默认|插件可转发|插件仅转发|data-ctx-clear|ctxClear/);
+   assert.match(page,/ctx-tier-on\{[^}]*font-weight:700/);
+ });

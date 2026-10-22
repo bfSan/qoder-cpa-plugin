@@ -986,25 +986,22 @@ function creditText(factor){
   if(n===0) return "免费 (0x)";
   return String(n)+"x";
 }
-// thinkingText 把分区 thinking 能力翻成一句人话。
-// supported 时带上上游自报的默认档位与可选档位；unknown 表示上游没报；unsupported
-// 表示不支持。这里说的是「上游的默认档」，与上下文档位的「实际生效档」是两个概念，
-// 不要混用同一个措辞。
+// Defaults are informational labels, not selected request values. Keep them
+// unbolded; only the active context tier below gets selected styling.
 function thinkingText(t){
-  const think=t||{};
-  const status=String(think.status||"unknown").toLowerCase();
-  const levels=Array.isArray(think.levels)?think.levels.map(v=>asText(v).trim()).filter(Boolean):[];
-  const rawDefault=think.default==null?"":asText(think.default).trim();
-  if(status==="unsupported") return "目录：不支持（插件仍保留固定请求字段）";
-  if(status==="account_variance") return "账号目录不同；插件可转发 low/medium/xhigh";
-  if(status==="off_only") return `目录：开关模式${rawDefault?`（默认 ${rawDefault}）`:"（默认未上报）"}；插件不转发关闭值`;
-  const accepted=Array.isArray(think.supported_by_adapter)?think.supported_by_adapter:levels.filter(v=>["low","medium","xhigh"].includes(v));
-  const unsupported=Array.isArray(think.unsupported_by_adapter)?think.unsupported_by_adapter:levels.filter(v=>!["low","medium","xhigh"].includes(v));
-  const catalog=rawDefault?`目录默认 ${rawDefault}`:"目录默认未上报";
-  if(status==="supported"||levels.length){
-    return `${catalog}（${levels.join("/")}）；插件可转发 ${accepted.length?accepted.join("/"):"无已知目录交集"}${unsupported.length?`；未支持 ${unsupported.join("/")}`:""}`;
+  const think=t||{},status=String(think.status||"unknown").toLowerCase();
+  if(status==="unsupported")return "不支持";
+  if(status==="account_variance")return "各账号不同";
+  const levels=[],seen=new Set();
+  for(const raw of Array.isArray(think.levels)?think.levels:[]){
+    const value=asText(raw).trim(),key=value.toLowerCase();
+    if(value&&!seen.has(key)){seen.add(key);levels.push(value);}
   }
-  return "目录未上报；插件仅转发 low/medium/xhigh（不注入默认）";
+  const def=think.default==null?"":asText(think.default).trim();
+  if(status==="off_only")return def?`${def}（默认）`:"仅可关闭";
+  if(!def)return levels.length?levels.join(" / ")+"（默认未上报）":"默认未上报";
+  if(!seen.has(def.toLowerCase()))levels.push(def);
+  return levels.map(v=>v.toLowerCase()===def.toLowerCase()?v+"（默认）":v).join(" / ");
 }
 // contextFactsHTML 渲染分区的上下文档位，并把【真正生效的那一档】加粗高亮。
 //
@@ -1028,21 +1025,19 @@ function contextFactsHTML(r,modelId){
   const parts=items.map(t=>{
     const v=Number(t.tokens), active=hasEffective&&v===effective;
     const text=asText(t.label||"").trim()||contextLabel(v);
-    const label=text+(t.is_default?"（目录默认）":"");
+    const label=text+(t.is_default?"（默认）":"");
     if(!id) return active?`<b class="ctx-default" title="${esc(hint)}">${esc(label)}</b>`:esc(label);
     const allowed=options.includes(v);
     return `<button type="button" class="ctx-tier${active?" ctx-tier-on":""}" data-ctx-tier="${esc(id)}" data-ctx-tokens="${v}" aria-pressed="${active?"true":"false"}" ${allowed?"":"disabled"} title="${esc(allowed?hint:"此档不是所有已知服务账号的共同档位，不能设为全局覆盖")}">${esc(label)}</button>`;
   });
   if(hasEffective&&!items.some(t=>Number(t.tokens)===effective)) parts.push(`<b class="ctx-default" title="${esc(hint)}">${esc(contextLabel(effective))}</b>`);
   if(!hasEffective) parts.push("生效窗口未上报（请求保留受限模板值）");
-  if(!tiers.some(t=>t.is_default)) parts.push("目录默认未上报");
   if(r.context_status==="override_rejected") parts.push("覆盖不兼容，已回退本账号默认/受限值");
   if(r.context_status==="account_variance") parts.push("账号目录不同（此处为保守汇总）");
   if(Array.isArray(r.account_variants)&&(r.context_status==="account_variance"||(r.thinking&&r.thinking.status==="account_variance"))){
     parts.push(`<details><summary>查看 ${r.account_variants.length} 个账号目录差异</summary>${r.account_variants.map((v,i)=>`<div>账号 ${i+1}：${contextFactsHTML(v,"")}；${esc(thinkingText(v.thinking))}</div>`).join("")}</details>`);
   }
   if(Array.isArray(r.account_variants)&&r.account_variants.some(v=>v.catalog_state==="last_good")) parts.push("使用本账号 last-good 目录");
-  if(id&&(r.context_override||Number(r.context_requested)>0)) parts.push(`<button type="button" class="ctx-tier" data-ctx-tier="${esc(id)}" data-ctx-clear="true">恢复各账号默认</button>`);
   return parts.join('<span class="ctx-sep"> / </span>');
 }
 // regionCell 把一行的某一区渲染成三行事实。
@@ -1259,7 +1254,6 @@ function bindModelActions(){
     el.addEventListener("click",()=>{
       const id=el.dataset.ctxTier;
       if(el.disabled||setContextTier.saving) return;
-      if(el.dataset.ctxClear==="true") return setContextTier(id,null);
       const tokens=Number(el.dataset.ctxTokens);
       // 已经是生效档就不重复提交：一次无变化的写盘只会产生一个多余请求，还可能在
       // 界面上闪一下。直接返回更贴近"点它没有变化"的直觉。
@@ -1407,7 +1401,7 @@ async function setContextTier(id,tokens){
     const state=readback&&readback.context_states&&readback.context_states[id];
     if(tokens!=null&&state&&state.status!=="compatible_known_accounts") throw new Error("配置已保存，但账号目录已变化；不兼容账号使用自身默认/受限值，请刷新检查");
     await loadModels(false,false);
-    toast(tokens==null?"已恢复各账号目录默认":`上下文覆盖已保存 ${contextLabel(tokens)}`,"ok","仅在账号目录支持该档位时转发；静态目录采用保守值");
+    toast(tokens==null?"上下文覆盖已清除":`上下文覆盖已保存 ${contextLabel(tokens)}`,"ok","");
     return true;
   }catch(e){
     // No optimistic memory mutation exists to roll back. Always reload actual
