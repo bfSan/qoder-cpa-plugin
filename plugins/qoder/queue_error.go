@@ -26,6 +26,10 @@ func (e *queueAdmissionError) Error() string {
 // a transient model queue cool the entire credential. The lifecycle marker is
 // required by the deployed host; the plugin still cools the affected model.
 func queueErrorForClient(err error) error {
+	var daily *dailyQuotaError
+	if errors.As(err, &daily) {
+		return daily
+	}
 	var queued *queueAdmissionError
 	if errors.As(err, &queued) {
 		return queued

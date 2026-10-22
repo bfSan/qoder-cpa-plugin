@@ -284,6 +284,9 @@ func looksLikeErrorBody(body string) bool {
 // upstreamStatusError, so the host classifies the failure from the HTTP status
 // that crosses the RPC boundary — not from the message text.
 func upstreamEnvelopeError(status int, body string) error {
+	if daily := newDailyQuotaError(status, body); daily != nil {
+		return daily
+	}
 	if queued := newQueueAdmissionError(status, body); queued != nil {
 		return queued
 	}
@@ -302,6 +305,9 @@ func upstreamEnvelopeError(status int, body string) error {
 // EOF)" is that marker. Rate limiting is a model-scoped, short-lived condition
 // — it must cool the (account, model) pair, never the whole credential.
 func streamEnvelopeError(status int, body string) string {
+	if daily := newDailyQuotaError(status, body); daily != nil {
+		return daily.Error()
+	}
 	if queued := newQueueAdmissionError(status, body); queued != nil {
 		return queued.Error()
 	}
@@ -411,6 +417,10 @@ func pumpUpstreamStream(prepare upstreamRequestPrepare, release func(), streamID
 				publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 				return
 			}
+		}
+		if err := dailyQuotaCooldownError(authID, cooldownModel); err != nil {
+			streamEmitError(streamID, err.Error())
+			return
 		}
 		httpReq, cancel, err := prepare(parentCtx)
 		if err != nil {

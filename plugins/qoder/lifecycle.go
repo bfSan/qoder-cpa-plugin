@@ -446,7 +446,7 @@ func reconcileAfterExecutorError(authID string, status int, body string) {
 	if !lifecycleEnabled() || strings.TrimSpace(authID) == "" {
 		return
 	}
-	if isQueueAdmission(status, body) || (isSoftRateLimit(status, body) && !isHardCreditError(status, body)) {
+	if isDailyCountLimit(status, body) || isQueueAdmission(status, body) || (isSoftRateLimit(status, body) && !isHardCreditError(status, body)) {
 		return
 	}
 	if !isHardCreditError(status, body) {
@@ -514,7 +514,7 @@ func reconcileByUID(uid string, status int, body string) {
 	if uid == "" || !lifecycleEnabled() {
 		return
 	}
-	if isQueueAdmission(status, body) || !isHardCreditError(status, body) {
+	if isDailyCountLimit(status, body) || isQueueAdmission(status, body) || !isHardCreditError(status, body) {
 		return
 	}
 	idx, id := resolveAuthIndexAndID(uid)

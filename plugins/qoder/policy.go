@@ -113,6 +113,10 @@ const httpStatusPaymentRequired = 402
 // the existing retryBackoffSchedule (0.5-4s per attempt, 3 attempts) absorbs
 // it; the retryAfterSeconds hint is not used as a delay floor on purpose.
 func isSoftRateLimit(status int, body string) bool {
+	// A daily cap cannot recover through the short queue retry loop.
+	if isDailyCountLimit(status, body) {
+		return false
+	}
 	// Queue admission is checked BEFORE the credit gate on purpose. The
 	// gateway's 10605 body is a nested document whose tail is truncated in
 	// transit, and on a credential without a quota package it can also carry
@@ -300,6 +304,9 @@ func upstreamReadError(err error) error {
 // actionable copy when the rejection was caused by oversized input so users
 // don't mistake it for an account/quota problem.
 func chatUpstreamError(status int, body string) error {
+	if daily := newDailyQuotaError(status, body); daily != nil {
+		return daily
+	}
 	if queued := newQueueAdmissionError(status, body); queued != nil {
 		return queued
 	}

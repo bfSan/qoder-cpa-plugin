@@ -734,6 +734,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	cooldownModel := requestModelForCooldown(req.Model, req.Metadata)
+	if err := dailyQuotaCooldownError(req.AuthID, cooldownModel); err != nil {
+		return nil, err
+	}
 	sa, err := parseStored(req.StorageJSON)
 	if err != nil {
 		return nil, err
@@ -755,6 +758,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		return nil, gateErr
 	}
 	defer release()
+	if err := dailyQuotaCooldownError(req.AuthID, cooldownModel); err != nil {
+		return nil, err
+	}
 	// Build the QoderWork agent_chat_generation body from the OpenAI request,
 	// then QoderEncoding-encode it. The template embeds a 10657-token system
 	// prompt that the server requires for normal behaviour (KNOWLEDGE §5.2).
@@ -776,6 +782,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	}
 	encodedBody := qoderEncode(body)
 	for attempt := 1; ; attempt++ {
+		if err := dailyQuotaCooldownError(req.AuthID, cooldownModel); err != nil {
+			return nil, err
+		}
 		// One attempt needs its own request: the host bridge consumes the body.
 		httpReq, cancel, reqErr := buildChatRequest(context.Background(), sa, encodedBody, upstreamModel)
 		if reqErr != nil {
@@ -897,6 +906,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	cooldownModel := requestModelForCooldown(req.Model, req.Metadata)
+	if err := dailyQuotaCooldownError(req.AuthID, cooldownModel); err != nil {
+		return nil, err
+	}
 	sa, err := parseStored(req.StorageJSON)
 	if err != nil {
 		return nil, err
@@ -934,6 +946,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
 	prepare := func(ctx context.Context) (*http.Request, context.CancelFunc, error) {
+		if err := dailyQuotaCooldownError(req.AuthID, cooldownModel); err != nil {
+			return nil, nil, err
+		}
 		return buildChatRequest(ctx, sa, encodedBody, upstreamModel)
 	}
 
@@ -944,6 +959,13 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if gateErr != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, gateErr.Error())
 		return nil, gateErr
+	}
+
+	// Recheck after waiting for an execution slot; a concurrent call may have
+	// discovered the daily cap while this request was queued locally.
+	if err := dailyQuotaCooldownError(req.AuthID, cooldownModel); err != nil {
+		release()
+		return nil, err
 	}
 
 	// No async stream id → fall back to synchronous chunk collection.
@@ -991,6 +1013,9 @@ func errorEnvelope(code, message string) []byte {
 // cooldown (see envelopeError.HTTPStatus).
 func errorEnvelopeFor(err error) []byte {
 	err = queueErrorForClient(err)
+	if _, daily := err.(*dailyQuotaError); daily {
+		return errorEnvelope("quota_exceeded", err.Error())
+	}
 	if _, queued := err.(*queueAdmissionError); queued {
 		return errorEnvelope("rate_limit", err.Error())
 	}

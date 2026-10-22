@@ -24,6 +24,8 @@ const (
 	// failures because the upstream explicitly asked us to slow down.
 	modelCooldownRateLimit = 300 * time.Second
 	modelCooldownUnknown   = 60 * time.Second
+	// Bounded probe interval, NOT an assumed upstream daily reset time.
+	modelCooldownDailyQuota = 30 * time.Minute
 
 	// modelCooldownMaxEntries bounds the table so a hostile or buggy upstream
 	// cannot grow it without limit.
@@ -33,8 +35,9 @@ const (
 type cooldownReason string
 
 const (
-	cooldownReasonRateLimit cooldownReason = "rate_limit"
-	cooldownReasonUnknown   cooldownReason = "upstream_error"
+	cooldownReasonRateLimit  cooldownReason = "rate_limit"
+	cooldownReasonUnknown    cooldownReason = "upstream_error"
+	cooldownReasonDailyQuota cooldownReason = "daily_quota"
 )
 
 type modelCooldownKey struct {
@@ -115,11 +118,18 @@ func markModelCooldown(authID, model string, reason cooldownReason) {
 	ttl := modelCooldownUnknown
 	if reason == cooldownReasonRateLimit {
 		ttl = modelCooldownRateLimit
+	} else if reason == cooldownReasonDailyQuota {
+		ttl = modelCooldownDailyQuota
 	}
 	now := cooldownNowFn()
 	cooldownMu.Lock()
 	defer cooldownMu.Unlock()
 	cooldownSweepLocked(now)
+	// An older in-flight request must not downgrade a newly discovered daily cap.
+	key := modelCooldownKey{AuthID: authID, ModelID: model}
+	if entry, ok := cooldownTable[key]; ok && entry.Reason == cooldownReasonDailyQuota {
+		return
+	}
 	if len(cooldownTable) >= modelCooldownMaxEntries {
 		oldestKey := modelCooldownKey{}
 		oldestUntil := time.Time{}
@@ -216,6 +226,12 @@ func coolingModelSetFor(authID string) map[string]struct{} {
 		}
 		if !entry.Until.After(now) {
 			delete(cooldownTable, key)
+			continue
+		}
+		// Daily quotas are enforced at execution, not by removing capability.
+		// The host caches this catalog and need not refresh at TTL expiry;
+		// removing a daily-limited model could strand it after recovery.
+		if entry.Reason == cooldownReasonDailyQuota {
 			continue
 		}
 		if out == nil {
@@ -331,6 +347,10 @@ func cooldownSweepLocked(now time.Time) {
 func recordUpstreamFailure(authID, model string, status int, body string) {
 	model = normalizeCooldownModel(model)
 	if model == "" {
+		return
+	}
+	if isDailyCountLimit(status, body) {
+		markModelCooldown(authID, model, cooldownReasonDailyQuota)
 		return
 	}
 	// Queue admission outranks incidental credit wording, just as it does in
