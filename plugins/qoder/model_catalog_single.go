@@ -60,7 +60,14 @@ func refreshAccountModelCatalog(authIndex string) string {
 	}
 	// Persist the freshly discovered catalog next to the in-memory cache, so a
 	// restart does not immediately fall back to the previous generation.
-	persistModelCatalogFor(sa, dyn, nil, nil)
+	//
+	// callModelsAPI only returns model IDs: it does not parse multipliers,
+	// context tiers or thinking_config. Passing nil here used to overwrite the
+	// stored region_facts with nothing, so every 刷新 click silently erased the
+	// account's capability data. Inherit the existing facts instead and let the
+	// next full discovery replace them.
+	factors, facts := existingModelCatalogFacts(sa)
+	persistModelCatalogFor(sa, dyn, factors, facts)
 	status := "refreshed"
 	if err := triggerHostAuthReregister(phys); err != nil {
 		status = "catalog-only"

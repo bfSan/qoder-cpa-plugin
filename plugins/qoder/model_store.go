@@ -211,6 +211,34 @@ func decodeModelCatalogFile(path string) (modelCatalogCacheV1, bool) {
 // Only UID-bearing accounts are persisted. Token-prefix keys (legacy files
 // predating UID capture) rotate with credentials and would litter the store
 // with entries nothing can look up after re-login.
+// existingModelCatalogFacts returns the cached factors/facts for one account so a
+// catalog-only refresh can preserve capability data it cannot itself re-derive.
+func existingModelCatalogFacts(sa *storedAuth) (map[string]float64, map[string]modelRegionFacts) {
+	if sa == nil {
+		return nil, nil
+	}
+	uid := strings.TrimSpace(sa.Account.UID)
+	if uid == "" {
+		return nil, nil
+	}
+	store, err := defaultQoderModelStore()
+	if err != nil {
+		return nil, nil
+	}
+	region := authRegion(sa)
+	caches, err := store.loadModelCatalogAll()
+	if err != nil {
+		return nil, nil
+	}
+	identity := modelCatalogIdentitySHA256(region, uid)
+	for _, cache := range caches {
+		if cache.Region == region && cache.IdentitySHA256 == identity {
+			return cache.Factors, cache.RegionFacts
+		}
+	}
+	return nil, nil
+}
+
 func persistModelCatalogFor(sa *storedAuth, models []pluginapi.ModelInfo, factors map[string]float64, facts map[string]modelRegionFacts) {
 	if sa == nil || len(models) == 0 {
 		return
