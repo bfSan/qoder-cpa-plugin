@@ -462,6 +462,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			ctx2 = 0
 		}
 		tiers := parseContextTiers(m.ContextConfig)
+		thinking := parseThinkingFacts(m.Thinking, m.IsReasoning == nil || *m.IsReasoning)
 		out = append(out, pluginapi.ModelInfo{
 			ID:                         m.Key,
 			Name:                       m.DisplayName,
@@ -469,6 +470,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			MaxCompletionTokens:        8192,
 			OwnedBy:                    providerName,
 			SupportedGenerationMethods: []string{"chat"},
+			Thinking:                   thinkingSupportForHost(thinking),
 		})
 		// The advertised context length is the default tier when one is
 		// marked: max_input_tokens is the ceiling the gateway accepts, while
@@ -483,7 +485,6 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			value := ctx2
 			effectiveCtx = &value
 		}
-		thinking := parseThinkingFacts(m.Thinking, m.IsReasoning == nil || *m.IsReasoning)
 		var maxInput *int64
 		if ctx2 > 0 {
 			value := ctx2
