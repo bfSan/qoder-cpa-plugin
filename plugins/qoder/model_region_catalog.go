@@ -115,21 +115,34 @@ func buildModelPromotionsQuery() map[string]any {
 				continue
 			}
 			for modelID, fact := range facts {
-				if fact.Promotion == nil || seen[modelID] {
+				// A model the gateway marks free (price_factor 0) is an active
+				// offer even when it carries no promotion object. Dropping it
+				// here made "DeepSeek free" invisible in the activity panel
+				// while the model itself showed a 0 multiplier.
+				free := fact.IsFree || (fact.PriceFactor != nil && *fact.PriceFactor == 0)
+				if fact.Promotion == nil && !free {
+					continue
+				}
+				if seen[modelID] {
 					continue
 				}
 				seen[modelID] = true
 				entry := map[string]any{
 					"model_id":  modelID,
 					"promotion": cloneQoderPromotion(fact.Promotion),
-					"is_free":   fact.IsFree,
+					"is_free":   free,
+				}
+				if fact.Promotion == nil {
+					entry["promotion"] = map[string]any{"active": true, "badge_zh": "免费", "badge_en": "Free"}
 				}
 				if fact.PriceFactor != nil {
 					entry["price_factor"] = *fact.PriceFactor
 				}
 				if fact.OriginalPriceFactor != nil {
 					entry["original_price_factor"] = *fact.OriginalPriceFactor
-				} else if fact.Promotion.BeforePromotionPriceFactor != nil {
+				} else if fact.Promotion != nil && fact.Promotion.BeforePromotionPriceFactor != nil {
+					// A free model has no promotion object, so this branch must
+					// be nil-guarded; an unguarded read panics the whole query.
 					entry["original_price_factor"] = *fact.Promotion.BeforePromotionPriceFactor
 				}
 				promotions[region] = append(promotions[region], entry)
