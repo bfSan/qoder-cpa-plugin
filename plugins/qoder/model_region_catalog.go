@@ -105,7 +105,12 @@ func buildModelPromotionsQuery() map[string]any {
 	for _, region := range []string{regionCN, regionIntl} {
 		seen := make(map[string]bool)
 		for _, key := range cachedRegionKeysByRegion(region) {
-			facts, ok := cachedRegionFactsFor(key)
+			// Promotions are display metadata, not a routing decision: an
+			// expired discovery TTL means "refresh due", never "the campaign
+			// vanished". Use the TTL-free accessor so a restart or a stale
+			// account does not blank the activity panel while the facts are
+			// still on disk.
+			facts, ok := lastGoodRegionFactsFor(key)
 			if !ok {
 				continue
 			}
