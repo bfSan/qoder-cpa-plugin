@@ -37,6 +37,10 @@ import (
 // the upstream-failure branch without a live gateway.
 var callModelsAPIFn = callModelsAPI
 
+// triggerHostAuthReregisterFn is injectable so tests can exercise the refresh
+// path without writing a real credential through the host.
+var triggerHostAuthReregisterFn = triggerHostAuthReregister
+
 // refreshAccountModelCatalog re-discovers one account's catalog and asks the host
 // to re-register it. Best-effort by design: the caller is a UI refresh, and a
 // failed upstream pull must not turn a working 刷新 button into an error.
@@ -58,18 +62,15 @@ func refreshAccountModelCatalog(authIndex string) string {
 		// leaving the last good registration alone.
 		return "not-ready"
 	}
-	// Persist the freshly discovered catalog next to the in-memory cache, so a
-	// restart does not immediately fall back to the previous generation.
-	//
-	// callModelsAPI only returns model IDs: it does not parse multipliers,
-	// context tiers or thinking_config. Passing nil here used to overwrite the
-	// stored region_facts with nothing, so every 刷新 click silently erased the
-	// account's capability data. Inherit the existing facts instead and let the
-	// next full discovery replace them.
-	factors, facts := existingModelCatalogFacts(sa)
-	persistModelCatalogFor(sa, dyn, factors, facts)
+	// callModelsAPI already persists this account's full discovery -- model
+	// list, multipliers, context tiers and thinking tiers -- via
+	// storeDynamicModelsForWithRegions + persistModelCatalogFor. Do NOT persist
+	// again here: an earlier version called persistModelCatalogFor(sa, dyn, nil,
+	// nil), and because dyn carries no facts that second write overwrote the
+	// just-saved region_facts with null on every 刷新 click.
+	_ = dyn
 	status := "refreshed"
-	if err := triggerHostAuthReregister(phys); err != nil {
+	if err := triggerHostAuthReregisterFn(phys); err != nil {
 		status = "catalog-only"
 	}
 	return status

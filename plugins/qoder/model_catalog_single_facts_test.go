@@ -48,3 +48,51 @@ func TestCatalogOnlyRefreshPreservesExistingFacts(t *testing.T) {
 		t.Fatal("refresh erased capability facts")
 	}
 }
+
+// The real regression: the panel refresh path itself must leave the facts that
+// callModelsAPI just persisted intact.
+func TestRefreshAccountModelCatalogKeepsFactsWrittenByDiscovery(t *testing.T) {
+	redirectUserConfigDir(t)
+	store, err := defaultQoderModelStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa := &storedAuth{}
+	sa.Account.UID = "uid-refresh-path"
+	sa.Auth.Region = regionCN
+	identity := modelCatalogIdentitySHA256("cn", "uid-refresh-path")
+	persisted := modelCatalogCacheV1{
+		SchemaVersion: modelCatalogSchemaVersion, FactsVersion: modelCatalogFactsVersion,
+		IdentitySHA256: identity, Region: "cn", UID: "uid-refresh-path",
+		Models:  []pluginapi.ModelInfo{{ID: "m1"}},
+		Factors: map[string]float64{"m1": 0.25},
+		RegionFacts: map[string]modelRegionFacts{
+			"m1": {Thinking: &thinkingFacts{Status: "supported", Levels: []string{"low", "high"}}},
+		},
+	}
+	if err := store.saveModelCatalog(persisted); err != nil {
+		t.Fatal(err)
+	}
+	oldCall, oldBundle, oldTrigger := callModelsAPIFn, panelHostAuthBundle, triggerHostAuthReregisterFn
+	defer func() {
+		callModelsAPIFn, panelHostAuthBundle, triggerHostAuthReregisterFn = oldCall, oldBundle, oldTrigger
+	}()
+	callModelsAPIFn = func(*storedAuth) ([]pluginapi.ModelInfo, error) {
+		return []pluginapi.ModelInfo{{ID: "m1"}}, nil
+	}
+	panelHostAuthBundle = func(string) (*storedAuth, *hostAuthPhysical, error) {
+		return sa, &hostAuthPhysical{Name: "qoder-cn-x.json", JSON: []byte(`{}`)}, nil
+	}
+	triggerHostAuthReregisterFn = func(*hostAuthPhysical) error { return nil }
+	if got := refreshAccountModelCatalog("idx"); got != "refreshed" {
+		t.Fatalf("status %q", got)
+	}
+	caches, err := store.loadModelCatalogAll()
+	if err != nil || len(caches) != 1 {
+		t.Fatalf("reload %v %d", err, len(caches))
+	}
+	got := caches[0]
+	if got.Factors["m1"] != 0.25 || got.RegionFacts["m1"].Thinking == nil {
+		t.Fatalf("refresh erased capability facts: %+v %+v", got.Factors, got.RegionFacts)
+	}
+}
