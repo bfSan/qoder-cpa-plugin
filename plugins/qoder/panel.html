@@ -64,6 +64,10 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .promo-box.open .promo-list{display:flex}
 .promo-row{display:grid;grid-template-columns:minmax(84px,auto) minmax(140px,1.3fr) minmax(90px,auto) minmax(60px,auto) minmax(150px,1.2fr);gap:10px;align-items:center;padding:7px 9px;border-radius:8px;background:var(--surface);font-size:12px;border-left:3px solid var(--mut-border)}
 .promo-row.on{border-left-color:var(--ok);background:var(--ok-soft)}
+/* 文案型活动要多占一整行：到期时间与活动说明是正文，不是附注。 */
+.promo-desc{grid-column:1/-1;color:var(--mut);line-height:1.55;margin-top:2px;padding-left:2px}
+.promo-link{color:var(--ok);text-decoration:none;white-space:nowrap}
+.promo-link:hover{text-decoration:underline}
 .promo-row.off{opacity:.72}
 .promo-badge{font-weight:700;color:var(--mut);white-space:nowrap}
 .promo-badge.on{color:var(--ok)}
@@ -1134,10 +1138,17 @@ function renderQPromotions(){
     const dup=r.items.length>1?` <span class="promo-more" title="${esc(r.items.map(x=>x.region).join('、'))}">×${r.items.length}</span>`:'';
     // 未生效必须带上生效时段：只说"未生效"读者不知道几点回来，等于没给信息。
     const win=qPromoWindow(p);
+    // 只有结构化 promotion 才有时段；文案型活动（限时免费）没有 window，
+    // 硬画"生效时段 全天"是编造，改为不显示时段状态。
+    const hasWindow=!!(p&&(p.window_start||p.windows&&p.windows.length||p.timezone&&p.window_start));
     const state=r.active
       ?`<span class="promo-state on">生效中${win&&win!=='全天'?` · ${esc(win)}`:''}</span>`
-      :`<span class="promo-state off">未生效 · 生效时段 ${esc(win)}</span>`;
-    return `<div class="promo-row ${r.active?'on':'off'}" title="${esc(qPromoTitle(e,r.active))}"><span class="promo-badge ${r.active?'on':'off'}">${esc(qPromoLabel(p))}</span><span class="promo-model">${esc(r.id)}${dup}</span><span class="promo-price">${esc(price)}</span><span class="promo-realm">${esc(realms)}</span>${state}</div>`;
+      :(hasWindow?`<span class="promo-state off">未生效 · 生效时段 ${esc(win)}</span>`:'');
+    // 上游文案（含到期时间）是活动的主体信息，不能只塞进 tooltip。
+    const text=e.text_zh||'';
+    const link=e.link_url?` <a class="promo-link" href="${esc(e.link_url)}" target="_blank" rel="noopener">${esc(e.link_label_zh||'查看详情')}</a>`:'';
+    const desc=text?`<div class="promo-desc">${esc(text)}${link}</div>`:'';
+    return `<div class="promo-row ${r.active?'on':'off'}" title="${esc(qPromoTitle(e,r.active))}"><span class="promo-badge ${r.active?'on':'off'}">${esc(qPromoLabel(p))}</span><span class="promo-model">${esc(r.id)}${dup}</span><span class="promo-price">${esc(price)}</span><span class="promo-realm">${esc(realms)}</span>${state}${desc}</div>`;
   };
   const head=`<div class="promo-hd"><div class="promo-title" id="promoToggle" title="点击展开/收起活动明细">Qoder 上游活动 · <span class="promo-live${live.length?'':' zero'}">生效 ${live.length}</span>${later.length?` / 未生效 ${later.length}`:''}</div><div class="promo-meta">活动时钟 ${qPromoClock&&qPromoClock.zone||'UTC'} · 每 1 小时自动刷新</div></div>`;
   const list=[...live.map(r=>rowHTML(r)),...later.map(r=>rowHTML(r))].join('');

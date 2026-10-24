@@ -7,11 +7,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// Free models are active offers even without a promotion object.
-// Regression: DeepSeek (dfmodel) and qfmodel arrive with is_free=true and
-// price_factor 0 but no promotion block, so the activity panel showed nothing
-// while the model list already displayed a 0 multiplier.
+// Free models are announced through the presentation text, not the model list.
+// Regression: DeepSeek (dfmodel) arrives with is_free=true and price_factor 0
+// but no promotion block; the campaign wording (and its expiry) only exists in
+// the ide-text document, so the panel showed nothing at all.
 func TestFreeModelAppearsAsPromotion(t *testing.T) {
+	restoreText := withIDETextFixture(t, fixtureIDETextCN)
+	defer restoreText()
 	zero := 0.0
 	paid := 0.5
 	dynamicModelsCache.Lock()
@@ -43,7 +45,7 @@ func TestFreeModelAppearsAsPromotion(t *testing.T) {
 		t.Fatalf("unexpected entry: %+v", entry)
 	}
 	promo := entry["promotion"].(map[string]any)
-	if promo["badge_zh"] != "免费" {
-		t.Fatalf("free badge missing: %+v", promo)
+	if promo["badge_zh"] != "限时免费" {
+		t.Fatalf("limited-time badge missing: %+v", promo)
 	}
 }

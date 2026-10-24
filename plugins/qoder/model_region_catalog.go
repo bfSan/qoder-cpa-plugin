@@ -102,6 +102,16 @@ func buildModelPromotionsQuery() map[string]any {
 	promotions := map[string][]map[string]any{regionCN: {}, regionIntl: {}}
 	status := map[string]any{}
 	now := time.Now().UTC()
+	// Refresh the presentation text first: campaign wording and expiry only
+	// exist there. Best-effort, so a text outage degrades to "no description"
+	// rather than hiding the structured offers that are still valid.
+	textErr := map[string]string{}
+	for _, region := range []string{regionCN, regionIntl} {
+		if snapshot := refreshIDEText(region, false); snapshot.err != "" {
+			textErr[region] = snapshot.err
+		}
+		_ = region
+	}
 	for _, region := range []string{regionCN, regionIntl} {
 		seen := make(map[string]bool)
 		for _, key := range cachedRegionKeysByRegion(region) {
@@ -115,15 +125,24 @@ func buildModelPromotionsQuery() map[string]any {
 				continue
 			}
 			for modelID, fact := range facts {
-				// A model the gateway marks free (price_factor 0) is an active
-				// offer even when it carries no promotion object. Dropping it
-				// here made "DeepSeek free" invisible in the activity panel
-				// while the model itself showed a 0 multiplier.
-				free := fact.IsFree || (fact.PriceFactor != nil && *fact.PriceFactor == 0)
-				if fact.Promotion == nil && !free {
+				if seen[modelID] {
 					continue
 				}
-				if seen[modelID] {
+				free := fact.IsFree || (fact.PriceFactor != nil && *fact.PriceFactor == 0)
+				// Two independent sources can describe an offer:
+				//  1. a structured promotion object (off-peak windows, tiered
+				//     discounts) -- carries its own badge and time range;
+				//  2. free pricing plus upstream presentation text, which is
+				//     where a limited-time campaign states its wording and
+				//     expiry ("限时免费，至 11月01日 00:00"). The model list
+				//     never contains that sentence, so without the text there
+				//     is nothing to show.
+				text, hasText := ideTextFor(region, modelID)
+				textOffer := hasText && ideTextHasOffer(text)
+				if fact.Promotion == nil && !(free && textOffer) {
+					// A free model with no campaign wording is a permanent
+					// price, not an activity. Advertising it would invent an
+					// offer the upstream never announced.
 					continue
 				}
 				seen[modelID] = true
@@ -132,8 +151,25 @@ func buildModelPromotionsQuery() map[string]any {
 					"promotion": cloneQoderPromotion(fact.Promotion),
 					"is_free":   free,
 				}
+				if hasText {
+					entry["text_zh"] = stripMarkdownLinks(text.Detail)
+					entry["text_en"] = stripMarkdownLinks(text.Desc)
+					entry["text_name"] = text.Name
+					if link := ideTextLink(text); link != "" {
+						entry["link_url"] = link
+						entry["link_label_zh"] = "查看详情"
+					}
+				}
 				if fact.Promotion == nil {
-					entry["promotion"] = map[string]any{"active": true, "badge_zh": "免费", "badge_en": "Free"}
+					// Wording comes from upstream; the badge only says what the
+					// text already says (free), never a fabricated discount.
+					entry["promotion"] = map[string]any{
+						"active":         true,
+						"badge_zh":       "限时免费",
+						"badge_en":       "Limited-time free",
+						"description_zh": stripMarkdownLinks(text.Detail),
+						"description_en": stripMarkdownLinks(text.Desc),
+					}
 				}
 				if fact.PriceFactor != nil {
 					entry["price_factor"] = *fact.PriceFactor
@@ -157,9 +193,18 @@ func buildModelPromotionsQuery() map[string]any {
 			status[region] = "loaded"
 		}
 	}
+	textStatus := map[string]any{}
+	for _, region := range []string{regionCN, regionIntl} {
+		if msg, bad := textErr[region]; bad {
+			textStatus[region] = "unavailable: " + msg
+			continue
+		}
+		textStatus[region] = "loaded"
+	}
 	return map[string]any{
-		"promotions": promotions,
-		"status":     status,
+		"promotions":  promotions,
+		"status":      status,
+		"text_status": textStatus,
 		"clock": map[string]any{
 			"unix":   now.Unix(),
 			"minute": now.Hour()*60 + now.Minute(),
