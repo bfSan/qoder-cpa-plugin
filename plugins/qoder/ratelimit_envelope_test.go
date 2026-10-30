@@ -122,7 +122,7 @@ func rateLimitGateway(t *testing.T, failures int32, hits *int32) *httptest.Serve
 			_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"{\"code\":\"429\",\"message\":\"Too many requests, please rate limit\"}","statusCodeValue":429}` + "\n\n"))
 			return
 		}
-		_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}","statusCodeValue":200}` + "\n\n"))
+		_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}","statusCodeValue":200}` + "\n\n"))
 		_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"[DONE]","statusCodeValue":200}` + "\n\n"))
 	}))
 	t.Cleanup(srv.Close)
@@ -196,7 +196,7 @@ func TestPumpUpstreamStream_RateLimitRetryRecovers(t *testing.T) {
 	pumpUpstreamStream(prepare, func() {}, "stream-1", true, "qoder/qmodel", "qmodel", "uid-test", time.Now(), "auth-1", "qmodel")
 
 	chunks := fake.chunks()
-	if len(chunks) != 1 {
+	if len(chunks) != 2 {
 		t.Fatalf("want the retried stream to deliver its chunk, got %v", chunks)
 	}
 	if !strings.HasPrefix(chunks[0], "data: ") {
@@ -277,8 +277,8 @@ func TestCollectUpstreamStreamQoder_NormalStreamStillPassesThrough(t *testing.T)
 	if status != 0 {
 		t.Fatalf("successful collection should report status 0, got %d", status)
 	}
-	if len(chunks) != 1 {
-		t.Fatalf("want 1 chunk, got %d (%v)", len(chunks), chunks)
+	if len(chunks) != 2 {
+		t.Fatalf("want 2 chunks, got %d (%v)", len(chunks), chunks)
 	}
 	if !strings.Contains(string(chunks[0].Payload), `"content":"hi"`) {
 		t.Fatalf("chunk payload should carry the delta, got %s", chunks[0].Payload)
@@ -347,7 +347,7 @@ func TestCleanChunkJSON_DropsErrorEnvelopes(t *testing.T) {
 		`{"message":"throttled, slow down"}`,
 	}
 	for _, tc := range cases {
-		if got := cleanChunkJSON(tc); got != "" {
+		if got, err := cleanChunkJSON(tc); got != "" || err == nil {
 			t.Fatalf("cleanChunkJSON(%s) = %q, want \"\" (must not leak as a chunk)", tc, got)
 		}
 	}
@@ -362,7 +362,7 @@ func TestCleanChunkJSON_KeepsLegitimateChunks(t *testing.T) {
 		`{"usage":{"prompt_tokens":5,"total_tokens":5}}`,
 	}
 	for _, tc := range cases {
-		if got := cleanChunkJSON(tc); got == "" {
+		if got, err := cleanChunkJSON(tc); got == "" || err != nil {
 			t.Fatalf("cleanChunkJSON(%s) must be preserved, got \"\"", tc)
 		}
 	}

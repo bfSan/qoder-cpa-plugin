@@ -6,7 +6,7 @@
       "name": "Qoder",
       "description": "Qoder provider for CPA: CN (qoder.com.cn) and Intl (qoder.com / openapi.qoder.sh) in one plugin. Per-account region routing, device-flow + PAT login, COSY-signed streaming chat with tool calling, panel-managed model catalog (hide/restore/order/add), CN daily check-in and Intl campaign check-in, per-model cooldown, credit lifecycle and token keepalive.",
       "author": "bfSan (qoderwork originally by Sliverkiss, based on qoderwork by lovingfish)",
-      "version": "0.9.31",
+      "version": "0.9.32",
       "repository": "https://github.com/bfSan/qoder-cpa-plugin",
       "homepage": "https://github.com/bfSan/qoder-cpa-plugin/tree/main/plugins/qoder",
       "license": "MIT",
@@ -17,7 +17,7 @@
         "QoderWork",
         "CheckIn"
       ],
-      "changelog": "Recognise campaigns from Qoder dynamic presentation text (ide-text): limited-time free models now show their upstream wording and expiry in the activity panel, with the campaign link. Replaces the invented free badge."
+      "changelog": "Validate stream completion and tool-call integrity across async, collected and non-streaming responses. Surface premature EOF, malformed frames and unclassified upstream errors instead of silently completing partial output; preserve valid tool argument fragments and add content-free diagnostic counters."
     }
   ]
 }

@@ -124,7 +124,7 @@ func queueFailureGateway(t *testing.T, transport string, failures int32, hits *i
 			}
 			return
 		}
-		_, _ = w.Write([]byte("data:" + `{"body":"{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}","statusCodeValue":200}` + "\n\n" + "data:" + `{"body":"[DONE]","statusCodeValue":200}` + "\n\n"))
+		_, _ = w.Write([]byte("data:" + `{"body":"{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}","statusCodeValue":200}` + "\n\n" + "data:" + `{"body":"[DONE]","statusCodeValue":200}` + "\n\n"))
 	}))
 	t.Cleanup(srv.Close)
 	return srv

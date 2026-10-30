@@ -26,7 +26,7 @@ func queueThenSuccessGateway(t *testing.T, failures int32, hits *int32) *httptes
 			_, _ = w.Write([]byte(queueAdmissionEnvelope + "\n\n"))
 			return
 		}
-		_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}","statusCodeValue":200}` + "\n\n"))
+		_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}","statusCodeValue":200}` + "\n\n"))
 		_, _ = w.Write([]byte("data:" + `{"headers":{},"body":"[DONE]","statusCodeValue":200}` + "\n\n"))
 	}))
 	t.Cleanup(srv.Close)

@@ -304,7 +304,7 @@ func TestContextContractExecuteAndStreamUseSameAccountResolver(t *testing.T) {
 		}
 		received <- decoded
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data:"+`{"headers":{},"body":"{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}","statusCodeValue":200}`+"\n\n")
+		_, _ = io.WriteString(w, "data:"+`{"headers":{},"body":"{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}","statusCodeValue":200}`+"\n\n")
 		_, _ = io.WriteString(w, "data:"+`{"headers":{},"body":"[DONE]","statusCodeValue":200}`+"\n\n")
 	}))
 	t.Cleanup(server.Close)

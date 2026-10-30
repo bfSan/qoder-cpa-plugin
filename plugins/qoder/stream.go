@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -515,67 +514,27 @@ func pumpUpstreamAttempt(httpReq *http.Request, cancel context.CancelFunc, strea
 	}
 	collector := &sseUsageCollector{}
 	emitted := false
-	scanner := bufio.NewScanner(newHostStreamReader(stream))
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		env, ok := parseUpstreamLine(line)
-		if !ok {
-			continue
-		}
-		// The gateway answers HTTP 200 even when it refused the request; the
-		// real status lives inside the envelope. Treat a refusal as an error
-		// frame — never as a chunk — otherwise the host sees a stream that
-		// ended without a single usable chunk and cools the whole credential.
-		if envStatus := upstreamEnvelopeStatus(env); envStatus >= 400 {
-			body := envelopeBodyText(env)
-			if isSoftRateLimit(envStatus, body) && attempt < upstreamRetryMaxAttempts && !emitted {
-				return true
-			}
-			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, envStatus, body)
-			recordUpstreamFailureWithHeaders(authID, cooldownModel, envStatus, body, env.Headers)
-			if authUID != "" {
-				go reconcileByUID(authUID, envStatus, body)
-			}
-			streamEmitError(streamID, streamEnvelopeError(envStatus, body))
-			return false
-		}
-		bodyStr := envelopeBodyText(env)
-		if bodyStr == "" {
-			continue
-		}
-		if bodyStr == "[DONE]" {
-			break
-		}
-		collector.feed(bodyStr)
-		cleaned := cleanChunkJSON(bodyStr)
-		if cleaned == "" {
-			continue
-		}
+	err = walkIntegrityStream(newHostStreamReader(stream), true, collector.feed, func(cleaned string) error {
 		if sseFramed {
 			cleaned = "data: " + cleaned
 		}
-		if err := streamEmit(streamID, []byte(cleaned)); err != nil {
-			// Client disconnected / host closed stream — abort; do not report success.
-			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
-			return false
+		if emitErr := streamEmit(streamID, []byte(cleaned)); emitErr != nil {
+			return fmt.Errorf("qoder stream integrity: host_emit_failed (unexpected EOF)")
 		}
 		emitted = true
-	}
-	// A mid-stream read failure means the client received a truncated stream:
-	// surface it as an error frame and record the attempt as failed.
-	if err := scanner.Err(); err != nil {
-		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
-		readErr := upstreamReadError(err)
-		recordUpstreamFailure(authID, cooldownModel, 0, readErr.Error())
-		streamEmitError(streamID, readErr.Error())
-		return false
-	}
-	if !emitted {
-		errEmpty := emptyStreamError()
-		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, errEmpty.Error())
-		recordUpstreamFailure(authID, cooldownModel, 0, errEmpty.Error())
-		streamEmitError(streamID, errEmpty.Error())
+		return nil
+	})
+	if err != nil {
+		status := upstreamStatusFromError(err)
+		if !emitted && isSoftRateLimit(status, err.Error()) && attempt < upstreamRetryMaxAttempts {
+			return true
+		}
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, status, err.Error())
+		recordUpstreamError(authID, cooldownModel, status, err)
+		if status >= 400 && authUID != "" {
+			go reconcileByUID(authUID, status, err.Error())
+		}
+		streamEmitError(streamID, asyncIntegrityErrorMessage(err))
 		return false
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -638,43 +597,19 @@ func collectUpstreamAttempt(prepare upstreamRequestPrepare, sseFramed bool, coll
 		return nil, statusCode, attachQuotaHeaders(upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload))), responseHeaders)
 	}
 	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 64)
-	scanner := bufio.NewScanner(newHostStreamReader(stream))
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		env, ok := parseUpstreamLine(line)
-		if !ok {
-			continue
-		}
-		// HTTP 200 with a refusal inside the envelope: this is an upstream
-		// error, not a chunk. Reporting it with its real status lets the host
-		// scope the cooldown to the credential/model instead of synthesizing
-		// its own credential-scoped empty_stream.
-		if envStatus := upstreamEnvelopeStatus(env); envStatus >= 400 {
-			body := envelopeBodyText(env)
-			return nil, envStatus, attachQuotaHeaders(upstreamStatusError(envStatus, upstreamEnvelopeError(envStatus, body)), env.Headers)
-		}
-		bodyStr := envelopeBodyText(env)
-		if bodyStr == "" || bodyStr == "[DONE]" {
-			continue
-		}
-		if collector != nil {
-			collector.feed(bodyStr)
-		}
-		cleaned := cleanChunkJSON(bodyStr)
-		if cleaned == "" {
-			continue
-		}
+	var observe func(string)
+	if collector != nil {
+		observe = collector.feed
+	}
+	err = walkIntegrityStream(newHostStreamReader(stream), true, observe, func(cleaned string) error {
 		if sseFramed {
 			cleaned = "data: " + cleaned
 		}
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(cleaned)})
-	}
-	if err := scanner.Err(); err != nil {
-		return chunks, 0, upstreamReadError(err)
-	}
-	if len(chunks) == 0 {
-		return nil, 0, emptyStreamError()
+		return nil
+	})
+	if err != nil {
+		return nil, upstreamStatusFromError(err), queueErrorForClient(err)
 	}
 	return chunks, 0, nil
 }
@@ -695,259 +630,151 @@ func clientNeedsSSEFrame(metadata map[string]any) bool {
 	}
 }
 
-// cleanChunkJSON strips only the known-problematic empty tool-call shells
-// from choice deltas: a null/empty function_call and an empty tool_calls array
-// (QoderWork emits these on the terminal chunk, and strict clients interpret
-// them as a truncated tool call). Other empty-but-legal values are preserved:
-// content:"" is a valid delta (pure tool-call chunk) and the role-only first
-// chunk must survive so clients can establish the message role.
-//
-// It also drops upstream *error* bodies. A chunk without `choices` is only
-// forwarded when it is a legitimate non-choice frame (e.g. a usage-only tail);
-// a body carrying an error code/message is a refusal, and letting it through
-// makes the host read it as a data chunk — the client then sees a stream that
-// produced no usable chunk and CPA synthesizes a credential-scoped
-// empty_stream. Returning "" makes the callers skip the frame.
-func cleanChunkJSON(s string) string {
+// cleanChunkJSON only removes harmless empty padding, never whole sibling
+// choices. Validation errors are explicit; tool identity validation is stateful
+// and belongs to streamIntegrity, not this per-frame sanitizer.
+func cleanChunkJSON(s string) (string, error) {
 	var obj map[string]any
-	if json.Unmarshal([]byte(s), &obj) != nil {
-		return s
+	if json.Unmarshal([]byte(s), &obj) != nil || obj == nil {
+		return "", newStreamIntegrity().fail("invalid_json")
 	}
-	if _, hasChoices := obj["choices"]; !hasChoices {
-		if looksLikeErrorBody(s) {
-			return ""
-		}
+	if integrityErrorObject(obj) || looksLikeErrorBody(s) && obj["choices"] == nil && obj["usage"] == nil {
+		return "", newStreamIntegrity().fail("upstream_error_object")
 	}
-	changed := false
 	if choices, ok := obj["choices"].([]any); ok {
-		for _, c := range choices {
-			choice, ok := c.(map[string]any)
+		kept := make([]any, 0, len(choices))
+		for _, raw := range choices {
+			choice, ok := raw.(map[string]any)
 			if !ok {
-				continue
+				return "", newStreamIntegrity().fail("invalid_choice")
 			}
 			delta, ok := choice["delta"].(map[string]any)
 			if !ok {
+				kept = append(kept, choice)
 				continue
 			}
 			if v, present := delta["function_call"]; present && isEmptyValue(v) {
 				delete(delta, "function_call")
-				changed = true
 			}
 			if v, present := delta["tool_calls"]; present {
-				if arr, isArr := v.([]any); isArr && len(arr) == 0 {
+				if arr, ok := v.([]any); ok && len(arr) == 0 {
 					delete(delta, "tool_calls")
-					changed = true
 				}
 			}
-			// Upstream often pads terminal/noop deltas with empty noise fields
-			// that clients ignore but pollute wire size / some parsers.
 			for _, noise := range []string{"extra_fields", "refusal", "reasoning_content"} {
 				if v, present := delta[noise]; present && isEmptyValue(v) {
 					delete(delta, noise)
-					changed = true
 				}
 			}
-			// Drop a fully-empty delta ONLY when the choice carries no other
-			// signal (no finish_reason): e.g. {"delta":{"function_call":null}}
-			// reduced to {}. A delta with role/content:"" is meaningful and
-			// never reaches this branch (those fields are preserved above).
-			if len(delta) == 0 {
-				if fr, _ := choice["finish_reason"].(string); fr == "" {
-					return ""
-				}
+			finish, _ := choice["finish_reason"].(string)
+			if len(delta) > 0 || finish != "" {
+				kept = append(kept, choice)
 			}
 		}
-	}
-	if !changed {
-		return s
+		obj["choices"] = kept
+		if len(kept) == 0 {
+			if _, ok := obj["usage"]; !ok {
+				return "", nil
+			}
+		}
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return s
+		return "", newStreamIntegrity().fail("invalid_chunk")
 	}
-	return string(out)
+	return string(out), nil
 }
 
+// aggregateCompletion and aggregateQoderSSE share the SAME validator as live
+// streaming. Folding preserves independent choices instead of merging their tools.
 func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
-	var content, reasoning, role, respModel, respID, finish string
-	var created int64
-	var usage map[string]any
-	// tool_calls arrive as streaming deltas: each chunk carries an index plus a
-	// partial call (id/type/function.name on the first delta, argument text
-	// fragments afterwards). Merge by index instead of appending raw fragments
-	// so the folded completion holds whole calls.
-	toolCalls := map[int]map[string]any{}
-	var toolOrder []int
-	var scanErr error
-
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		data := stripDataPrefix(scanner.Text())
-		if data == "" || data == "[DONE]" {
-			continue
-		}
+	return aggregateIntegrityStream(r, model, false)
+}
+func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
+	return aggregateIntegrityStream(r, model, true)
+}
+func aggregateIntegrityStream(r io.Reader, model string, nested bool) ([]byte, error) {
+	type foldedChoice struct {
+		content, reasoning, role, finish string
+		tools                            []any
+	}
+	choices := map[int]*foldedChoice{}
+	meta := map[string]any{}
+	var usage any
+	err := walkIntegrityStream(r, nested, nil, func(raw string) error {
 		var chunk map[string]any
-		if json.Unmarshal([]byte(data), &chunk) != nil {
-			continue
+		if json.Unmarshal([]byte(raw), &chunk) != nil {
+			return fmt.Errorf("qoder stream integrity: invalid_fold_json (unexpected EOF)")
 		}
-		if v, ok := chunk["id"].(string); ok && v != "" {
-			respID = v
+		for k, v := range integrityMeta(chunk) {
+			meta[k] = v
 		}
-		if v, ok := chunk["model"].(string); ok && v != "" {
-			respModel = v
-		}
-		if v, ok := chunk["created"].(float64); ok {
-			created = int64(v)
-		}
-		if v, ok := chunk["usage"].(map[string]any); ok {
+		if v, ok := chunk["usage"]; ok {
 			usage = v
 		}
-		choices, _ := chunk["choices"].([]any)
-		for _, c := range choices {
-			choice, _ := c.(map[string]any)
-			if delta, ok := choice["delta"].(map[string]any); ok {
-				if v, ok := delta["role"].(string); ok && v != "" {
-					role = v
-				}
-				if v, ok := delta["content"].(string); ok {
-					content += v
-				}
-				if v, ok := delta["reasoning_content"].(string); ok {
-					reasoning += v
-				}
-				if tcs, ok := delta["tool_calls"].([]any); ok {
-					for _, tc := range tcs {
-						call, ok := tc.(map[string]any)
-						if !ok {
-							continue
-						}
-						idx := 0
-						if v, ok := call["index"].(float64); ok {
-							idx = int(v)
-						}
-						merged, seen := toolCalls[idx]
-						if !seen {
-							merged = map[string]any{"index": idx}
-							toolCalls[idx] = merged
-							toolOrder = append(toolOrder, idx)
-						}
-						mergeToolCallDelta(merged, call)
-					}
-				}
+		cs, _ := chunk["choices"].([]any)
+		for _, rc := range cs {
+			c := rc.(map[string]any)
+			idx, _ := integrityIndex(c["index"])
+			f := choices[idx]
+			if f == nil {
+				f = &foldedChoice{}
+				choices[idx] = f
 			}
-			if v, ok := choice["finish_reason"].(string); ok && v != "" {
-				finish = v
+			delta, _ := c["delta"].(map[string]any)
+			if v, ok := delta["content"].(string); ok {
+				f.content += v
+			}
+			if v, ok := delta["reasoning_content"].(string); ok {
+				f.reasoning += v
+			}
+			if v, ok := delta["role"].(string); ok {
+				f.role = v
+			}
+			if v, ok := delta["tool_calls"].([]any); ok {
+				f.tools = v
+			}
+			if v, ok := c["finish_reason"].(string); ok {
+				f.finish = v
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := scanner.Err(); err != nil {
-		scanErr = err
+	order := make([]int, 0, len(choices))
+	for i := range choices {
+		order = append(order, i)
 	}
-	// A mid-stream read failure means the folded completion is truncated. The
-	// host discards the payload entirely when the plugin returns an error
-	// (sdk/api/handlers executeWithPluginExecutor), so fail fast here instead
-	// of assembling a partial completion nobody can safely consume.
-	if scanErr != nil {
-		return nil, fmt.Errorf("upstream stream read error: %w", scanErr)
-	}
-
-	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
-	if reasoning != "" {
-		message["reasoning_content"] = reasoning
-	}
-	if len(toolOrder) > 0 {
-		sort.Ints(toolOrder)
-		calls := make([]map[string]any, 0, len(toolOrder))
-		for _, idx := range toolOrder {
-			calls = append(calls, toolCalls[idx])
+	sort.Ints(order)
+	outChoices := make([]any, 0, len(order))
+	for _, i := range order {
+		f := choices[i]
+		message := map[string]any{"role": firstNonEmpty(f.role, "assistant"), "content": f.content}
+		if f.reasoning != "" {
+			message["reasoning_content"] = f.reasoning
 		}
-		message["tool_calls"] = calls
+		if len(f.tools) > 0 {
+			message["tool_calls"] = f.tools
+		}
+		outChoices = append(outChoices, map[string]any{"index": i, "message": message, "finish_reason": f.finish})
 	}
-	if created == 0 {
-		created = time.Now().Unix()
+	if _, ok := meta["id"]; !ok {
+		meta["id"] = "chatcmpl-qoderwork"
 	}
-	result := map[string]any{
-		"id":      firstNonEmpty(respID, "chatcmpl-qoderwork"),
-		"object":  "chat.completion",
-		"created": created,
-		"model":   firstNonEmpty(respModel, model),
-		"choices": []map[string]any{{
-			"index":         0,
-			"message":       message,
-			"finish_reason": firstNonEmpty(finish, "stop"),
-		}},
+	if _, ok := meta["model"]; !ok {
+		meta["model"] = model
 	}
+	if _, ok := meta["created"]; !ok {
+		meta["created"] = time.Now().Unix()
+	}
+	meta["object"] = "chat.completion"
+	meta["choices"] = outChoices
 	if usage != nil {
-		result["usage"] = usage
+		meta["usage"] = usage
 	}
-	out, err := json.Marshal(result)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// aggregateQoderSSE folds QoderWork's nested SSE stream into a single
-// OpenAI chat.completion object. The gateway emits frames shaped:
-//
-//	data:{"headers":{...},"body":"<json-string>","statusCodeValue":200,...}
-//
-// where `body` is a JSON-encoded string that itself contains an OpenAI-style
-// chunk: {"choices":[{"delta":{...}}],...}. We unwrap the outer envelope,
-// then aggregate the inner chunks using the same logic as aggregateCompletion.
-//
-// Terminal frames: data:{"body":"[DONE]"} followed by an event:finish line
-// with timing metadata (ignored).
-//
-// Two envelope refusals are reported instead of folded: the envelope's own
-// statusCodeValue >= 400, and a body-level 4xx/5xx code ({"code":"429",...}).
-// Before 0.9.7 the outer status was never read here, so a rate-limited
-// /v1/responses call folded the error body into an empty completion — which the
-// host then classified as a credential-scoped empty_stream.
-func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
-	// Unwrap the nested SSE into an inner plain-text stream of OpenAI chunks,
-	// then delegate to aggregateCompletion. We materialise the inner stream
-	// into memory because the gateway's SSE is short-lived (one chat call)
-	// and the inner stream is at most a few hundred KB.
-	var inner strings.Builder
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		env, ok := parseUpstreamLine(line)
-		if !ok {
-			continue
-		}
-		if envStatus := upstreamEnvelopeStatus(env); envStatus >= 400 {
-			body := envelopeBodyText(env)
-			// Carry the status on the returned error so the caller's retry
-			// gate can classify it. upstreamEnvelopeError alone is a plain
-			// fmt.Errorf, which made upstreamStatusFromError return 0 and left
-			// a 10605 queue admission unretryable.
-			return nil, &statusError{status: envStatus, err: attachQuotaHeaders(upstreamEnvelopeError(envStatus, body), env.Headers)}
-		}
-		bodyStr := envelopeBodyText(env)
-		if bodyStr == "" {
-			continue
-		}
-		if bodyStr == "[DONE]" {
-			break
-		}
-		// Re-emit the inner JSON as a standard "data:<json>\n" SSE frame so
-		// aggregateCompletion's parser can consume it unchanged.
-		inner.WriteString("data:")
-		inner.WriteString(bodyStr)
-		inner.WriteString("\n\n")
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("qoder SSE read: %w", err)
-	}
-	completion, err := aggregateCompletion(strings.NewReader(inner.String()), model)
-	if err != nil {
-		return nil, err
-	}
-	return completion, nil
+	return json.Marshal(meta)
 }
 
 // mergeToolCallDelta folds one streaming tool_call fragment into the merged
